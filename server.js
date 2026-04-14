@@ -8,7 +8,7 @@ const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const PASSWORD_HASH = process.env.PASSWORD_HASH || bcrypt.hashSync(process.env.APP_PASSWORD || 'darkroom', 10);
-const IMMICH_URL = process.env.IMMICH_URL || 'http://192.168.0.199:2283/api';
+const IMMICH_URL = process.env.IMMICH_URL || 'http://localhost:2283/api';
 const IMMICH_KEY = process.env.IMMICH_KEY || '';
 const DATA_FILE = '/data/prints.json';
 
