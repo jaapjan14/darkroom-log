@@ -23,42 +23,61 @@ Built for analog photographers who want to keep track of enlarger settings, expo
 - Docker
 - [Immich](https://immich.app) instance with API access
 
+## Quick Start
+
+```bash
+docker run -d \
+  --name darkroom-log \
+  -p 3416:3000 \
+  -e APP_PASSWORD=changeme \
+  -e SESSION_SECRET=change-this-to-a-random-string \
+  -e IMMICH_URL=http://your-immich-host:2283/api \
+  -e IMMICH_KEY=your-immich-api-key \
+  -v ./data:/data \
+  jaap14/darkroom-log:latest
+```
+
+## Docker Compose
+
+```yaml
+services:
+  darkroom:
+    image: jaap14/darkroom-log:latest
+    container_name: darkroom-log
+    ports:
+      - 3416:3000
+    environment:
+      - APP_PASSWORD=changeme
+      - SESSION_SECRET=change-this-to-a-random-string
+      - IMMICH_URL=http://your-immich-host:2283/api
+      - IMMICH_KEY=your-immich-api-key
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+```
+
 ## Setup
 
 ### 1. Get your Immich API key
 
 In Immich: **Account Settings → API Keys → New API Key**
 
-### 2. Clone the repo
+### 2. Configure environment variables
 
-```bash
-git clone https://github.com/yourusername/darkroom-log.git
-cd darkroom-log
-```
+| Variable | Description |
+|----------|-------------|
+| `APP_PASSWORD` | Login password for the app |
+| `SESSION_SECRET` | Any random string for session encryption |
+| `IMMICH_URL` | Your Immich API URL e.g. `http://192.168.1.100:2283/api` |
+| `IMMICH_KEY` | Your Immich API key |
 
-### 3. Configure
+### 3. Access
 
-Edit `docker-compose.yml` and set:
-
-```yaml
-environment:
-  - APP_PASSWORD=your-password
-  - SESSION_SECRET=any-random-string
-  - IMMICH_URL=http://your-immich-host:2283/api
-  - IMMICH_KEY=your-immich-api-key
-```
-
-### 4. Run
-
-```bash
-docker compose up -d
-```
-
-Access at `http://localhost:3416`
+Open `http://localhost:3416` in your browser.
 
 ## Data
 
-Print sessions are stored in `./data/prints.json`. Back this file up — it's the only persistent data.
+Print sessions are stored in `/data/prints.json` inside the container. Map this to a host directory to persist your data across container updates.
 
 ## Workflow
 
@@ -94,6 +113,10 @@ Select **Other...** to enter any paper name.
 ## Reverse Proxy
 
 For external access, use a reverse proxy such as [Nginx Proxy Manager](https://nginxproxymanager.com) or [Caddy](https://caddyserver.com), or expose via [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/).
+
+## Docker Hub
+
+[hub.docker.com/r/jaap14/darkroom-log](https://hub.docker.com/r/jaap14/darkroom-log)
 
 ## License
 
