@@ -4,7 +4,9 @@ A self-hosted darkroom print session logger with [Immich](https://immich.app) in
 
 Built for analog photographers who want to keep track of enlarger settings, exposure times, paper choices, and dodge/burn notes alongside their scanned negatives.
 
-![Darkroom Log screenshot](screenshot.png)
+![Darkroom Log gallery view](screenshot.png)
+
+![Darkroom Log detail view](screenshot2.png)
 
 ## Features
 
