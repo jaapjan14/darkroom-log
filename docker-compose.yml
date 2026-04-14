@@ -1,0 +1,17 @@
+services:
+  darkroom:
+    image: node:20-alpine
+    container_name: darkroom-log
+    working_dir: /app
+    command: sh -c "npm install --production && node server.js"
+    ports:
+      - 3416:3000
+    environment:
+      - APP_PASSWORD=changeme
+      - SESSION_SECRET=change-this-to-a-random-string
+      - IMMICH_URL=http://your-immich-host:2283/api
+      - IMMICH_KEY=your-immich-api-key
+    volumes:
+      - ./:/app
+      - ./data:/data
+    restart: unless-stopped
