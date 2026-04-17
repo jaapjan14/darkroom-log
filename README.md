@@ -4,6 +4,8 @@ A self-hosted darkroom printing log and analog photo library, built for Immich i
 
 ![Darkroom Log Screenshot](screenshot.png)
 
+![Library View](screenshot2.png)
+
 ## Features
 
 ### Prints
@@ -14,7 +16,7 @@ A self-hosted darkroom printing log and analog photo library, built for Immich i
 
 ### Library
 - Browse your full Immich photo library
-- Sort by upload date or date taken
+- Sort by upload date or date taken (ascending/descending)
 - Text search and CLIP smart search
 - Filter chips: camera, lens, location, people
 - Select mode with shift-click range selection
