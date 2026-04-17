@@ -1,123 +1,100 @@
 # Darkroom Log
 
-A self-hosted darkroom print session logger with [Immich](https://immich.app) integration.
+A self-hosted darkroom printing log and analog photo library, built for Immich integration.
 
-Built for analog photographers who want to keep track of enlarger settings, exposure times, paper choices, and dodge/burn notes alongside their scanned negatives.
-
-![Darkroom Log gallery view](screenshot.png)
-
-![Darkroom Log detail view](screenshot2.png)
+![Darkroom Log Screenshot](screenshot.png)
 
 ## Features
 
-- **Immich integration** — search your Immich library to link prints to scans
-- **Per-image print sessions** — log multiple print sessions per negative
-- **Single grade & split grade** — supports both printing techniques with editable grade labels
-- **Camera & film metadata** — pulls EXIF and description from Immich automatically
-- **Mobile-friendly** — designed to be used on your phone in the darkroom
-- **Password protected** — single password authentication
-- **Self-hosted** — all data stored locally in a JSON file
+### Prints
+- Log darkroom print sessions with exposure data, paper, technique, notes
+- Split-grade and single-grade workflow support
+- Tag filtering and session history per print
+- Link prints to Immich photos via EXIF search
+
+### Library
+- Browse your full Immich photo library
+- Sort by upload date or date taken
+- Text search and CLIP smart search
+- Filter chips: camera, lens, location, people
+- Select mode with shift-click range selection
+
+### Albums
+- Create curated albums from your Immich library
+- Drag-to-reorder photos
+- Select and download originals with original filenames
+- Shareable public links
+
+### Slideshow
+- Ken Burns slideshow with smooth crossfades
+- Title card with byline and photo count
+- Background music support (drop MP3s in `/music`)
+- Description overlay, fullscreen, auto-hide controls
+
+### Public Album Embed
+- Public album page (`/album/:slug`) — no login required
+- Cinematic hero banner with play button
+- Embed in Squarespace, Webflow, or any iframe
+- Safari and mobile compatible
+
+## Security
+- A+ security score (115/100, 10/10 tests)
+- CSP: no `unsafe-inline` in script-src
+- External JS with comprehensive event delegation
+- Login rate limiting (10 attempts / 15 min per IP)
+- HSTS, Referrer-Policy, X-Frame-Options, Permissions-Policy
 
 ## Requirements
 
-- Docker
 - [Immich](https://immich.app) instance with API access
+- Docker + Docker Compose
 
 ## Quick Start
 
 ```bash
-docker run -d \
-  --name darkroom-log \
-  -p 3416:3000 \
-  -e APP_PASSWORD=changeme \
-  -e SESSION_SECRET=change-this-to-a-random-string \
-  -e IMMICH_URL=http://your-immich-host:2283/api \
-  -e IMMICH_KEY=your-immich-api-key \
-  -v ./data:/data \
-  jaap14/darkroom-log:latest
+git clone https://github.com/jaapjan14/darkroom-log
+cd darkroom-log
+cp docker-compose.yml docker-compose.override.yml
+# Edit docker-compose.override.yml with your settings
+docker compose up -d
 ```
 
-## Docker Compose
-
-```yaml
-services:
-  darkroom:
-    image: jaap14/darkroom-log:latest
-    container_name: darkroom-log
-    ports:
-      - 3416:3000
-    environment:
-      - APP_PASSWORD=changeme
-      - SESSION_SECRET=change-this-to-a-random-string
-      - IMMICH_URL=http://your-immich-host:2283/api
-      - IMMICH_KEY=your-immich-api-key
-    volumes:
-      - ./data:/data
-    restart: unless-stopped
-```
-
-## Setup
-
-### 1. Get your Immich API key
-
-In Immich: **Account Settings → API Keys → New API Key**
-
-### 2. Configure environment variables
+## Configuration
 
 | Variable | Description |
-|----------|-------------|
-| `APP_PASSWORD` | Login password for the app |
-| `SESSION_SECRET` | Any random string for session encryption |
-| `IMMICH_URL` | Your Immich API URL e.g. `http://192.168.1.100:2283/api` |
-| `IMMICH_KEY` | Your Immich API key |
+|---|---|
+| `APP_PASSWORD` | Login password |
+| `SESSION_SECRET` | Random secret for session signing |
+| `IMMICH_URL` | Immich API URL e.g. `http://192.168.0.10:2283/api` |
+| `IMMICH_KEY` | Immich API key |
 
-### 3. Access
+## Volumes
 
-Open `http://localhost:3416` in your browser.
+| Path | Description |
+|---|---|
+| `/data` | Prints database and filter cache |
+| `/music` | MP3 files for slideshow music (optional) |
 
-## Data
+## Music
 
-Print sessions are stored in `/data/prints.json` inside the container. Map this to a host directory to persist your data across container updates.
+Drop MP3s (or folders of MP3s) into the `/music` volume. They'll appear in the slideshow settings dropdown automatically.
 
-## Workflow
+## Public Album Embed
 
-1. Make a print in the darkroom
-2. During the wash, open Darkroom Log on your phone
-3. Search for the negative in Immich
-4. Log the session — enlarger, lens, paper, exposure, dodge/burn notes
-5. Next session, pull up the print to see what worked last time
+```html
+<iframe 
+  src="https://your-darkroom.domain/album/your-album-slug?embed"
+  width="100%" 
+  height="350px" 
+  frameborder="0"
+  allowfullscreen>
+</iframe>
+```
 
-## Session Fields
+## Changelog
 
-- **Date** — auto-fills to today
-- **Print size** — e.g. `9x6`, `11x14`
-- **Enlarger** — enlarger number
-- **Lens** — enlarger lens designation
-- **Paper** — dropdown with common papers + custom entry
-- **Technique** — Single Grade or Split Grade
-- **Single grade** — f/stop, grade/filter, time
-- **Split grade** — f/stop, low grade (highlights) + time, high grade (shadows) + time
-- **Dodge/burn notes** — free text
-- **Additional notes** — free text
+See [CHANGELOG.md](CHANGELOG.md)
 
-## Paper Dropdown
+## Credits
 
-Default papers included:
-- Fomabrom Variant 111 Glossy
-- Ilford Multigrade FB Classic Glossy
-- Ilford Multigrade FB Warmtone Glossy
-- Ilford Multigrade RC Deluxe
-
-Select **Other...** to enter any paper name.
-
-## Reverse Proxy
-
-For external access, use a reverse proxy such as [Nginx Proxy Manager](https://nginxproxymanager.com) or [Caddy](https://caddyserver.com), or expose via [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/).
-
-## Docker Hub
-
-[hub.docker.com/r/jaap14/darkroom-log](https://hub.docker.com/r/jaap14/darkroom-log)
-
-## License
-
-MIT
+Built by [JJ Lakatua](https://lakatua.me) — analog photographer, homelab enthusiast.
