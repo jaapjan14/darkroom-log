@@ -99,4 +99,6 @@ See [CHANGELOG.md](CHANGELOG.md)
 
 ## Credits
 
-Built by [JJ Lakatua](https://lakatua.me) — analog photographer, homelab enthusiast.
+Designed and maintained by [JJ Lakatua](https://lakatua.me) — analog photographer and homelab enthusiast — in collaboration with [Claude](https://claude.ai) by Anthropic.
+
+This project was built through an ongoing human-AI collaboration. JJ provided the vision, domain expertise, testing, and direction. Claude assisted with architecture, implementation, and debugging across multiple sessions.
