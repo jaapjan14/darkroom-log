@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <title>Darkroom Log</title>
-<link rel="icon" type="image/png" href="/favicon.png"><link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="icon" type="image/png" href="/favicon.png"><link rel="apple-touch-icon" href="/apple-touch-icon.png"><link rel="manifest" href="/manifest.json"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black"><meta name="apple-mobile-web-app-title" content="Darkroom Log"><meta name="theme-color" content="#0a0a0a">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
 <style>
@@ -23,11 +23,17 @@
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: var(--bg); color: var(--text); font-family: 'IBM Plex Sans', sans-serif; font-size: 14px; min-height: 100vh; line-height: 1.5; }
-  .container { max-width: 720px; margin: 0 auto; }
+  .container { max-width: 100%; margin: 0 auto; }
   #login-screen { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 2rem; }
   .login-box { width: 100%; max-width: 320px; }
   .login-title { font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.2em; text-transform: uppercase; color: var(--safe); margin-bottom: 2rem; text-align: center; }
   .login-title span { display: block; font-size: 22px; letter-spacing: 0.05em; color: var(--text); margin-top: 0.5rem; font-weight: 300; }
+  .ss-toggle { display:flex; align-items:center; gap:0.6rem; margin-bottom:0.6rem; cursor:pointer; }
+  .ss-toggle-box { width:36px; height:20px; background:var(--border); border:1px solid var(--border); position:relative; flex-shrink:0; transition:background 0.2s; }
+  .ss-toggle-box.on { background:var(--safe); border-color:var(--safe); }
+  .ss-toggle-box::after { content:''; position:absolute; top:2px; left:2px; width:14px; height:14px; background:#fff; transition:left 0.2s; }
+  .ss-toggle-box.on::after { left:18px; }
+  .ss-toggle-label { font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--text-mid); }
   input, select, textarea { width: 100%; background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 0.75rem 1rem; font-family: 'IBM Plex Mono', monospace; font-size: 13px; outline: none; border-radius: 0; -webkit-appearance: none; transition: border-color 0.2s; }
   input:focus, select:focus, textarea:focus { border-color: var(--safe); }
   textarea { resize: vertical; min-height: 80px; }
@@ -49,10 +55,10 @@
   .header-actions { display: flex; gap: 0.5rem; align-items: center; }
   .view { display: none; }
   .view.active { display: block; }
-  .gallery-toolbar { padding: 1rem; border-bottom: 1px solid var(--border); display: flex; gap: 0.5rem; max-width: 720px; margin: 0 auto; }
+  .gallery-toolbar { padding: 1rem; border-bottom: 1px solid var(--border); display: flex; gap: 0.5rem; max-width: 1200px; margin: 0 auto; }
   .gallery-toolbar input { flex: 1; }
-  .gallery-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1px; background: var(--border); max-width: 720px; margin: 0 auto; }
-  @media (min-width: 600px) { .gallery-grid { grid-template-columns: repeat(3, 1fr); } }
+  .gallery-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--border); max-width: 1200px; margin: 0 auto; }
+  @media (min-width: 600px) { .gallery-grid { grid-template-columns: repeat(5, 1fr); } }
   .gallery-item { background: var(--surface); cursor: pointer; position: relative; aspect-ratio: 1; overflow: hidden; }
   .gallery-item img { width: 100%; height: 100%; object-fit: cover; opacity: 0.85; transition: opacity 0.2s; }
   .gallery-item:hover img { opacity: 1; }
@@ -103,11 +109,103 @@
   .technique-btn.active { background: var(--safe-glow); border-color: var(--safe); color: var(--safe); }
   .split-grade-fields, .single-grade-fields { display: none; }
   .split-grade-fields.visible, .single-grade-fields.visible { display: block; }
+  /* SORT & TAGS */
+  .gallery-controls { max-width: 720px; margin: 0 auto; border-bottom: 1px solid var(--border); }
+  .sort-bar { padding: 0.75rem 1rem; display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
+  .sort-label { font-family: 'IBM Plex Mono', monospace; font-size: 9px; letter-spacing: 0.15em; text-transform: uppercase; color: var(--text-dim); margin-right: 0.25rem; }
+  .sort-btn { font-family: 'IBM Plex Mono', monospace; font-size: 10px; padding: 0.3rem 0.6rem; background: transparent; border: 1px solid var(--border); color: var(--text-dim); cursor: pointer; transition: all 0.15s; }
+  .sort-btn.active { border-color: var(--safe); color: var(--safe); background: var(--safe-glow); }
+  .tag-filter-bar { padding: 0.5rem 1rem 0.75rem; display: flex; gap: 0.4rem; flex-wrap: wrap; }
+  .tag-filter { font-family: 'IBM Plex Mono', monospace; font-size: 11px; padding: 0.4rem 0.9rem; background: var(--surface2); border: 1px solid var(--border); color: var(--text-mid); cursor: pointer; transition: all 0.15s; }
+  .tag-filter.active { border-color: var(--safe); color: var(--safe); background: var(--safe-glow); }
+  /* PRINT TAGS in detail view */
+  .print-tags-row { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.75rem; align-items: center; }
+  .print-tag { font-family: 'IBM Plex Mono', monospace; font-size: 10px; padding: 0.2rem 0.5rem; background: var(--surface2); border: 1px solid var(--border); color: var(--text-dim); }
+  .tag-add-input { font-family: 'IBM Plex Mono', monospace; font-size: 10px; padding: 0.2rem 0.5rem; width: 120px; display: none; }
+  .tag-add-input.visible { display: inline-block; }
+  /* SELECTION MODE */
+  .gallery-item.selectable { cursor: pointer; }
+  .gallery-item.selected img { opacity: 0.6; }
+  .gallery-item.selected { outline: 2px solid var(--safe); }
+  .select-check { position: absolute; top: 6px; left: 6px; width: 22px; height: 22px; background: rgba(0,0,0,0.5); border: 1px solid #555; color: transparent; font-size: 13px; display: flex; align-items: center; justify-content: center; border-radius: 50%; }
+  .select-check.checked { background: var(--safe); border-color: var(--safe); color: #fff; }
+  /* TABS */
+  .tab-bar { background: var(--surface); border-bottom: 1px solid var(--border); display: flex; max-width: 100%; }
+  .tab-bar-inner { max-width: 720px; margin: 0 auto; width: 100%; display: flex; }
+  .tab-btn { font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.15em; text-transform: uppercase; padding: 0.75rem 1.5rem; background: none; border: none; color: var(--text-dim); cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.15s; }
+  .tab-btn.active { color: var(--safe); border-bottom-color: var(--safe); }
+  /* RECENT VIEW */
+  .recent-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--border); max-width: 1200px; margin: 0 auto; }
+  @media (min-width: 600px) { .recent-grid { grid-template-columns: repeat(5, 1fr); } }
+  .recent-load-more { max-width: 720px; margin: 0 auto; padding: 1rem; }
+  /* RECENT DETAIL */
+  .recent-detail-meta { padding: 1rem; border-bottom: 1px solid var(--border); background: var(--surface); }
+  .recent-detail-title { font-size: 13px; font-family: 'IBM Plex Mono', monospace; color: var(--text-mid); margin-bottom: 0.5rem; }
+  /* EXIF TABLE */
+  .exif-table { width: 100%; margin-top: 0.75rem; }
+  .exif-row-item { display: flex; align-items: flex-start; padding: 0.4rem 0; border-bottom: 1px solid var(--border); gap: 1rem; }
+  .exif-row-item:last-child { border-bottom: none; }
+  .exif-row-icon { color: var(--text-dim); font-size: 14px; width: 20px; flex-shrink: 0; padding-top: 2px; }
+  .exif-row-label { font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-dim); width: 90px; flex-shrink: 0; padding-top: 2px; }
+  .exif-row-value { font-family: 'IBM Plex Mono', monospace; font-size: 15px; color: var(--text); flex: 1; }
+  .exif-row-sub { font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+  /* NAV ARROWS */
+  .recent-nav-bar { display: flex; gap: 0.5rem; padding: 0.75rem 1rem; border-bottom: 1px solid var(--border); }
+  .nav-arrow { background: var(--surface2); border: 1px solid var(--border); color: var(--text-mid); font-size: 16px; width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all 0.15s; }
+  .nav-arrow:hover { border-color: var(--safe); color: var(--safe); background: var(--safe-glow); }
+  /* ALBUMS */
+  .albums-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1px; background: var(--border); max-width: 1200px; margin: 0 auto; }
+  @media (min-width: 600px) { .albums-grid { grid-template-columns: repeat(4, 1fr); } }
+  .album-item { background: var(--surface); cursor: pointer; position: relative; aspect-ratio: 1; overflow: hidden; }
+  .album-item img { width: 100%; height: 100%; object-fit: cover; opacity: 0.75; transition: opacity 0.2s; }
+  .album-item:hover img { opacity: 1; }
+  .album-item-info { position: absolute; bottom: 0; left: 0; right: 0; background: linear-gradient(transparent, rgba(0,0,0,0.9)); padding: 1.5rem 0.75rem 0.75rem; }
+  .album-item-title { font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: #fff; }
+  .album-item-count { font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--safe); margin-top: 2px; }
+  .album-item-empty { background: var(--surface2); display: flex; align-items: center; justify-content: center; }
+  .album-photo-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--border); max-width: 1200px; margin: 0 auto; }
+  @media (min-width: 600px) { .album-photo-grid { grid-template-columns: repeat(5, 1fr); } }
+  .album-photo-item { position: relative; aspect-ratio: 1; overflow: hidden; background: var(--surface); }
+  .album-photo-item img { width: 100%; height: 100%; object-fit: cover; cursor: pointer; }
+  .album-photo-remove { position: absolute; top: 4px; right: 4px; background: rgba(0,0,0,0.7); border: none; color: #fff; width: 22px; height: 22px; font-size: 14px; cursor: pointer; display: none; align-items: center; justify-content: center; border-radius: 50%; }
+  .album-edit-mode .album-photo-remove { display: flex; }
+  .album-toolbar { max-width: 1200px; margin: 0 auto; padding: 0.75rem 1rem; display: flex; gap: 0.5rem; align-items: center; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .album-empty { padding: 3rem 1rem; text-align: center; color: var(--text-dim); font-family: 'IBM Plex Mono', monospace; font-size: 12px; }
+  /* SLIDESHOW */
+  .slideshow-overlay { display: none; position: fixed; inset: 0; background: #000; z-index: 400; overflow: hidden; }
+  .slideshow-overlay.active { display: block; }
+  .slideshow-slide { position: absolute; inset: 0; overflow: hidden; opacity: 0; transition: opacity 1.5s ease-in-out; }
+  .slideshow-slide.ss-visible { opacity: 1; }
+  .slideshow-slide .ss-bg { position: absolute; inset: -20px; background-size: cover; background-position: center; filter: blur(20px) brightness(0.35); transform: scale(1.1); }
+  .slideshow-slide .ss-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; transform-origin: center center; }
+  .slideshow-slide.ss-visible .ss-img { animation: kenburns 8s ease-in-out forwards; }
+  @keyframes kenburns {
+    0%   { transform: var(--kb-start); }
+    100% { transform: var(--kb-end); }
+  }
+  .slideshow-controls { position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%); display: flex; gap: 1rem; z-index: 401; transition: opacity 0.5s; }
+  .slideshow-controls.ss-hidden { opacity: 0; pointer-events: none; }
+  .slideshow-counter { position: fixed; top: 1rem; right: 1rem; font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: rgba(255,255,255,0.5); z-index: 401; transition: opacity 0.5s; }
+  .slideshow-counter.ss-hidden { opacity: 0; }
+  .ss-title-main { font-family: 'IBM Plex Mono', monospace; font-size: 64px; letter-spacing: 0.25em; text-transform: uppercase; color: #c8611a; font-weight: 300; line-height: 1.2; }
+  .ss-title-sub { font-family: 'IBM Plex Mono', monospace; font-size: 14px; letter-spacing: 0.2em; text-transform: uppercase; color: #6b6560; margin-bottom: 0.25rem; }
+  /* PUBLIC SHARE */
+  .share-link-box { background: var(--surface2); border: 1px solid var(--border); padding: 0.75rem 1rem; font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--safe); word-break: break-all; cursor: pointer; }
+  /* FULLSCREEN */
+  .fullscreen-overlay { display: none; position: fixed; inset: 0; background: #000; z-index: 300; cursor: zoom-out; }
+  .fullscreen-overlay.active { display: flex; align-items: center; justify-content: center; }
+  .fullscreen-overlay img { max-width: 100%; max-height: 100%; object-fit: contain; }
+  /* MAP */
+  .exif-map { display: none; }
+  /* LARGER PHOTO ON DESKTOP */
+  @media (min-width: 600px) {
+    #recent-detail-content .detail-layout { grid-template-columns: 4fr 1.5fr; }
+  }
   .detail-layout { display: block; }
   @media (min-width: 600px) {
     .detail-layout { display: grid; grid-template-columns: 3fr 2fr; min-height: calc(100vh - 52px); }
-    .detail-left { position: sticky; top: 52px; height: calc(100vh - 52px); }
-    .detail-image { width: 100%; height: 100%; max-height: none; object-fit: contain; object-position: top center; background: #000; }
+    .detail-left { position: sticky; top: 52px; height: calc(100vh - 52px); display: flex; align-items: center; justify-content: center; overflow: hidden; background: #000; }
+    .detail-image { max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; display: block; }
     .detail-right { overflow-y: auto; border-left: 1px solid var(--border); }
   }
 </style>
@@ -120,7 +218,7 @@
     <div class="form-group">
       <input type="password" id="login-password" placeholder="Password" autofocus>
     </div>
-    <button class="btn" onclick="login()">Enter</button>
+    <button class="btn" id="btn-login" >Enter</button>
     <div class="error-msg" id="login-error"></div>
   </div>
 </div>
@@ -129,22 +227,124 @@
   <div class="header">
     <div class="header-inner">
       <div style="display:flex;align-items:center;gap:1rem">
-        <button class="nav-back" id="back-btn" onclick="showGallery()" style="display:none">← Back</button>
+        <button class="nav-back" id="back-btn"  style="display:none">← Back</button>
         <div class="header-title" id="header-title">Darkroom Log</div>
       </div>
       <div class="header-actions">
-        <button class="btn btn-ghost btn-sm" id="add-print-btn" onclick="openAddPrintModal()">+ Print</button>
-        <button class="btn btn-ghost btn-sm" onclick="logout()">Out</button>
+        <button class="btn btn-ghost btn-sm" id="add-print-btn" >+ Print</button>
+        <button class="btn btn-ghost btn-sm" id="btn-logout" >Out</button>
       </div>
+    </div>
+  </div>
+
+  <div class="tab-bar">
+    <div class="tab-bar-inner">
+      <button class="tab-btn active" id="tab-prints" >Prints</button>
+      <button class="tab-btn" id="tab-recent" >Library</button>
+      <button class="tab-btn" id="tab-albums" >Albums</button>
     </div>
   </div>
 
   <div class="view active" id="gallery-view">
     <div class="gallery-toolbar">
-      <input type="text" placeholder="Search prints..." id="gallery-search" oninput="filterGallery(this.value)">
+      <input type="text" placeholder="Search prints..." id="gallery-search" >
+    </div>
+    <div class="gallery-controls">
+      <div class="sort-bar">
+        <span class="sort-label">Sort</span>
+        <button class="sort-btn active" id="sort-recent"  id="sort-recent">Recent</button>
+        <button class="sort-btn" id="sort-oldest"  id="sort-oldest">Oldest</button>
+        <button class="sort-btn" id="sort-title"  id="sort-title">Title A→Z</button>
+        <button class="sort-btn" id="sort-sessions"  id="sort-sessions">Most Sessions</button>
+      </div>
     </div>
     <div class="gallery-grid" id="gallery-grid">
       <div class="loading">Loading...</div>
+    </div>
+    <div class="tag-filter-bar" id="tag-filter-bar" style="max-width:720px;margin:0 auto;padding:1rem;"></div>
+  </div>
+
+  <div class="view" id="recent-view">
+    <div style="max-width:1200px;margin:0 auto;padding:0.75rem 1rem;border-bottom:1px solid var(--border);display:flex;gap:0.5rem;align-items:center">
+      <input type="text" id="recent-search" placeholder="Search..." style="flex:1;font-size:13px" >
+      <button class="sort-btn" id="search-mode-text"  style="white-space:nowrap">Text</button>
+      <button class="sort-btn active" id="search-mode-smart"  style="white-space:nowrap">✦ Smart</button>
+      <button class="btn btn-ghost btn-sm" id="select-mode-btn" >Select</button>
+      <div id="select-actions" style="display:none;gap:0.5rem;align-items:center">
+        <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--text-dim)" id="select-count">0 selected</span>
+        <button class="btn btn-ghost btn-sm" id="btn-add-selection-album" >+ Album</button>
+        <button class="btn btn-danger btn-sm" id="btn-exit-select" >✕ Done</button>
+      </div>
+    </div>
+    <div style="max-width:1200px;margin:0 auto;padding:0.4rem 1rem;display:flex;gap:0.4rem;align-items:center;border-bottom:1px solid var(--border)">
+      <span class="sort-label">Sort</span>
+      <button class="sort-btn active" id="lib-sort-upload" >Upload Date</button>
+      <button class="sort-btn" id="lib-sort-taken" >Date Taken</button>
+
+      <button class="sort-btn" id="lib-sort-dir"  style="margin-left:0.5rem">↓ Newest</button>
+    </div>
+    <div style="max-width:1200px;margin:0 auto;padding:0.25rem 1rem;display:flex;gap:0.5rem;align-items:center;position:relative">
+      <button class="sort-btn" id="filters-btn"  style="font-size:10px">⊞ Filters</button>
+      <span id="active-chip-label" style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--safe)"></span>
+      <div id="recent-filter-popup" style="display:none;position:absolute;top:2rem;left:0;background:var(--surface);border:1px solid var(--border);padding:1rem;z-index:50;min-width:320px;max-width:500px;max-height:60vh;overflow-y:auto">
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--text-dim);margin-bottom:0.5rem">Camera</div>
+        <div id="chip-cameras" style="display:flex;flex-wrap:wrap;gap:0.4rem;margin-bottom:0.75rem"></div>
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--text-dim);margin-bottom:0.5rem">Lens</div>
+        <div id="chip-lenses" style="display:flex;flex-wrap:wrap;gap:0.4rem;margin-bottom:0.75rem"></div>
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--text-dim);margin-bottom:0.5rem">Location</div>
+        <div id="chip-cities" style="display:flex;flex-wrap:wrap;gap:0.4rem;margin-bottom:0.75rem"></div>
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--text-dim);margin-bottom:0.5rem">People</div>
+        <div id="chip-people" style="display:flex;flex-wrap:wrap;gap:0.4rem"></div>
+        <div style="margin-top:0.75rem;text-align:right">
+          <button class="btn btn-ghost btn-sm" id="btn-clear-chips">Clear</button>
+          <button class="btn btn-sm" id="filters-done-btn">Done</button>
+        </div>
+      </div>
+    </div>
+    <div class="gallery-grid" id="recent-grid">
+      <div class="loading">Loading...</div>
+    </div>
+    <div class="recent-load-more">
+      <button class="btn btn-ghost" id="load-more-btn"  style="display:none">Load More</button>
+    </div>
+  </div>
+
+  <div class="view" id="recent-detail-view">
+    <div id="recent-detail-content"></div>
+  </div>
+
+  <!-- Albums list view -->
+  <div class="view" id="albums-view">
+    <div class="album-toolbar">
+      <button class="btn btn-ghost btn-sm" id="btn-create-album" >+ Album</button>
+    </div>
+    <div class="albums-grid" id="albums-grid">
+      <div class="loading">Loading...</div>
+    </div>
+  </div>
+
+  <!-- Single album view -->
+  <div class="view" id="album-detail-view">
+    <div class="album-toolbar" id="album-toolbar"></div>
+    <div class="album-photo-grid" id="album-photo-grid"></div>
+  </div>
+
+  <!-- Slideshow overlay -->
+  <div class="slideshow-overlay" id="slideshow-overlay" >
+    <div id="ss-title-card" style="display:none;position:absolute;inset:0;z-index:10;flex-direction:column;align-items:center;justify-content:center;opacity:0;transition:opacity 1s ease-in-out;pointer-events:none;background:#0a0a0a">
+      <div id="ss-title-card-content" style="text-align:center;padding:2rem;max-width:600px"></div>
+    </div>
+    <div id="slideshow-slide-a" class="slideshow-slide"></div>
+    <div id="slideshow-slide-b" class="slideshow-slide"></div>
+    <div class="slideshow-counter" id="slideshow-counter"></div>
+    <div id="slideshow-description" style="position:fixed;bottom:4rem;left:50%;transform:translateX(-50%);font-family:'IBM Plex Mono',monospace;font-size:12px;color:rgba(255,255,255,0.7);text-align:center;max-width:80vw;padding:0 2rem;z-index:401;transition:opacity 0.5s;pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></div>
+    <div class="slideshow-controls">
+      <button class="nav-arrow" id="btn-ss-prev" >‹</button>
+      <button class="nav-arrow" id="slideshow-pause-btn"  id="slideshow-pause-btn">❚❚</button>
+      <button class="nav-arrow" id="slideshow-desc-btn"  id="slideshow-desc-btn" title="Toggle description">✦</button>
+      <button class="nav-arrow" id="slideshow-music-btn"  id="slideshow-music-btn" title="Toggle music">♪</button>
+      <button class="nav-arrow" id="btn-ss-next" >›</button>
+      <button class="nav-arrow" id="btn-ss-close" >✕</button>
     </div>
   </div>
 
@@ -153,24 +353,106 @@
   </div>
 </div>
 
+<!-- Create Album Modal -->
+<div class="modal-overlay" id="slideshow-settings-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title">Slideshow Settings</div>
+      <button class="modal-close" id="btn-ss-modal-close">×</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--text-dim);margin-bottom:0.75rem">Title Card</div>
+      <div class="ss-toggle" id="toggle-show-title">
+        <div class="ss-toggle-box" id="ss-show-title"></div>
+        <span class="ss-toggle-label">Show title card</span>
+      </div>
+      <div id="ss-title-options" style="display:none;padding-left:1.5rem;margin-bottom:1rem">
+        <div class="form-group">
+          <div class="form-label">Photography by</div>
+          <input type="text" id="ss-byline" placeholder="e.g. JJ Lakatua">
+        </div>
+        <div class="ss-toggle" id="toggle-show-location">
+          <div class="ss-toggle-box" id="ss-show-location"></div>
+          <span class="ss-toggle-label">Show location</span>
+        </div>
+        <div class="ss-toggle" id="toggle-show-dates">
+          <div class="ss-toggle-box" id="ss-show-dates"></div>
+          <span class="ss-toggle-label">Show date range</span>
+        </div>
+        <div class="ss-toggle" id="toggle-show-count">
+          <div class="ss-toggle-box" id="ss-show-count"></div>
+          <span class="ss-toggle-label">Show photo count</span>
+        </div>
+      </div>
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--text-dim);margin-bottom:0.75rem;margin-top:0.5rem">Music</div>
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--text-dim);margin-bottom:0.4rem">Drop MP3s into /data/music on the NAS to add tracks</div>
+      <select id="ss-music-select" style="margin-bottom:0.5rem">
+        <option value="">No music</option>
+      </select>
+      <div style="margin-top:1.5rem;display:flex;gap:0.5rem;justify-content:flex-end">
+        <button class="btn btn-ghost btn-sm" id="btn-ss-modal-cancel">Cancel</button>
+        <button class="btn btn-sm" id="btn-ss-start" >▶ Start</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="create-album-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title">New Album</div>
+      <button class="modal-close" id="btn-close-create-album">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">Album Title</label>
+        <input type="text" id="new-album-title" placeholder="e.g. Seattle 2026">
+      </div>
+      <button class="btn" id="btn-create-album-confirm" >Create Album</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add to Album Modal -->
+<div class="modal-overlay" id="add-to-album-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title">Add to Album</div>
+      <button class="modal-close" id="btn-close-add-album">×</button>
+    </div>
+    <div class="modal-body">
+      <div id="album-pick-list" style="margin-bottom:1rem"></div>
+      <div style="display:flex;gap:0.5rem">
+        <input type="text" id="quick-album-name" placeholder="Or create new album...">
+        <button class="btn btn-ghost btn-sm" id="btn-quick-create-add"  style="white-space:nowrap">+ Create</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Fullscreen overlay -->
+<div class="fullscreen-overlay" id="fullscreen-overlay" >
+  <img id="fullscreen-img" src="">
+</div>
+
 <!-- Add Print Modal -->
 <div class="modal-overlay" id="add-print-modal">
   <div class="modal">
     <div class="modal-header">
       <div class="modal-title">Add Print</div>
-      <button class="modal-close" onclick="closeModal('add-print-modal')">×</button>
+      <button class="modal-close" id="btn-close-add-print">×</button>
     </div>
     <div class="modal-body">
       <div class="form-group">
         <label class="form-label">Search Negative (Immich)</label>
-        <input type="text" id="immich-search" placeholder="Filename or keyword..." oninput="searchImmich(this.value)">
+        <input type="text" id="immich-search" placeholder="Filename or keyword..." id="immich-search-input">
         <div id="immich-results" style="margin-top:0.5rem"></div>
       </div>
       <div class="form-group">
         <label class="form-label">Print Title</label>
         <input type="text" id="print-title" placeholder="e.g. Gas Works">
       </div>
-      <button class="btn" onclick="createPrint()" style="margin-top:0.5rem">Create Print Entry</button>
+      <button class="btn" id="btn-create-print"  style="margin-top:0.5rem">Create Print Entry</button>
     </div>
   </div>
 </div>
@@ -180,7 +462,7 @@
   <div class="modal">
     <div class="modal-header">
       <div class="modal-title" id="session-modal-title">Log Print Session</div>
-      <button class="modal-close" onclick="closeModal('add-session-modal')">×</button>
+      <button class="modal-close" id="btn-close-add-session">×</button>
     </div>
     <div class="modal-body">
       <div class="form-row">
@@ -205,7 +487,7 @@
       </div>
       <div class="form-group">
         <label class="form-label">Paper</label>
-        <select id="s-paper" onchange="handlePaperChange(this)">
+        <select id="s-paper" id="select-paper">
           <option value="">Select paper...</option>
           <option value="Fomabrom Variant 111 Glossy">Fomabrom Variant 111 Glossy</option>
           <option value="Ilford Multigrade FB Classic Glossy">Ilford Multigrade FB Classic Glossy</option>
@@ -219,19 +501,19 @@
       <div class="form-group">
         <label class="form-label">Technique</label>
         <div class="technique-toggle">
-          <div class="technique-btn active" onclick="setTechnique('single')" id="t-single">Single Grade</div>
-          <div class="technique-btn" onclick="setTechnique('split')" id="t-split">Split Grade</div>
+          <div class="technique-btn active" id="t-single">Single Grade</div>
+          <div class="technique-btn" id="t-split">Split Grade</div>
         </div>
       </div>
       <div class="single-grade-fields visible" id="single-fields">
         <div class="form-row">
           <div class="form-group">
             <label class="form-label">f/Stop</label>
-            <input type="text" id="s-fstop" placeholder="8" oninput="autoPrefixF(this)">
+            <input type="text" id="s-fstop" placeholder="8" class="input-aperture">
           </div>
           <div class="form-group">
             <label class="form-label">Grade / Filter</label>
-            <input type="text" id="s-grade" placeholder="1.5" oninput="autoPrefixHash(this)">
+            <input type="text" id="s-grade" placeholder="1.5" class="input-hash">
           </div>
         </div>
         <div class="form-group">
@@ -247,7 +529,7 @@
         <div class="form-row">
           <div class="form-group">
             <label class="form-label">Low Grade (highlights)</label>
-            <input type="text" id="s-grade-low" placeholder="00" oninput="autoPrefixHash(this)">
+            <input type="text" id="s-grade-low" placeholder="00" class="input-hash">
           </div>
           <div class="form-group">
             <label class="form-label">Low Grade Time (s)</label>
@@ -257,7 +539,7 @@
         <div class="form-row">
           <div class="form-group">
             <label class="form-label">High Grade (shadows)</label>
-            <input type="text" id="s-grade-high" placeholder="5" oninput="autoPrefixHash(this)">
+            <input type="text" id="s-grade-high" placeholder="5" class="input-hash">
           </div>
           <div class="form-group">
             <label class="form-label">High Grade Time (s)</label>
@@ -273,357 +555,15 @@
         <label class="form-label">Additional Notes</label>
         <textarea id="s-notes" placeholder="Any other observations..."></textarea>
       </div>
-      <button class="btn" onclick="saveSession()" style="margin-top:0.5rem">Save Session</button>
+      <button class="btn" id="btn-save-session"  style="margin-top:0.5rem">Save Session</button>
     </div>
   </div>
 </div>
 
+<script src="/app.js?v=3" defer></script>
 <script>
-let state = {
-  prints: [],
-  currentPrintId: null,
-  selectedImmich: null,
-  technique: 'single',
-  editingSessionId: null,
-  immichSearchTimeout: null
-};
-
-async function login() {
-  const pw = document.getElementById('login-password').value;
-  const r = await fetch('/api/login', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({password: pw}) });
-  if (r.ok) {
-    document.getElementById('login-screen').style.display = 'none';
-    document.getElementById('app').style.display = 'block';
-    loadGallery();
-  } else {
-    document.getElementById('login-error').textContent = 'Incorrect password';
-  }
-}
-
-async function logout() { await fetch('/api/logout', {method:'POST'}); location.reload(); }
-document.getElementById('login-password').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
-
-(async () => {
-  const r = await fetch('/api/auth/check');
-  const d = await r.json();
-  if (d.authenticated) {
-    document.getElementById('login-screen').style.display = 'none';
-    document.getElementById('app').style.display = 'block';
-    loadGallery();
-  }
-})();
-
-async function loadGallery() {
-  const r = await fetch('/api/prints');
-  state.prints = await r.json();
-  renderGallery(state.prints);
-}
-
-function renderGallery(prints) {
-  const grid = document.getElementById('gallery-grid');
-  if (!prints.length) { grid.innerHTML = '<div class="gallery-empty">No prints yet.<br>Tap + Print to add one.</div>'; return; }
-  grid.innerHTML = prints.map(p => `
-    <div class="gallery-item" onclick="showDetail('${p.id}')">
-      <img src="/api/immich/thumb/${p.immichId}" alt="${p.title}" loading="lazy" onerror="this.style.background='#1a1a1a'">
-      <div class="gallery-item-info">
-        <div class="gallery-item-title">${p.title}</div>
-        <div class="gallery-item-count">${p.sessions?.length || 0} session${(p.sessions?.length || 0) !== 1 ? 's' : ''}</div>
-      </div>
-    </div>
-  `).join('');
-}
-
-function filterGallery(q) {
-  renderGallery(state.prints.filter(p => p.title.toLowerCase().includes(q.toLowerCase()) || p.filename.toLowerCase().includes(q.toLowerCase())));
-}
-
-async function showDetail(printId) {
-  const print = state.prints.find(p => p.id === printId);
-  if (!print) return;
-  state.currentPrintId = printId;
-  document.getElementById('gallery-view').classList.remove('active');
-  document.getElementById('detail-view').classList.add('active');
-  document.getElementById('back-btn').style.display = 'flex';
-  document.getElementById('add-print-btn').style.display = 'none';
-  document.getElementById('header-title').textContent = print.title;
-
-  const content = document.getElementById('detail-content');
-  content.innerHTML = '<div class="loading">Loading...</div>';
-
-  let meta = {};
-  try { const r = await fetch(`/api/immich/photo/${print.immichId}`); meta = await r.json(); } catch(e) {}
-
-  const sessions = print.sessions || [];
-  content.innerHTML = `
-    <div class="detail-layout">
-      <div class="detail-left">
-        <img class="detail-image" src="/api/immich/original/${print.immichId}" alt="${print.title}">
-      </div>
-      <div class="detail-right">
-    <div class="detail-meta">
-      <div class="detail-title-row">
-        <div class="detail-title" id="title-display">${print.title}</div>
-        <button class="btn-icon" onclick="startEditTitle()" title="Edit title">✎</button>
-      </div>
-      ${meta.description ? `<div class="detail-film">${meta.description}</div>` : ''}
-      <div class="exif-row">
-        ${meta.shutterSpeed ? `<div class="exif-item">${meta.shutterSpeed}<span>Shutter</span></div>` : ''}
-        ${meta.fNumber ? `<div class="exif-item">f/${meta.fNumber}<span>Aperture</span></div>` : ''}
-        ${meta.iso ? `<div class="exif-item">ISO ${meta.iso}<span>ISO</span></div>` : ''}
-        ${meta.lens ? `<div class="exif-item">${meta.lens}<span>Lens</span></div>` : ''}
-      </div>
-      <div style="margin-top:0.5rem;font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--text-dim)">${print.filename}</div>
-    </div>
-    <div class="sessions-header">
-      <div class="sessions-label">Print Sessions (${sessions.length})</div>
-      <div style="display:flex;gap:0.5rem">
-        <button class="btn btn-ghost btn-sm" onclick="openAddSessionModal()">+ Session</button>
-        <button class="btn btn-danger btn-sm" onclick="deletePrint()">Delete Print</button>
-      </div>
-    </div>
-    ${sessions.length === 0 ? '<div class="loading">No sessions yet.</div>' : ''}
-    ${sessions.map(s => {
-      const fstop = s.fStop ? (s.fStop.startsWith('f/') ? s.fStop : 'f/' + s.fStop) : '';
-      const isSplit = s.technique === 'Split Grade';
-      const lowLabel = s.gradeLow || '#00';
-      const highLabel = s.gradeHigh || '#5';
-      const lowTime = s.gradeOO ? (s.gradeOO.toString().endsWith('s') ? s.gradeOO : s.gradeOO + 's') : '';
-      const highTime = s.grade5 ? (s.grade5.toString().endsWith('s') ? s.grade5 : s.grade5 + 's') : '';
-      const singleTime = s.time ? (s.time.toString().endsWith('s') ? s.time : s.time + 's') : '';
-      const grade = s.grade ? (s.grade.startsWith('#') ? s.grade : '#' + s.grade) : '';
-      let exposureLine = '';
-      if (isSplit) {
-        exposureLine = [fstop, lowLabel + ' → ' + lowTime, highLabel + ' → ' + highTime].filter(Boolean).join('  ·  ');
-      } else {
-        exposureLine = [fstop, grade, singleTime].filter(Boolean).join('  ·  ');
-      }
-      return `
-      <div class="session-card" id="session-${s.id}">
-        <div class="session-header-row">
-          <div class="session-date">${s.date}</div>
-          <div class="session-size">${s.printSize || ''}</div>
-        </div>
-        <div class="session-exposure">${exposureLine}</div>
-        <div class="session-details">
-          ${s.enlarger ? `<span class="session-tag">Enlarger #${s.enlarger}</span>` : ''}
-          ${s.lens ? `<span class="session-tag">Lens ${s.lens}</span>` : ''}
-          ${s.paper ? `<span class="session-tag">${s.paper}</span>` : ''}
-        </div>
-        ${s.dodgeBurn ? `<div class="session-notes">${s.dodgeBurn}</div>` : ''}
-        ${s.notes ? `<div class="session-notes" style="margin-top:0.5rem;border-color:var(--border);color:var(--text-dim)">${s.notes}</div>` : ''}
-        <div class="session-actions">
-          <button class="btn btn-ghost btn-sm" onclick="editSession('${s.id}')">Edit</button>
-          <button class="btn btn-danger btn-sm" onclick="deleteSession('${s.id}')">Delete</button>
-        </div>
-      </div>
-    `}).join('')}
-      </div>
-    </div>
-  `;
-}
-
-function showGallery() {
-  document.getElementById('gallery-view').classList.add('active');
-  document.getElementById('detail-view').classList.remove('active');
-  document.getElementById('back-btn').style.display = 'none';
-  document.getElementById('add-print-btn').style.display = 'inline-block';
-  document.getElementById('header-title').textContent = 'Darkroom Log';
-  loadGallery();
-}
-
-function startEditTitle() {
-  const print = state.prints.find(p => p.id === state.currentPrintId);
-  document.querySelector('.detail-title-row').innerHTML = `
-    <input class="title-edit-input" id="title-edit-input" type="text" value="${print.title}">
-    <button class="btn btn-ghost btn-sm" onclick="saveTitle()">Save</button>
-    <button class="btn-icon" onclick="cancelEditTitle('${print.title}')">✕</button>
-  `;
-  const inp = document.getElementById('title-edit-input');
-  inp.focus();
-  inp.addEventListener('keydown', e => { if (e.key === 'Enter') saveTitle(); if (e.key === 'Escape') cancelEditTitle(print.title); });
-}
-
-async function saveTitle() {
-  const newTitle = document.getElementById('title-edit-input').value.trim();
-  if (!newTitle) return;
-  await fetch(`/api/prints/${state.currentPrintId}`, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({title: newTitle}) });
-  const idx = state.prints.findIndex(p => p.id === state.currentPrintId);
-  if (idx !== -1) state.prints[idx].title = newTitle;
-  document.getElementById('header-title').textContent = newTitle;
-  document.querySelector('.detail-title-row').innerHTML = `
-    <div class="detail-title" id="title-display">${newTitle}</div>
-    <button class="btn-icon" onclick="startEditTitle()" title="Edit title">✎</button>
-  `;
-}
-
-function cancelEditTitle(original) {
-  document.querySelector('.detail-title-row').innerHTML = `
-    <div class="detail-title" id="title-display">${original}</div>
-    <button class="btn-icon" onclick="startEditTitle()" title="Edit title">✎</button>
-  `;
-}
-
-function openAddPrintModal() {
-  document.getElementById('add-print-modal').classList.add('active');
-  document.getElementById('immich-search').value = '';
-  document.getElementById('immich-results').innerHTML = '';
-  document.getElementById('print-title').value = '';
-  state.selectedImmich = null;
-}
-
-function openAddSessionModal() {
-  state.editingSessionId = null;
-  document.getElementById('session-modal-title').textContent = 'Log Print Session';
-  clearSessionForm();
-  const now = new Date(); const localDate = now.getFullYear() + '-' + String(now.getMonth()+1).padStart(2,'0') + '-' + String(now.getDate()).padStart(2,'0'); document.getElementById('s-date').value = localDate;
-  document.getElementById('add-session-modal').classList.add('active');
-}
-
-function editSession(sessionId) {
-  const print = state.prints.find(p => p.id === state.currentPrintId);
-  const s = print.sessions.find(s => s.id === sessionId);
-  if (!s) return;
-  state.editingSessionId = sessionId;
-  document.getElementById('session-modal-title').textContent = 'Edit Session';
-  clearSessionForm();
-  document.getElementById('s-date').value = s.date || '';
-  document.getElementById('s-size').value = s.printSize || '';
-  document.getElementById('s-enlarger').value = s.enlarger || '';
-  document.getElementById('s-lens').value = s.lens || '';
-  const paperSelect = document.getElementById('s-paper'); const knownPapers = ['Fomabrom Variant 111 Glossy','Ilford Multigrade FB Classic Glossy','Ilford Multigrade FB Warmtone Glossy','Ilford Multigrade RC Deluxe']; if (s.paper && knownPapers.includes(s.paper)) { paperSelect.value = s.paper; document.getElementById('s-paper-other').style.display = 'none'; } else if (s.paper) { paperSelect.value = '__other__'; document.getElementById('s-paper-other').value = s.paper; document.getElementById('s-paper-other').style.display = 'block'; } else { paperSelect.value = ''; }
-  document.getElementById('s-dodgeburn').value = s.dodgeBurn || '';
-  document.getElementById('s-notes').value = s.notes || '';
-  if (s.technique === 'Split Grade') {
-    setTechnique('split');
-    document.getElementById('s-fstop-split').value = s.fStop || '';
-    document.getElementById('s-grade-low').value = s.gradeLow || '#00';
-    document.getElementById('s-grade-high').value = s.gradeHigh || '#5';
-    document.getElementById('s-g00').value = s.gradeOO || '';
-    document.getElementById('s-g5').value = s.grade5 || '';
-  } else {
-    setTechnique('single');
-    document.getElementById('s-fstop').value = s.fStop || '';
-    document.getElementById('s-grade').value = s.grade || '';
-    document.getElementById('s-time').value = s.time || '';
-  }
-  document.getElementById('add-session-modal').classList.add('active');
-}
-
-function clearSessionForm() {
-  ['s-date','s-size','s-enlarger','s-lens','s-paper','s-fstop','s-grade','s-time','s-fstop-split','s-grade-low','s-grade-high','s-g00','s-g5','s-dodgeburn','s-notes'].forEach(id => { document.getElementById(id).value = ''; });
-  setTechnique('single');
-}
-
-function closeModal(id) { document.getElementById(id).classList.remove('active'); }
-
-function setTechnique(t) {
-  state.technique = t;
-  document.getElementById('t-single').classList.toggle('active', t === 'single');
-  document.getElementById('t-split').classList.toggle('active', t === 'split');
-  document.getElementById('single-fields').classList.toggle('visible', t === 'single');
-  document.getElementById('split-fields').classList.toggle('visible', t === 'split');
-}
-
-function searchImmich(q) {
-  clearTimeout(state.immichSearchTimeout);
-  if (!q || q.length < 2) { document.getElementById('immich-results').innerHTML = ''; return; }
-  state.immichSearchTimeout = setTimeout(async () => {
-    const r = await fetch(`/api/immich/search?q=${encodeURIComponent(q)}`);
-    const items = await r.json();
-    const el = document.getElementById('immich-results');
-    if (!items.length) { el.innerHTML = '<div class="search-result-item" style="color:var(--text-dim)">No results</div>'; return; }
-    el.innerHTML = '<div class="search-results">' + items.map(i => `<div class="search-result-item" onclick='selectImmich(${JSON.stringify(i)})'>${i.filename}</div>`).join('') + '</div>';
-  }, 300);
-}
-
-function selectImmich(item) {
-  state.selectedImmich = item;
-  document.getElementById('immich-search').value = item.filename;
-  if (!document.getElementById('print-title').value) {
-    document.getElementById('print-title').value = item.filename.replace(/\.[^.]+$/, '');
-  }
-  document.getElementById('immich-results').innerHTML = `<div class="search-result-item selected">${item.filename}</div>`;
-}
-
-async function createPrint() {
-  if (!state.selectedImmich) { alert('Please select a negative from Immich'); return; }
-  const title = document.getElementById('print-title').value.trim();
-  if (!title) { alert('Please enter a print title'); return; }
-  const r = await fetch('/api/prints', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ immichId: state.selectedImmich.id, filename: state.selectedImmich.filename, title }) });
-  const print = await r.json();
-  closeModal('add-print-modal');
-  await loadGallery();
-  showDetail(print.id);
-}
-
-function handlePaperChange(el) {
-  const other = document.getElementById('s-paper-other');
-  other.style.display = el.value === '__other__' ? 'block' : 'none';
-  if (el.value === '__other__') other.focus();
-}
-
-function getPaperValue() {
-  const sel = document.getElementById('s-paper');
-  return sel.value === '__other__' ? document.getElementById('s-paper-other').value : sel.value;
-}
-
-function autoPrefixHash(el) {
-  let v = el.value.replace(/^#+/, '');
-  if (v) el.value = '#' + v;
-}
-
-function autoPrefixF(el) {
-  let v = el.value.replace(/^f\/+/, '');
-  if (v) el.value = 'f/' + v;
-}
-
-async function saveSession() {
-  const isSplit = state.technique === 'split';
-  const session = {
-    date: document.getElementById('s-date').value,
-    printSize: document.getElementById('s-size').value,
-    enlarger: document.getElementById('s-enlarger').value,
-    lens: document.getElementById('s-lens').value,
-    paper: getPaperValue(),
-    technique: isSplit ? 'Split Grade' : 'Single Grade',
-    fStop: isSplit ? document.getElementById('s-fstop-split').value : document.getElementById('s-fstop').value,
-    grade: isSplit ? null : document.getElementById('s-grade').value,
-    time: isSplit ? null : document.getElementById('s-time').value,
-    gradeLow: isSplit ? document.getElementById('s-grade-low').value : null,
-    gradeHigh: isSplit ? document.getElementById('s-grade-high').value : null,
-    gradeOO: isSplit ? document.getElementById('s-g00').value : null,
-    grade5: isSplit ? document.getElementById('s-g5').value : null,
-    dodgeBurn: document.getElementById('s-dodgeburn').value,
-    notes: document.getElementById('s-notes').value
-  };
-
-  if (state.editingSessionId) {
-    const print = state.prints.find(p => p.id === state.currentPrintId);
-    const idx = print.sessions.findIndex(s => s.id === state.editingSessionId);
-    if (idx !== -1) {
-      print.sessions[idx] = { ...print.sessions[idx], ...session };
-      await fetch(`/api/prints/${state.currentPrintId}`, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ sessions: print.sessions }) });
-    }
-  } else {
-    await fetch(`/api/prints/${state.currentPrintId}/sessions`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(session) });
-  }
-
-  closeModal('add-session-modal');
-  await loadGallery();
-  showDetail(state.currentPrintId);
-}
-
-async function deletePrint() {
-  if (!confirm('Delete this print and all its sessions? This cannot be undone.')) return;
-  await fetch(`/api/prints/${state.currentPrintId}`, {method:'DELETE'});
-  showGallery();
-}
-
-async function deleteSession(sessionId) {
-  if (!confirm('Delete this session?')) return;
-  await fetch(`/api/prints/${state.currentPrintId}/sessions/${sessionId}`, {method:'DELETE'});
-  await loadGallery();
-  showDetail(state.currentPrintId);
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.getRegistrations().then(regs => regs.forEach(r => r.unregister()));
 }
 </script>
 </body>

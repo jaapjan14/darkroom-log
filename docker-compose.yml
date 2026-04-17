@@ -1,14 +1,19 @@
 services:
   darkroom:
     image: jaap14/darkroom-log:latest
-    container_name: darkroom-log
+    container_name: darkroom
     ports:
       - 3416:3000
     environment:
       - APP_PASSWORD=changeme
-      - SESSION_SECRET=change-this-to-a-random-string
+      - SESSION_SECRET=changeme-use-a-long-random-string
       - IMMICH_URL=http://your-immich-host:2283/api
       - IMMICH_KEY=your-immich-api-key
     volumes:
       - ./data:/data
+      - ./music:/music   # optional: drop mp3s here for slideshow music
     restart: unless-stopped
+
+  # To run from source instead:
+  # darkroom:
+  #   build: .

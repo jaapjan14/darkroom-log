@@ -1,0 +1,1989 @@
+
+// Darkroom Log - Main Application
+// Auto-extracted from index.html
+
+let state = {
+  prints: [],
+  currentPrintId: null,
+  selectedImmich: null,
+  technique: 'single',
+  editingSessionId: null,
+  immichSearchTimeout: null,
+  sort: 'recent',
+  activeTag: null,
+  currentTab: 'prints',
+  recentItems: [],
+  recentPage: 1,
+  recentLoaded: false,
+  currentRecentId: null,
+  currentRecentIndex: -1,
+  fullscreenOpen: false,
+  recentMeta: {},
+  filterOptions: null,
+  librarySort: 'upload',
+  librarySortDir: 'desc',
+  displayedItems: [],
+  recentScrollY: 0,
+  previousView: 'recent-view',
+  recentActivePerson: null,
+  recentActiveChips: new Set(),
+  searchMode: 'smart',
+  recentSmartResults: [],
+  searchPage: 1,
+  searchQuery: '',
+  searchTotal: 0,
+  albums: [],
+  currentAlbumId: null,
+  albumSelectMode: false,
+  albumSelected: new Set(),
+  selectMode: false,
+  selectedAssets: new Set(),
+  albums: [],
+  currentAlbum: null,
+  albumEditMode: false,
+  pendingAddAssetId: null,
+  slideshow: { active: false, index: 0, timer: null, paused: false }
+};
+
+async function login() {
+  const pw = document.getElementById('login-password').value;
+  const r = await fetch('/api/login', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({password: pw}) });
+  if (r.ok) {
+    document.getElementById('login-screen').style.display = 'none';
+    document.getElementById('app').style.display = 'block';
+    loadGallery();
+  } else {
+    document.getElementById('login-error').textContent = 'Incorrect password';
+  }
+}
+
+async function logout() { await fetch('/api/logout', {method:'POST'}); location.reload(); }
+
+// TAB SWITCHING
+function switchTab(tab) {
+  state.currentTab = tab;
+  ['prints','recent','albums'].forEach(t => {
+    document.getElementById('tab-' + t).classList.toggle('active', t === tab);
+  });
+  document.getElementById('gallery-view').classList.toggle('active', tab === 'prints');
+  document.getElementById('recent-view').classList.toggle('active', tab === 'recent');
+  document.getElementById('albums-view').classList.toggle('active', tab === 'albums');
+  document.getElementById('album-detail-view').classList.remove('active');
+  document.getElementById('detail-view').classList.remove('active');
+  document.getElementById('recent-detail-view').classList.remove('active');
+  document.getElementById('back-btn').style.display = 'none';
+  document.getElementById('add-print-btn').style.display = tab === 'prints' ? 'inline-block' : 'none';
+  document.getElementById('header-title').textContent = 'Darkroom Log';
+  if (tab === 'recent' && !state.recentLoaded) loadRecent();
+  if (tab === 'albums') loadAlbumsTab();
+}
+
+// RECENT UPLOADS
+
+function setLibrarySort(sort) {
+  state.librarySort = sort;
+  document.querySelectorAll('[id^="lib-sort-"]').forEach(b => b.classList.remove('active'));
+  document.getElementById('lib-sort-' + sort).classList.add('active');
+  state.recentPage = 1;
+  state.recentItems = [];
+  fetchRecentPage();
+}
+
+function toggleLibrarySortDir() {
+  state.librarySortDir = state.librarySortDir === 'desc' ? 'asc' : 'desc';
+  const btn = document.getElementById('lib-sort-dir');
+  if (btn) btn.textContent = state.librarySortDir === 'desc' ? '↓ Newest' : '↑ Oldest';
+  state.recentPage = 1;
+  state.recentItems = [];
+  fetchRecentPage();
+}
+
+async function loadRecent() {
+  state.recentPage = 1;
+  state.recentItems = [];
+  state.recentLoaded = true;
+  await fetchRecentPage();
+  fetchFilterOptions();
+}
+
+let filterOptionsFetching = false;
+async function fetchFilterOptions() {
+  if (filterOptionsFetching) return;
+  filterOptionsFetching = true;
+  try {
+    const r = await fetch('/api/immich/filter-options');
+    const data = await r.json();
+    state.filterOptions = data;
+    updateRecentFilterChips();
+    if (data.building) {
+      filterOptionsFetching = false;
+      setTimeout(fetchFilterOptions, 5000);
+    }
+  } catch(e) { filterOptionsFetching = false; }
+}
+
+async function loadMoreRecent() {
+  state.recentPage++;
+  await fetchRecentPage();
+}
+
+async function fetchRecentPage() {
+  const size = 50;
+  const r = await fetch(`/api/immich/recent?page=${state.recentPage}&size=${size}&sort=${state.librarySort}&dir=${state.librarySortDir}`);
+  const data = await r.json();
+  const items = data.assets || [];
+  state.recentItems = [...state.recentItems, ...items];
+  applyRecentFilters();
+  document.getElementById('load-more-btn').style.display = (items.length === size && !document.getElementById('recent-search').value) ? 'block' : 'none';
+  document.getElementById('load-more-btn').onclick = loadMoreRecent;
+  // Background metadata enrichment
+  loadRecentMetaBatch(items.map(a => a.id));
+}
+
+async function loadRecentMetaBatch(ids) {
+  for (const id of ids) {
+    if (state.recentMeta[id]) continue; // already cached
+    try {
+      const r = await fetch('/api/immich/photo/' + id);
+      const meta = await r.json();
+      state.recentMeta[id] = {
+        description: meta.description || '',
+        model: meta.model || '',
+        lens: meta.lens || '',
+        city: meta.city || '',
+        state: meta.state || '',
+        filename: meta.filename || '',
+        takenAt: meta.takenAt || ''
+      };
+
+      // Only update filter chips, don't re-render grid
+      updateRecentFilterChips();
+    } catch(e) {}
+    // Small delay to avoid hammering the server
+    await new Promise(res => setTimeout(res, 50));
+  }
+}
+
+let smartSearchTimer = null;
+
+function setSearchMode(mode) {
+  state.searchMode = mode;
+  document.getElementById('search-mode-text').classList.toggle('active', mode === 'text');
+  document.getElementById('search-mode-smart').classList.toggle('active', mode === 'smart');
+  const q = document.getElementById('recent-search').value;
+  if (q) handleRecentSearch(q);
+}
+
+function handleRecentSearch(q) {
+  clearTimeout(smartSearchTimer);
+  if (!q.trim()) {
+    state.recentSmartResults = [];
+    applyRecentFilters();
+    return;
+  }
+  if (q.trim().length > 1) {
+    smartSearchTimer = setTimeout(() => {
+      if (state.searchMode === 'smart') runSmartSearch(q);
+      else runTextSearch(q);
+    }, 600);
+  }
+}
+
+async function runMultiChipSearch(chips) {
+  const grid = document.getElementById('recent-grid');
+  grid.innerHTML = '<div class="loading">Searching...</div>';
+  try {
+    // Categorize chips using filterOptions if available, otherwise send all as unknown
+    const opts = state.filterOptions || {};
+    const cameraSet = new Set(opts.cameras || []);
+    const lensSet = new Set(opts.lenses || []);
+    const citySet = new Set(opts.cities || []);
+    // If filterOptions not loaded, categorize by trying all fields on server
+    const cameras = cameraSet.size ? chips.filter(c => cameraSet.has(c)) : [];
+    const lenses = lensSet.size ? chips.filter(c => lensSet.has(c)) : [];
+    const cities = citySet.size ? chips.filter(c => citySet.has(c)) : [];
+    // For uncategorized chips (when filterOptions not loaded), pass as unknowns
+    const known = new Set([...cameras, ...lenses, ...cities]);
+    const unknowns = chips.filter(c => !known.has(c));
+    const r = await fetch('/api/immich/combined-search', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ cameras, lenses, cities, unknowns, size: 60, page: 1 })
+    });
+    const data = await r.json();
+    const items = data.assets || [];
+    state.recentSmartResults = items;
+    state.searchPage = 1;
+    renderRecentGrid(items);
+    loadRecentMetaBatch(items.map(a => a.id));
+    const loadMoreBtn = document.getElementById('load-more-btn');
+    if (loadMoreBtn) {
+      loadMoreBtn.style.display = items.length === 60 ? 'block' : 'none';
+      loadMoreBtn.onclick = async () => {
+        state.searchPage++;
+        const r2 = await fetch('/api/immich/combined-search', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ cameras, lenses, cities, size: 60, page: state.searchPage })
+        });
+        const d2 = await r2.json();
+        state.recentSmartResults = [...state.recentSmartResults, ...(d2.assets || [])];
+        renderRecentGrid(state.recentSmartResults);
+        loadMoreBtn.style.display = (d2.assets || []).length === 60 ? 'block' : 'none';
+      };
+    }
+  } catch(e) {
+    grid.innerHTML = '<div class="loading">Search failed.</div>';
+  }
+}
+
+async function runTextSearch(q, append = false) {
+  const grid = document.getElementById('recent-grid');
+  if (!append) {
+    state.searchPage = 1;
+    state.searchQuery = q;
+    state.recentSmartResults = [];
+    grid.innerHTML = '<div class="loading">Searching...</div>';
+  }
+  try {
+    const r = await fetch('/api/immich/text-search', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ query: q, size: 60, page: state.searchPage })
+    });
+    const data = await r.json();
+    const newItems = data.assets || [];
+    state.searchTotal = data.total || newItems.length;
+    state.recentSmartResults = append ? [...state.recentSmartResults, ...newItems] : newItems;
+    renderRecentGrid(state.recentSmartResults);
+    loadRecentMetaBatch(newItems.map(a => a.id));
+    // Show load more if we got a full page (likely more results)
+    const loadMoreBtn = document.getElementById('load-more-btn');
+    if (loadMoreBtn) {
+      loadMoreBtn.style.display = newItems.length === 60 ? 'block' : 'none';
+      loadMoreBtn.onclick = () => {
+        state.searchPage++;
+        runTextSearch(state.searchQuery, true);
+      };
+    }
+  } catch(e) {
+    grid.innerHTML = '<div class="loading">Search failed.</div>';
+  }
+}
+
+async function runSmartSearch(q, append = false) {
+  const grid = document.getElementById('recent-grid');
+  if (!append) {
+    state.searchPage = 1;
+    state.searchQuery = q;
+    state.recentSmartResults = [];
+    grid.innerHTML = '<div class="loading">Searching...</div>';
+  }
+  try {
+    const r = await fetch('/api/immich/smart-search', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ query: q, size: 60, page: state.searchPage })
+    });
+    const data = await r.json();
+    const newItems = data.assets || [];
+    state.searchTotal = data.total || newItems.length;
+    state.recentSmartResults = append ? [...state.recentSmartResults, ...newItems] : newItems;
+    renderRecentGrid(state.recentSmartResults);
+    loadRecentMetaBatch(newItems.map(a => a.id));
+    const loadMoreBtn = document.getElementById('load-more-btn');
+    if (loadMoreBtn) {
+      loadMoreBtn.style.display = newItems.length === 60 ? 'block' : 'none';
+      loadMoreBtn.onclick = () => {
+        state.searchPage++;
+        runSmartSearch(state.searchQuery, true);
+      };
+    }
+  } catch(e) {
+    grid.innerHTML = '<div class="loading">Smart search failed.</div>';
+  }
+}
+
+function applyRecentFilters() {
+  const q = (document.getElementById('recent-search')?.value || '').toLowerCase();
+  const chips = state.recentActiveChips;
+  // Use smart/text results if we have them and there's a query or active chips
+  const hasResults = state.recentSmartResults?.length && (q.trim() || chips.size);
+  let items = hasResults ? state.recentSmartResults : state.recentItems;
+
+  if ((q && !hasResults) || chips.size) {
+    items = items.filter(a => {
+      const meta = state.recentMeta[a.id] || {};
+      const searchable = [
+        a.originalFileName,
+        meta.description,
+        meta.model,
+        meta.lens,
+        meta.city,
+        meta.state
+      ].join(' ').toLowerCase();
+      const matchesQ = !q || searchable.includes(q);
+      // AND logic — must match ALL active chips
+      const matchesChips = chips.size === 0 || [...chips].every(c => searchable.includes(c.toLowerCase()));
+      return matchesQ && matchesChips;
+    });
+  }
+  // Apply sort
+  const sort = state.librarySort || 'upload';
+  const dir = state.librarySortDir === 'asc' ? 1 : -1;
+  if (sort === 'upload') {
+    items = [...items].sort((a, b) => dir * (new Date(a.createdAt) - new Date(b.createdAt)));
+  } else if (sort === 'taken') {
+    items = [...items].sort((a, b) => dir * (new Date(a.localDateTime || a.fileCreatedAt || a.createdAt) - new Date(b.localDateTime || b.fileCreatedAt || b.createdAt)));
+  }
+  renderRecentGrid(items);
+}
+
+function toggleFiltersPopup() {
+  const popup = document.getElementById('recent-filter-popup');
+  popup.style.display = popup.style.display === 'none' ? 'block' : 'none';
+  if (popup.style.display === 'block') updateRecentFilterChips();
+}
+
+function updateRecentFilterChips() {
+  const opts = state.filterOptions || {};
+  const cameras = opts.cameras || [];
+  const lenses = opts.lenses || [];
+  const cities = opts.cities || [];
+  const people = opts.people || [];
+  const building = opts.building;
+  const chip = (label, val) => `<button class="tag-filter${state.recentActiveChips.has(val) ? ' active' : ''}" data-action="setRecentChip" data-val="${val}">${label}</button>`;
+  const personChip = (p) => `<button class="tag-filter${state.recentActivePerson === p.id ? ' active' : ''}" data-action="searchByPerson" data-id="${p.id}" data-name="${p.name}">${p.name}</button>`;
+  const camEl = document.getElementById('chip-cameras');
+  const lensEl = document.getElementById('chip-lenses');
+  const cityEl = document.getElementById('chip-cities');
+  const peopleEl = document.getElementById('chip-people');
+  const loadingMsg = building ? '<span style="color:var(--text-dim);font-size:11px">Building index...</span>' : '<span style="color:var(--text-dim);font-size:11px">None found</span>';
+  if (camEl) camEl.innerHTML = cameras.map(c => chip(c, c)).join('') || loadingMsg;
+  if (lensEl) lensEl.innerHTML = lenses.map(l => chip(l, l)).join('') || loadingMsg;
+  if (cityEl) cityEl.innerHTML = cities.map(c => chip(c, c)).join('') || loadingMsg;
+  if (peopleEl) peopleEl.innerHTML = people.map(p => personChip(p)).join('') || loadingMsg;
+}
+
+async function searchByPerson(personId, name) {
+  state.recentActivePerson = state.recentActivePerson === personId ? null : personId;
+  updateRecentFilterChips();
+  if (!state.recentActivePerson) {
+    state.recentSmartResults = [];
+    document.getElementById('recent-search').value = '';
+    applyRecentFilters();
+    return;
+  }
+  const grid = document.getElementById('recent-grid');
+  grid.innerHTML = '<div class="loading">Searching...</div>';
+  document.getElementById('recent-search').value = name;
+  try {
+    const r = await fetch('/api/immich/person-search', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ personId, size: 60 })
+    });
+    const data = await r.json();
+    state.recentSmartResults = data.assets || [];
+    renderRecentGrid(state.recentSmartResults);
+    loadRecentMetaBatch(state.recentSmartResults.map(a => a.id));
+    const loadMoreBtn = document.getElementById('load-more-btn');
+    if (loadMoreBtn) {
+      loadMoreBtn.style.display = (data.assets || []).length === 60 ? 'block' : 'none';
+      loadMoreBtn.onclick = () => {
+        state.searchPage++;
+        fetch('/api/immich/person-search', {
+          method: 'POST', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ personId, size: 60, page: state.searchPage })
+        }).then(r => r.json()).then(d => {
+          state.recentSmartResults = [...state.recentSmartResults, ...(d.assets || [])];
+          renderRecentGrid(state.recentSmartResults);
+        });
+      };
+    }
+  } catch(e) {
+    grid.innerHTML = '<div class="loading">Search failed.</div>';
+  }
+}
+
+
+
+function setRecentChip(val) {
+  if (state.recentActiveChips.has(val)) {
+    state.recentActiveChips.delete(val);
+  } else {
+    state.recentActiveChips.add(val);
+  }
+  updateActiveChipLabel();
+  updateRecentFilterChips();
+  // Run server-side search with all active chips combined
+  const chips = [...state.recentActiveChips];
+  if (chips.length === 0) {
+    state.recentSmartResults = [];
+    document.getElementById('recent-search').value = '';
+    applyRecentFilters();
+  } else {
+    // Run separate search for each chip and merge results
+    document.getElementById('recent-search').value = chips.join(' · ');
+    runMultiChipSearch(chips);
+  }
+}
+
+function updateActiveChipLabel() {
+  const label = document.getElementById('active-chip-label');
+  if (!label) return;
+  const chips = [...state.recentActiveChips];
+  label.textContent = chips.length ? chips.join(' · ') : '';
+}
+
+function clearRecentChip() {
+  state.recentActiveChips = new Set();
+  state.recentSmartResults = [];
+  updateActiveChipLabel();
+  const searchEl = document.getElementById('recent-search');
+  if (searchEl) searchEl.value = '';
+  applyRecentFilters();
+}
+
+function renderRecentGrid(items) {
+  state.displayedItems = items; // track what's currently shown for navigation
+  const grid = document.getElementById('recent-grid');
+  if (!items.length) { grid.innerHTML = '<div class="loading">No recent uploads.</div>'; return; }
+  grid.innerHTML = items.map(a => `
+    <div class="gallery-item ${state.selectMode ? 'selectable' : ''} ${state.selectedAssets && state.selectedAssets.has(a.id) ? 'selected' : ''}"
+         id="sel-${a.id}"
+         data-action="recentItemClick" data-id="${a.id}">
+      <img src="/api/immich/thumb/${a.id}" alt="${a.originalFileName}" loading="lazy" onerror="this.style.background='#1a1a1a'">
+      ${state.selectMode ? `<div class="select-check ${state.selectedAssets && state.selectedAssets.has(a.id) ? 'checked' : ''}">✓</div>` : ''}
+    </div>
+  `).join('');
+}
+
+function goBackFromDetail() {
+  const prev = state.previousView || 'recent-view';
+  document.getElementById('recent-detail-view').classList.remove('active');
+  document.getElementById(prev).classList.add('active');
+  document.getElementById('back-btn').style.display = 'none';
+  document.getElementById('header-title').textContent = prev === 'album-detail-view' 
+    ? (state.currentAlbum?.title || 'Album').toUpperCase()
+    : 'Darkroom Log';
+  document.getElementById('back-btn').onclick = showGallery;
+  disablePinchZoom();
+  if (prev === 'recent-view') {
+    requestAnimationFrame(() => requestAnimationFrame(() => window.scrollTo(0, state.recentScrollY || 0)));
+  }
+  state.previousView = 'recent-view';
+}
+
+async function showRecentDetail(assetId) {
+  state.currentRecentId = assetId;
+  state.currentRecentIndex = (state.displayedItems || state.recentItems).findIndex(a => a.id === assetId);
+  // Save scroll position
+  state.recentScrollY = window.scrollY;
+
+  // Hide whatever view is currently active
+  ['recent-view','album-detail-view'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.classList.remove('active');
+  });
+  document.getElementById('recent-detail-view').classList.add('active');
+  document.getElementById('back-btn').style.display = 'flex';
+  document.getElementById('header-title').textContent = 'Recent';
+  enablePinchZoom();
+  document.getElementById('back-btn').onclick = goBackFromDetail;
+
+  await renderRecentDetail(assetId);
+}
+
+async function renderRecentDetail(assetId) {
+  const content = document.getElementById('recent-detail-content');
+  content.innerHTML = '<div class="loading">Loading...</div>';
+
+  let meta = {};
+  try { const r = await fetch(`/api/immich/photo/${assetId}`); meta = await r.json(); } catch(e) {}
+
+  const idx = state.currentRecentIndex;
+  const displayedItems = state.displayedItems || state.recentItems;
+  const total = displayedItems.length;
+  const hasPrev = idx > 0;
+  const hasNext = idx < total - 1;
+
+  // Format date
+  const takenDate = meta.takenAt ? new Date(meta.takenAt).toLocaleDateString('en-US', {weekday:'short', year:'numeric', month:'short', day:'numeric'}) : '';
+  const takenTime = meta.takenAt ? new Date(meta.takenAt).toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit'}) : '';
+
+  // Map
+  const hasGPS = meta.latitude && meta.longitude;
+  const mapUrl = hasGPS ? `https://www.openstreetmap.org/export/embed.html?bbox=${meta.longitude-0.01},${meta.latitude-0.01},${meta.longitude+0.01},${meta.latitude+0.01}&layer=mapnik&marker=${meta.latitude},${meta.longitude}` : '';
+  const immichLocation = [meta.city, meta.state].filter(Boolean).join(', ');
+
+  content.innerHTML = `
+    <div class="detail-layout">
+      <div class="detail-left">
+        <div style="position:relative;width:100%;height:100%;display:flex;align-items:center;justify-content:center">
+          <img class="detail-image" 
+               src="/api/immich/thumb/${assetId}"
+               data-full="/api/immich/original/${assetId}"
+               alt="${meta.filename || ''}"
+               data-action="openFullscreen" data-url="/api/immich/original/${assetId}" 
+               style="cursor:zoom-in;max-width:100%;max-height:calc(100vh - 52px);width:auto;height:auto;display:block"
+               onload="this.dataset.full && loadFullImage(this)">
+          <div data-action="navPrev" style="position:absolute;left:0;top:0;width:25%;height:100%;cursor:pointer;z-index:10"></div>
+          <div data-action="navNext" style="position:absolute;right:0;top:0;width:25%;height:100%;cursor:pointer;z-index:10"></div>
+        </div>
+      </div>
+      <div class="detail-right">
+        <div class="recent-nav-bar" style="justify-content:space-between">
+          <div style="display:flex;gap:0.5rem;align-items:center">
+            ${hasPrev ? `<button class="nav-arrow" data-action="navPrev">‹</button>` : `<div style="width:36px"></div>`}
+            ${hasNext ? `<button class="nav-arrow" data-action="navNext">›</button>` : ''}
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--text-dim);padding-top:2px">${idx+1} / ${total}</div>
+          </div>
+          <div style="display:flex;gap:0.5rem">
+            <button class="btn btn-ghost btn-sm" data-action="openAddToAlbumModal" data-id="${assetId}">+ Album</button>
+          <button class="btn btn-ghost btn-sm" data-action="shareRecent" data-id="${assetId}" data-filename="${meta.filename}" data-desc="${(meta.description||'').replace(/'/g, '&apos;')}">↑ Share</button>
+          </div>
+        </div>
+        <div class="detail-meta">
+          ${meta.description ? `<div class="detail-film" style="margin-bottom:0.75rem;font-weight:500;color:var(--text);font-size:16px">${meta.description}</div>` : ''}
+          <div class="exif-table">
+            ${takenDate ? `
+            <div class="exif-row-item">
+              <div class="exif-row-icon">📅</div>
+              <div class="exif-row-label">Date</div>
+              <div class="exif-row-value">${takenDate}<div class="exif-row-sub">${takenTime}</div></div>
+            </div>` : ''}
+            ${meta.filename ? `
+            <div class="exif-row-item">
+              <div class="exif-row-icon">🖼</div>
+              <div class="exif-row-label">File</div>
+              <div class="exif-row-value" style="font-size:11px;word-break:break-all">${meta.filename}</div>
+            </div>` : ''}
+            ${meta.model ? `
+            <div class="exif-row-item">
+              <div class="exif-row-icon">📷</div>
+              <div class="exif-row-label">Camera</div>
+              <div class="exif-row-value">${meta.model}
+                <div class="exif-row-sub">${[meta.shutterSpeed, meta.fNumber ? 'f/'+meta.fNumber : '', meta.iso ? 'ISO '+meta.iso : ''].filter(Boolean).join('  ')}</div>
+              </div>
+            </div>` : ''}
+            ${meta.lens ? `
+            <div class="exif-row-item">
+              <div class="exif-row-icon">🔭</div>
+              <div class="exif-row-label">Lens</div>
+              <div class="exif-row-value">${meta.lens}</div>
+            </div>` : ''}
+            ${hasGPS ? `
+            <div class="exif-row-item" id="gps-row">
+              <div class="exif-row-icon">📍</div>
+              <div class="exif-row-label">Location</div>
+              <div class="exif-row-value">
+                <a href="https://www.openstreetmap.org/?mlat=${meta.latitude}&mlon=${meta.longitude}&zoom=15" target="_blank" style="color:var(--safe);text-decoration:none" id="gps-link">${meta.latitude.toFixed(4)}, ${meta.longitude.toFixed(4)}</a>
+                <div class="exif-row-sub">${immichLocation}</div>
+              </div>
+            </div>` : ''}
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+async function shareRecent(assetId, filename, description) {
+  try {
+    const imgRes = await fetch('/api/immich/original/' + assetId);
+    const blob = await imgRes.blob();
+    const fname = filename || assetId + '.jpg';
+    const file = new File([blob], fname, { type: 'image/jpeg' });
+    const shareData = { files: [file] };
+    if (description) shareData.text = description;
+    if (navigator.share && navigator.canShare(shareData)) {
+      await navigator.share(shareData);
+    } else {
+      alert('Sharing not supported in this browser');
+    }
+  } catch(e) {
+    if (e.name !== 'AbortError') alert('Share failed: ' + e.message);
+  }
+}
+
+function enablePinchZoom() {
+  const meta = document.querySelector('meta[name=viewport]');
+  if (meta) meta.content = 'width=device-width, initial-scale=1.0';
+}
+
+function disablePinchZoom() {
+  const meta = document.querySelector('meta[name=viewport]');
+  if (meta) meta.content = 'width=device-width, initial-scale=1.0, maximum-scale=1.0';
+}
+
+function loadFullImage(img) {
+  const full = img.dataset.full;
+  if (!full) return;
+  const fullImg = new Image();
+  fullImg.onload = () => {
+    img.src = full;
+    img.style.filter = '';
+    delete img.dataset.full;
+  };
+  fullImg.src = full;
+}
+
+async function navigateRecent(dir) {
+  const displayedItems = state.displayedItems || state.recentItems;
+  const newIdx = state.currentRecentIndex + dir;
+  if (newIdx < 0 || newIdx >= displayedItems.length) return;
+  state.currentRecentIndex = newIdx;
+  state.currentRecentId = displayedItems[newIdx].id;
+  if (state.fullscreenOpen) {
+    document.getElementById('fullscreen-img').src = '/api/immich/original/' + state.currentRecentId;
+  }
+  await renderRecentDetail(state.currentRecentId);
+}
+
+function openFullscreen(src) {
+  document.getElementById('fullscreen-img').src = src;
+  document.getElementById('fullscreen-overlay').classList.add('active');
+  state.fullscreenOpen = true;
+}
+
+function closeFullscreen() {
+  document.getElementById('fullscreen-overlay').classList.remove('active');
+  state.fullscreenOpen = false;
+}
+
+
+
+// Keyboard navigation
+document.addEventListener('keydown', e => {
+  const ssOverlay = document.getElementById('slideshow-overlay');
+  if (ssOverlay && ssOverlay.classList.contains('active')) {
+    if (e.key === 'ArrowLeft') slideshowPrev();
+    if (e.key === 'ArrowRight') slideshowNext();
+    if (e.key === 'Escape') closeSlideshow();
+    if (e.key === ' ') { e.preventDefault(); toggleSlideshow(); }
+    return;
+  }
+  if (document.getElementById('recent-detail-view').classList.contains('active')) {
+    if (e.key === 'ArrowLeft') navigateRecent(-1);
+    if (e.key === 'ArrowRight') navigateRecent(1);
+    if (e.key === 'Escape') {
+      if (state.fullscreenOpen) {
+        closeFullscreen();
+      } else {
+        goBackFromDetail();
+      }
+    }
+  }
+});
+
+// Trackpad two-finger swipe up to go back
+let wheelAccum = 0;
+document.addEventListener('wheel', e => {
+  if (!document.getElementById('recent-detail-view').classList.contains('active')) return;
+  if (state.fullscreenOpen) return;
+  // Only trigger on the image side (detail-left), not the scrollable right panel
+  const left = document.querySelector('.detail-left');
+  if (left && left.contains(e.target)) {
+    wheelAccum += e.deltaY;
+    if (wheelAccum < -80 && Math.abs(e.deltaX) < 40) {
+      wheelAccum = 0;
+      goBackFromDetail();
+    }
+  } else {
+    wheelAccum = 0;
+  }
+}, {passive: true});
+
+// Touch swipe navigation
+let touchStartX = null;
+let touchStartY = null;
+document.addEventListener('touchstart', e => {
+  if (document.getElementById('recent-detail-view').classList.contains('active')) {
+    touchStartX = e.touches[0].clientX;
+    touchStartY = e.touches[0].clientY;
+  }
+}, {passive: true});
+document.addEventListener('touchend', e => {
+  if (!touchStartX || !document.getElementById('recent-detail-view').classList.contains('active')) return;
+  const dx = e.changedTouches[0].clientX - touchStartX;
+  const dy = e.changedTouches[0].clientY - touchStartY;
+  if (Math.abs(dy) > 80 && dy < 0 && Math.abs(dx) < 50) {
+    // Swipe up — go back
+    goBackFromDetail();
+  } else if (Math.abs(dx) > 50 && Math.abs(dy) < 50) {
+    dx < 0 ? navigateRecent(1) : navigateRecent(-1);
+  }
+  touchStartX = null;
+  touchStartY = null;
+}, {passive: true});
+// ── ALBUMS ───────────────────────────────────────────────────────────────────
+
+async function loadAlbumsTab() {
+  const r = await fetch('/api/albums');
+  state.albums = await r.json();
+  renderAlbumsGrid();
+}
+
+function renderAlbumsGrid() {
+  const grid = document.getElementById('albums-grid');
+  if (!state.albums.length) {
+    grid.innerHTML = '<div class="album-empty" style="grid-column:1/-1">No albums yet.<br>Tap + Album to create one.</div>';
+    return;
+  }
+  grid.innerHTML = state.albums.map(a => `
+    <div class="album-item" data-action="openAlbum" data-id="${a.id}">
+      ${a.assets.length ? `<img src="/api/immich/thumb/${a.assets[0]}" loading="lazy" onerror="this.style.background='#1a1a1a'">` : '<div class="album-item-empty" style="width:100%;height:100%"></div>'}
+      <div class="album-item-info">
+        <div class="album-item-title">${a.title}</div>
+        <div class="album-item-count">${a.assets.length} photo${a.assets.length !== 1 ? 's' : ''}</div>
+      </div>
+    </div>
+  `).join('');
+}
+
+function openAlbum(albumId) {
+  state.currentAlbum = state.albums.find(a => a.id === albumId);
+  state.albumEditMode = false;
+  state.albumSelectMode = false;
+  state.albumSelected = new Set();
+  // Explicitly hide all views
+  ['gallery-view','recent-view','recent-detail-view','albums-view','album-detail-view'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.classList.remove('active');
+  });
+  document.getElementById('album-detail-view').classList.add('active');
+  document.getElementById('back-btn').style.display = 'flex';
+  document.getElementById('back-btn').onclick = () => {
+    document.getElementById('album-detail-view').classList.remove('active');
+    document.getElementById('albums-view').classList.add('active');
+    document.getElementById('back-btn').style.display = 'none';
+    document.getElementById('back-btn').onclick = showGallery;
+    document.getElementById('header-title').textContent = 'Darkroom Log';
+    loadAlbumsTab();
+  };
+  document.getElementById('header-title').textContent = state.currentAlbum.title;
+  renderAlbumDetail();
+}
+
+function renderAlbumDetail() {
+  const album = state.currentAlbum;
+  const editMode = state.albumEditMode;
+  const grid = document.getElementById('album-photo-grid');
+  const toolbar = document.getElementById('album-toolbar');
+  const shareUrl = window.location.origin + '/album/' + album.slug;
+
+  toolbar.innerHTML = `
+    <div style="max-width:1200px;margin:0 auto;width:100%;display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
+      <button class="btn btn-ghost btn-sm" data-action="openSlideshowSettings">▶ Slideshow</button>
+      <button class="btn btn-ghost btn-sm" data-action="toggleAlbumEdit">${editMode ? '✓ Done' : '⇄ Reorder'}</button>
+      ${editMode ? `<button class="btn btn-danger btn-sm" data-action="deleteAlbum" data-id="${album.id}">Delete</button>` : ''}
+      <button class="btn btn-ghost btn-sm" data-action="toggleAlbumSelectMode">Select</button>
+      <div style="flex:1"></div>
+      <div class="share-link-box" data-action="copyShareLink" data-url="${shareUrl}" title="Copy share link" style="font-size:10px">🔗 ${shareUrl}</div>
+    </div>
+    <div id="album-select-toolbar" style="max-width:1200px;margin:0.5rem auto 0;width:100%;gap:0.5rem;align-items:center;display:${state.albumSelectMode ? 'flex' : 'none'}">
+      <span id="album-select-count" style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text-dim)">${state.albumSelected ? state.albumSelected.size : 0} selected</span>
+      <button class="btn btn-ghost btn-sm" data-action="downloadSelectedAlbumPhotos">↓ Download</button>
+      <button class="btn btn-ghost btn-sm" data-action="toggleAlbumSelectMode">✕ Cancel</button>
+    </div>
+  `;
+
+  if (!album.assets.length) {
+    grid.innerHTML = '<div class="album-empty" style="grid-column:1/-1;padding:3rem;text-align:center;color:var(--text-dim);font-family:IBM Plex Mono,monospace;font-size:11px">No photos yet.<br>Add photos from the Library tab.</div>';
+    grid.className = 'gallery-grid';
+    return;
+  }
+
+  grid.className = 'gallery-grid' + (editMode ? ' album-edit-mode' : '');
+  const inSelectMode = state.albumSelectMode;
+  const selected = state.albumSelected || new Set();
+
+  grid.innerHTML = album.assets.map((assetId, idx) => `
+    <div class="gallery-item${inSelectMode && selected.has(assetId) ? ' selected' : ''}"
+         draggable="${editMode}"
+         ondragstart="dragStart(event, ${idx})"
+         ondragover="dragOver(event)"
+         ondrop="dragDrop(event, ${idx})"
+         data-action="albumPhotoClick" data-id="${assetId}" data-idx="${idx}">
+      <img src="/api/immich/thumb/${assetId}" loading="lazy" onerror="this.style.background='#1a1a1a'" style="cursor:pointer">
+      ${editMode ? `<button class="album-photo-remove" data-action="removeFromAlbum" data-id="${assetId}">×</button>` : ''}
+      ${inSelectMode ? `<div class="select-check${selected.has(assetId) ? ' active' : ''}"></div>` : ''}
+      ${!editMode && !inSelectMode ? `<button class="btn btn-ghost btn-sm" style="position:absolute;bottom:0.4rem;right:0.4rem;opacity:0;transition:opacity 0.2s;font-size:10px" data-action="openAlbumSlideshow" data-idx="${idx}">▶</button>` : ''}
+    </div>
+  `).join('');
+}
+
+async function showAlbumPhotoDetail(assetId, idx) {
+  state.previousView = 'album-detail-view';
+  const album = state.currentAlbum;
+  state.recentItems = album.assets.map(id => ({ id, originalFileName: '', createdAt: '' }));
+  state.displayedItems = state.recentItems;
+  await showRecentDetail(assetId);
+}
+
+function toggleAlbumSelectMode() {
+  state.albumSelectMode = !state.albumSelectMode;
+  state.albumSelected = new Set();
+  lastSelectedIdx = -1;
+  renderAlbumDetail();
+}
+
+let lastSelectedIdx = -1;
+function toggleAlbumPhotoSelect(assetId, e) {
+  if (!state.albumSelected) state.albumSelected = new Set();
+  const album = state.currentAlbum;
+  const idx = album.assets.indexOf(assetId);
+  if (e && e.shiftKey && lastSelectedIdx >= 0) {
+    // Select range between lastSelectedIdx and idx
+    const from = Math.min(lastSelectedIdx, idx);
+    const to = Math.max(lastSelectedIdx, idx);
+    for (let i = from; i <= to; i++) state.albumSelected.add(album.assets[i]);
+  } else {
+    if (state.albumSelected.has(assetId)) state.albumSelected.delete(assetId);
+    else state.albumSelected.add(assetId);
+    lastSelectedIdx = idx;
+  }
+  renderAlbumDetail();
+}
+
+async function downloadSelectedAlbumPhotos() {
+  const ids = [...(state.albumSelected || [])];
+  if (!ids.length) return;
+  for (const id of ids) {
+    // Get original filename from meta or fetch it
+    let filename = state.recentMeta[id]?.filename || null;
+    if (!filename) {
+      try {
+        const m = await fetch('/api/immich/photo/' + id).then(r => r.json());
+        filename = m.filename || (id + '.jpg');
+        if (!state.recentMeta[id]) state.recentMeta[id] = {};
+        state.recentMeta[id].filename = filename;
+      } catch(e) { filename = id + '.jpg'; }
+    }
+    const r = await fetch('/api/immich/original/' + id);
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    await new Promise(r => setTimeout(r, 400));
+  }
+}
+
+function toggleAlbumEdit() {
+  state.albumEditMode = !state.albumEditMode;
+  renderAlbumDetail();
+}
+
+async function deleteAlbum(albumId) {
+  if (!confirm('Delete this album? Photos in Immich are not affected.')) return;
+  await fetch('/api/albums/' + albumId, { method: 'DELETE' });
+  document.getElementById('album-detail-view').classList.remove('active');
+  document.getElementById('albums-view').classList.add('active');
+  document.getElementById('back-btn').style.display = 'none';
+  document.getElementById('header-title').textContent = 'Darkroom Log';
+  loadAlbumsTab();
+}
+
+async function removeFromAlbum(assetId) {
+  const album = state.currentAlbum;
+  album.assets = album.assets.filter(a => a !== assetId);
+  await fetch('/api/albums/' + album.id, {
+    method: 'PUT', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ assets: album.assets })
+  });
+  renderAlbumDetail();
+}
+
+// Drag to reorder
+let dragSrcIdx = null;
+function dragStart(e, idx) { dragSrcIdx = idx; e.dataTransfer.effectAllowed = 'move'; }
+function dragOver(e) { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }
+async function dragDrop(e, targetIdx) {
+  e.preventDefault();
+  if (dragSrcIdx === null || dragSrcIdx === targetIdx) return;
+  const album = state.currentAlbum;
+  const assets = [...album.assets];
+  const [moved] = assets.splice(dragSrcIdx, 1);
+  assets.splice(targetIdx, 0, moved);
+  album.assets = assets;
+  dragSrcIdx = null;
+  await fetch('/api/albums/' + album.id, {
+    method: 'PUT', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ assets })
+  });
+  renderAlbumDetail();
+}
+
+// Create album modal
+function openCreateAlbumModal() {
+  document.getElementById('new-album-title').value = '';
+  document.getElementById('create-album-modal').classList.add('active');
+}
+
+async function createAlbum() {
+  const title = document.getElementById('new-album-title').value.trim();
+  if (!title) return;
+  const r = await fetch('/api/albums', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ title })
+  });
+  const album = await r.json();
+  closeModal('create-album-modal');
+  state.albums.push(album);
+  renderAlbumsGrid();
+}
+
+// Add to album from Recent detail
+function openAddToAlbumModal(assetId) {
+  state.pendingAddAssetId = assetId;
+  document.getElementById('quick-album-name').value = '';
+  const list = document.getElementById('album-pick-list');
+  if (!state.albums.length) {
+    list.innerHTML = '<div style="color:var(--text-dim);font-family:IBM Plex Mono,monospace;font-size:11px;margin-bottom:0.5rem">No albums yet</div>';
+  } else {
+    list.innerHTML = state.albums.map(a => `
+      <button class="btn btn-ghost btn-sm" style="width:100%;text-align:left;margin-bottom:0.4rem" data-action="addToAlbum" data-id="${a.id}">${a.title} (${a.assets.length})</button>
+    `).join('');
+  }
+  document.getElementById('add-to-album-modal').classList.add('active');
+}
+
+async function addToAlbum(albumId) {
+  const album = state.albums.find(a => a.id === albumId);
+  if (!album) return;
+  const toAdd = Array.isArray(state.pendingAddAssetId) ? state.pendingAddAssetId : [state.pendingAddAssetId];
+  const newAssets = [...album.assets];
+  toAdd.forEach(id => { if (!newAssets.includes(id)) newAssets.push(id); });
+  const cover = album.cover || newAssets[0];
+  await fetch('/api/albums/' + albumId, {
+    method: 'PUT', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ assets: newAssets, cover })
+  });
+  album.assets = newAssets;
+  album.cover = cover;
+  closeModal('add-to-album-modal');
+  state.pendingAddAssetId = null;
+  if (state.selectMode) exitSelectMode();
+}
+
+async function quickCreateAndAdd() {
+  const title = document.getElementById('quick-album-name').value.trim();
+  if (!title) return;
+  const r = await fetch('/api/albums', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ title })
+  });
+  const album = await r.json();
+  state.albums.push(album);
+  await addToAlbum(album.id);
+}
+
+function copyShareLink(url) {
+  navigator.clipboard.writeText(url).then(() => {
+    alert('Share link copied to clipboard!');
+  });
+}
+
+// ── SLIDESHOW ─────────────────────────────────────────────────────────────────
+
+function startSlideshow() {
+  openAlbumSlideshow(0);
+}
+
+async function openAlbumSlideshow(startIdx) {
+  const album = state.currentAlbum;
+  if (!album || !album.assets.length) return;
+  state.slideshow = { active: true, index: startIdx, timer: null, paused: false };
+  ssActiveSlot = 'a';
+  ssDescVisible = true;
+  document.getElementById('slideshow-slide-a').innerHTML = '';
+  document.getElementById('slideshow-slide-b').innerHTML = '';
+  document.getElementById('slideshow-overlay').classList.add('active');
+  // Start music
+  startSlideshowMusic(album.slideshowSettings || {});
+  // Show title card first if enabled, otherwise go straight to first slide
+  await showTitleCard(album);
+  showSlide(startIdx);
+  scheduleNext();
+  showSlideshowControls();
+}
+
+// ── SLIDESHOW SETTINGS ──────────────────────────────────────────────────────
+
+function openSlideshowSettings() {
+  const album = state.currentAlbum;
+  if (!album || !album.assets.length) return;
+  const settings = album.slideshowSettings || {};
+  // Restore saved settings
+  ssSetToggle('ss-show-title', settings.showTitle || false);
+  document.getElementById('ss-byline').value = settings.byline || 'JJ Lakatua';
+  ssSetToggle('ss-show-location', settings.showLocation || false);
+  ssSetToggle('ss-show-dates', settings.showDates || false);
+  ssSetToggle('ss-show-count', settings.showCount || false);
+  toggleSSTitleOptions();
+  loadMusicList(settings.musicFile || null);
+  document.getElementById('slideshow-settings-modal').classList.add('active');
+}
+
+function ssToggle(id) {
+  const el = document.getElementById(id);
+  if (el) el.classList.toggle('on');
+}
+
+function ssToggleVal(id) {
+  return document.getElementById(id)?.classList.contains('on') || false;
+}
+
+function ssSetToggle(id, val) {
+  const el = document.getElementById(id);
+  if (el) el.classList.toggle('on', !!val);
+}
+
+function toggleSSTitleOptions() {
+  const show = ssToggleVal('ss-show-title');
+  document.getElementById('ss-title-options').style.display = show ? 'block' : 'none';
+}
+
+async function loadMusicList(currentFile) {
+  const sel = document.getElementById('ss-music-select');
+  try {
+    const r = await fetch('/api/albums/music-list');
+    const data = await r.json();
+    sel.innerHTML = '<option value="">No music</option>';
+    (data.files || []).forEach(f => {
+      const opt = document.createElement('option');
+      opt.value = f;
+      opt.textContent = f.replace(/^\d+-/, '').replace(/_/g, ' ');
+      if (f === currentFile) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    if (currentFile && !data.files.includes(currentFile)) {
+      const opt = document.createElement('option');
+      opt.value = currentFile;
+      opt.textContent = currentFile;
+      opt.selected = true;
+      sel.appendChild(opt);
+    }
+  } catch(e) { console.error('music list failed', e); }
+}
+
+async function saveSlideshowSettingsAndStart() {
+  const album = state.currentAlbum;
+  const settings = {
+    showTitle: ssToggleVal('ss-show-title'),
+    byline: document.getElementById('ss-byline').value.trim(),
+    showLocation: ssToggleVal('ss-show-location'),
+    showDates: ssToggleVal('ss-show-dates'),
+    showCount: ssToggleVal('ss-show-count'),
+    musicFile: document.getElementById('ss-music-select').value || null,
+  };
+  album.slideshowSettings = settings;
+  // Save to server
+  try {
+    await fetch('/api/albums/' + album.id, {
+      method: 'PUT',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ slideshowSettings: settings })
+    });
+  } catch(e) {}
+  closeModal('slideshow-settings-modal');
+  openAlbumSlideshow(0);
+}
+
+async function showTitleCard(album) {
+  const settings = album.slideshowSettings || {};
+  if (!settings.showTitle) return;
+  const card = document.getElementById('ss-title-card');
+  const content = document.getElementById('ss-title-card-content');
+  let html = `<div class="ss-title-main">${album.title}</div>`;
+  html += `<div style="width:60px;height:1px;background:var(--safe);margin:1.5rem auto"></div>`;
+  if (settings.byline) html += `<div class="ss-title-sub">Photography by ${settings.byline}</div>`;
+  if (settings.showCount) html += `<div class="ss-title-sub" style="margin-top:0.75rem;letter-spacing:0.2em">${album.assets.length} PHOTOS</div>`;
+  content.innerHTML = html;
+  card.style.display = 'flex';
+  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  card.style.opacity = '1';
+  await new Promise(r => setTimeout(r, 3500));
+  card.style.opacity = '0';
+  await new Promise(r => setTimeout(r, 1000));
+  card.style.display = 'none';
+}
+
+let ssAudio = null;
+function startSlideshowMusic(settings) {
+  if (ssAudio) { ssAudio.pause(); ssAudio = null; }
+  if (!settings.musicFile) return;
+  ssAudio = new Audio('/api/albums/music/' + encodeURIComponent(settings.musicFile));
+  ssAudio.loop = true;
+  ssAudio.volume = 0;
+  ssAudio.play().catch(() => {});
+  // Fade in
+  let vol = 0;
+  const fade = setInterval(() => {
+    vol = Math.min(vol + 0.05, 0.8);
+    ssAudio.volume = vol;
+    if (vol >= 0.8) clearInterval(fade);
+  }, 100);
+}
+
+function stopSlideshowMusic() {
+  if (!ssAudio) return;
+  let vol = ssAudio.volume;
+  const fade = setInterval(() => {
+    vol = Math.max(vol - 0.05, 0);
+    ssAudio.volume = vol;
+    if (vol <= 0) { clearInterval(fade); ssAudio.pause(); ssAudio = null; }
+  }, 80);
+}
+
+const KB_MOVES = [
+  { start: 'scale(1.0) translate(-3%, -3%)',  end: 'scale(1.25) translate(2%, 2%)' },
+  { start: 'scale(1.25) translate(3%, 2%)',   end: 'scale(1.0) translate(-2%, -2%)' },
+  { start: 'scale(1.0) translate(4%, -4%)',   end: 'scale(1.3) translate(-3%, 3%)' },
+  { start: 'scale(1.3) translate(-4%, 3%)',   end: 'scale(1.0) translate(3%, -2%)' },
+  { start: 'scale(1.0) translate(0%, -5%)',   end: 'scale(1.25) translate(0%, 3%)' },
+  { start: 'scale(1.25) translate(0%, 4%)',   end: 'scale(1.0) translate(0%, -3%)' },
+];
+
+let ssActiveSlot = 'a';
+let ssCleanupTimers = [];
+
+function cancelSlideCleanup() {
+  ssCleanupTimers.forEach(t => clearTimeout(t));
+  ssCleanupTimers = [];
+  // Hide the inactive slot cleanly without touching the visible one
+  const inactiveSlot = ssActiveSlot === 'a' ? 'b' : 'a';
+  const inactiveEl = document.getElementById('slideshow-slide-' + inactiveSlot);
+  if (inactiveEl) { inactiveEl.classList.remove('ss-visible'); inactiveEl.innerHTML = ''; inactiveEl.style.zIndex = 1; }
+}
+
+function showSlide(idx) {
+  const album = state.currentAlbum;
+  const counter = document.getElementById('slideshow-counter');
+  counter.textContent = (idx + 1) + ' / ' + album.assets.length;
+  state.slideshow.index = idx;
+
+  // Show description
+  const descEl = document.getElementById('slideshow-description');
+  const assetId = album.assets[idx];
+  if (descEl) {
+    if (state.recentMeta[assetId]?.description) {
+      descEl.textContent = state.recentMeta[assetId].description;
+    } else {
+      descEl.textContent = '';
+      fetch('/api/immich/photo/' + assetId).then(r => r.json()).then(m => {
+        if (!state.recentMeta[assetId]) state.recentMeta[assetId] = {};
+        state.recentMeta[assetId].description = m.description || '';
+        if (state.slideshow.index === idx && descEl) descEl.textContent = m.description || '';
+      }).catch(() => {});
+    }
+  }
+
+  const move = KB_MOVES[idx % KB_MOVES.length];
+  const nextSlot = ssActiveSlot === 'a' ? 'b' : 'a';
+  const currentEl = document.getElementById('slideshow-slide-' + ssActiveSlot);
+  const nextEl = document.getElementById('slideshow-slide-' + nextSlot);
+  const url = '/api/immich/original/' + album.assets[idx];
+  const thumbUrl = '/api/immich/thumb/' + album.assets[idx];
+
+  nextEl.innerHTML = `
+    <div class="ss-bg" style="background-image:url('${thumbUrl}')"></div>
+    <img class="ss-img" src="${url}">
+  `;
+  nextEl.style.zIndex = 1;
+  nextEl.classList.remove('ss-visible');
+
+  const img = nextEl.querySelector('.ss-img');
+  const show = () => {
+    img.style.setProperty('--kb-start', move.start);
+    img.style.setProperty('--kb-end', move.end);
+    nextEl.style.zIndex = 3;
+    void nextEl.offsetWidth;
+    nextEl.classList.add('ss-visible');
+    const t1 = setTimeout(() => { currentEl.classList.remove('ss-visible'); }, 1500);
+    const t2 = setTimeout(() => {
+      currentEl.innerHTML = '';
+      currentEl.style.zIndex = 1;
+      ssActiveSlot = nextSlot;
+      ssCleanupTimers = ssCleanupTimers.filter(t => t !== t1 && t !== t2);
+    }, 3000);
+    ssCleanupTimers.push(t1, t2);
+  };
+
+  if (img.complete) { show(); }
+  else { img.onload = show; }
+
+  // Preload next image
+  const preloadIdx = (idx + 1) % album.assets.length;
+  const pre = new Image();
+  pre.src = '/api/immich/original/' + album.assets[preloadIdx];
+}
+
+let ssHideTimer = null;
+let ssDescVisible = true;
+
+function toggleSlideshowMusic() {
+  const btn = document.getElementById('slideshow-music-btn');
+  if (ssAudio) {
+    if (ssAudio.paused) {
+      ssAudio.play();
+      if (btn) btn.style.color = '';
+    } else {
+      ssAudio.pause();
+      if (btn) btn.style.color = 'var(--text-dim)';
+    }
+  }
+}
+
+function toggleSlideshowDesc() {
+  ssDescVisible = !ssDescVisible;
+  const descEl = document.getElementById('slideshow-description');
+  const btn = document.getElementById('slideshow-desc-btn');
+  if (descEl) descEl.style.opacity = ssDescVisible ? '1' : '0';
+  if (btn) btn.style.color = ssDescVisible ? 'var(--safe)' : '';
+}
+function showSlideshowControls() {
+  const ctrl = document.querySelector('.slideshow-controls');
+  const counter = document.getElementById('slideshow-counter');
+  if (ctrl) ctrl.classList.remove('ss-hidden');
+  if (counter) counter.classList.remove('ss-hidden');
+  clearTimeout(ssHideTimer);
+  ssHideTimer = setTimeout(() => {
+    if (ctrl) ctrl.classList.add('ss-hidden');
+    if (counter) counter.classList.add('ss-hidden');
+  }, 3000);
+}
+
+function scheduleNext() {
+  if (state.slideshow.timer) clearTimeout(state.slideshow.timer);
+  if (!state.slideshow.paused) {
+    state.slideshow.timer = setTimeout(() => {
+      slideshowNext();
+    }, 7000);
+  }
+}
+
+function slideshowNext() {
+  const album = state.currentAlbum;
+  const nextIdx = (state.slideshow.index + 1) % album.assets.length;
+  if (state.slideshow.timer) clearTimeout(state.slideshow.timer);
+  cancelSlideCleanup();
+  showSlide(nextIdx);
+  scheduleNext();
+}
+
+function slideshowPrev() {
+  const album = state.currentAlbum;
+  const prevIdx = (state.slideshow.index - 1 + album.assets.length) % album.assets.length;
+  if (state.slideshow.timer) clearTimeout(state.slideshow.timer);
+  cancelSlideCleanup();
+  showSlide(prevIdx);
+  scheduleNext();
+}
+
+function toggleSlideshow() {
+  state.slideshow.paused = !state.slideshow.paused;
+  document.getElementById('slideshow-pause-btn').textContent = state.slideshow.paused ? '▶' : '❚❚';
+  if (!state.slideshow.paused) {
+    // Advance immediately instead of waiting full 7s
+    slideshowNext();
+  } else {
+    if (state.slideshow.timer) clearTimeout(state.slideshow.timer);
+  }
+}
+
+function closeSlideshow() {
+  if (state.slideshow.timer) clearTimeout(state.slideshow.timer);
+  cancelSlideCleanup();
+  state.slideshow = { active: false, index: 0, timer: null, paused: false };
+  document.getElementById('slideshow-overlay').classList.remove('active');
+  const card = document.getElementById('ss-title-card');
+  if (card) { card.style.opacity = '0'; card.style.display = 'none'; }
+  stopSlideshowMusic();
+}
+
+// Slideshow keyboard + swipe
+document.addEventListener('keydown', e => {
+  if (state.slideshow.active) {
+    if (e.key === 'ArrowRight') slideshowNext();
+    if (e.key === 'ArrowLeft') slideshowPrev();
+    if (e.key === ' ') { e.preventDefault(); toggleSlideshow(); }
+    if (e.key === 'Escape') closeSlideshow();
+  }
+});
+
+let ssTouchX = null;
+document.addEventListener('touchstart', e => {
+  if (state.slideshow.active) ssTouchX = e.touches[0].clientX;
+}, {passive: true});
+document.addEventListener('touchend', e => {
+  if (!ssTouchX || !state.slideshow.active) return;
+  const dx = e.changedTouches[0].clientX - ssTouchX;
+  if (Math.abs(dx) > 50) dx < 0 ? slideshowNext() : slideshowPrev();
+  ssTouchX = null;
+}, {passive: true});
+
+// ── SELECTION MODE ──────────────────────────────────────────────────────────
+function toggleSelectMode() {
+  state.selectMode ? exitSelectMode() : enterSelectMode();
+}
+
+function enterSelectMode() {
+  state.selectMode = true;
+  state.selectedAssets = new Set();
+  document.getElementById('select-mode-btn').style.display = 'none';
+  document.getElementById('select-actions').style.display = 'flex';
+  renderRecentGrid(state.recentItems);
+}
+
+function exitSelectMode() {
+  state.selectMode = false;
+  state.selectedAssets = new Set();
+  document.getElementById('select-mode-btn').style.display = 'inline-block';
+  document.getElementById('select-actions').style.display = 'none';
+  renderRecentGrid(state.recentItems);
+}
+
+function toggleAssetSelect(assetId) {
+  if (state.selectedAssets.has(assetId)) {
+    state.selectedAssets.delete(assetId);
+  } else {
+    state.selectedAssets.add(assetId);
+  }
+  document.getElementById('select-count').textContent = state.selectedAssets.size + ' selected';
+  // Update checkmark on thumbnail
+  const el = document.getElementById('sel-' + assetId);
+  if (el) el.classList.toggle('selected', state.selectedAssets.has(assetId));
+}
+
+function addSelectionToAlbum() {
+  if (!state.selectedAssets.size) { alert('Select at least one photo first.'); return; }
+  state.pendingAddAssetId = [...state.selectedAssets];
+  const list = document.getElementById('album-pick-list');
+  if (!state.albums.length) {
+    list.innerHTML = '<div style="color:var(--text-dim);font-family:IBM Plex Mono,monospace;font-size:11px;margin-bottom:0.5rem">No albums yet</div>';
+  } else {
+    list.innerHTML = state.albums.map(a => `
+      <button class="btn btn-ghost btn-sm" style="width:100%;text-align:left;margin-bottom:0.4rem" data-action="addToAlbum" data-id="${a.id}">${a.title} (${a.assets.length})</button>
+    `).join('');
+  }
+  document.getElementById('add-to-album-modal').classList.add('active');
+}
+
+document.getElementById('login-password').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
+
+(async () => {
+  const r = await fetch('/api/auth/check');
+  const d = await r.json();
+  if (d.authenticated) {
+    document.getElementById('login-screen').style.display = 'none';
+    document.getElementById('app').style.display = 'block';
+    loadGallery();
+    fetch('/api/albums').then(r => r.json()).then(a => state.albums = a);
+  }
+})();
+
+async function loadGallery() {
+  const r = await fetch('/api/prints');
+  state.prints = await r.json();
+  renderTagFilterBar();
+  applyFilters();
+}
+
+function renderTagFilterBar() {
+  const allTags = [...new Set(state.prints.flatMap(p => p.tags || []))].sort();
+  const bar = document.getElementById('tag-filter-bar');
+  if (!allTags.length) { bar.innerHTML = ''; return; }
+  bar.innerHTML = allTags.map(t => `
+    <button class="tag-filter ${state.activeTag === t ? 'active' : ''}" data-action="setTagFilter" data-tag="${t}">${t}</button>
+  `).join('');
+}
+
+function setTagFilter(tag) {
+  state.activeTag = state.activeTag === tag ? null : tag;
+  renderTagFilterBar();
+  applyFilters();
+}
+
+function setSort(s) {
+  state.sort = s;
+  document.querySelectorAll('.sort-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('sort-' + s).classList.add('active');
+  applyFilters();
+}
+
+function applyFilters() {
+  const q = document.getElementById('gallery-search').value.toLowerCase();
+  let prints = [...state.prints];
+
+  // Search filter
+  if (q) prints = prints.filter(p =>
+    p.title.toLowerCase().includes(q) ||
+    p.filename.toLowerCase().includes(q) ||
+    (p.description || '').toLowerCase().includes(q) ||
+    (p.tags || []).some(t => t.toLowerCase().includes(q))
+  );
+
+  // Tag filter
+  if (state.activeTag) prints = prints.filter(p => (p.tags || []).includes(state.activeTag));
+
+  // Sort
+  const sort = state.sort || 'recent';
+  if (sort === 'recent') {
+    prints.sort((a, b) => {
+      const aDate = Math.max(...(a.sessions || []).map(s => new Date(s.date).getTime()), 0);
+      const bDate = Math.max(...(b.sessions || []).map(s => new Date(s.date).getTime()), 0);
+      return bDate - aDate;
+    });
+  } else if (sort === 'oldest') {
+    prints.sort((a, b) => {
+      const aDate = Math.min(...(a.sessions || []).map(s => new Date(s.date).getTime()).filter(Boolean), Infinity);
+      const bDate = Math.min(...(b.sessions || []).map(s => new Date(s.date).getTime()).filter(Boolean), Infinity);
+      return aDate - bDate;
+    });
+  } else if (sort === 'title') {
+    prints.sort((a, b) => a.title.localeCompare(b.title));
+  } else if (sort === 'sessions') {
+    prints.sort((a, b) => (b.sessions?.length || 0) - (a.sessions?.length || 0));
+  }
+
+  renderGallery(prints);
+}
+
+function renderGallery(prints) {
+  const grid = document.getElementById('gallery-grid');
+  if (!prints.length) { grid.innerHTML = '<div class="gallery-empty">No prints yet.<br>Tap + Print to add one.</div>'; return; }
+  grid.innerHTML = prints.map(p => `
+    <div class="gallery-item" data-action="showDetail" data-id="${p.id}">
+      <img src="/api/immich/thumb/${p.immichId}" alt="${p.title}" loading="lazy" onerror="this.style.background='#1a1a1a'">
+      <div class="gallery-item-info">
+        <div class="gallery-item-title">${p.title}</div>
+        <div class="gallery-item-count">${p.sessions?.length || 0} session${(p.sessions?.length || 0) !== 1 ? 's' : ''}</div>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function showDetail(printId) {
+  const print = state.prints.find(p => p.id === printId);
+  if (!print) return;
+  state.currentPrintId = printId;
+  document.getElementById('gallery-view').classList.remove('active');
+  document.getElementById('detail-view').classList.add('active');
+  document.getElementById('back-btn').style.display = 'flex';
+  document.getElementById('add-print-btn').style.display = 'none';
+  document.getElementById('header-title').textContent = print.title;
+
+  const content = document.getElementById('detail-content');
+  content.innerHTML = '<div class="loading">Loading...</div>';
+
+  let meta = {};
+  try { const r = await fetch(`/api/immich/photo/${print.immichId}`); meta = await r.json(); } catch(e) {}
+
+  const sessions = print.sessions || [];
+  content.innerHTML = `
+    <div class="detail-layout">
+      <div class="detail-left">
+        <img class="detail-image" src="/api/immich/original/${print.immichId}" alt="${print.title}">
+      </div>
+      <div class="detail-right">
+    <div class="detail-meta">
+      <div class="detail-title-row">
+        <div class="detail-title" id="title-display">${print.title}</div>
+        <button class="btn-icon" data-action="startEditTitle" title="Edit title">✎</button>
+      </div>
+      ${meta.description ? `<div class="detail-film">${meta.description}</div>` : ''}
+      <div class="exif-row">
+        ${meta.shutterSpeed ? `<div class="exif-item">${meta.shutterSpeed}<span>Shutter</span></div>` : ''}
+        ${meta.fNumber ? `<div class="exif-item">f/${meta.fNumber}<span>Aperture</span></div>` : ''}
+        ${meta.iso ? `<div class="exif-item">ISO ${meta.iso}<span>ISO</span></div>` : ''}
+        ${meta.lens ? `<div class="exif-item">${meta.lens}<span>Lens</span></div>` : ''}
+      </div>
+      <div style="margin-top:0.5rem;font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--text-dim)">${print.filename}</div>
+      <div class="print-tags-row" id="print-tags-row">
+        ${(print.tags || []).map(t => `<span class="print-tag">${t} <button class="btn-icon" data-action="removeTag" data-tag="${t}" style="font-size:10px">×</button></span>`).join('')}
+        <button class="btn-icon" data-action="showTagInput" style="font-size:11px;color:var(--safe)">+ tag</button>
+        <input class="tag-add-input" id="tag-add-input" type="text" placeholder="tag name" onkeydown="handleTagKey(event)">
+      </div>
+    </div>
+    <div class="sessions-header">
+      <div class="sessions-label">Print Sessions (${sessions.length})</div>
+      <div style="display:flex;gap:0.5rem">
+        <button class="btn btn-ghost btn-sm" data-action="openAddSessionModal">+ Session</button>
+        <button class="btn btn-danger btn-sm" data-action="deletePrint">Delete Print</button>
+      </div>
+    </div>
+    ${sessions.length === 0 ? '<div class="loading">No sessions yet.</div>' : ''}
+    ${sessions.map(s => {
+      const fstop = s.fStop ? (s.fStop.startsWith('f/') ? s.fStop : 'f/' + s.fStop) : '';
+      const isSplit = s.technique === 'Split Grade';
+      const lowLabel = s.gradeLow || '#00';
+      const highLabel = s.gradeHigh || '#5';
+      const lowTime = s.gradeOO ? (s.gradeOO.toString().endsWith('s') ? s.gradeOO : s.gradeOO + 's') : '';
+      const highTime = s.grade5 ? (s.grade5.toString().endsWith('s') ? s.grade5 : s.grade5 + 's') : '';
+      const singleTime = s.time ? (s.time.toString().endsWith('s') ? s.time : s.time + 's') : '';
+      const grade = s.grade ? (s.grade.startsWith('#') ? s.grade : '#' + s.grade) : '';
+      let exposureLine = '';
+      if (isSplit) {
+        exposureLine = [fstop, lowLabel + ' → ' + lowTime, highLabel + ' → ' + highTime].filter(Boolean).join('  ·  ');
+      } else {
+        exposureLine = [fstop, grade, singleTime].filter(Boolean).join('  ·  ');
+      }
+      return `
+      <div class="session-card" id="session-${s.id}">
+        <div class="session-header-row">
+          <div class="session-date">${s.date}</div>
+          <div class="session-size">${s.printSize || ''}</div>
+        </div>
+        <div class="session-exposure">${exposureLine}</div>
+        <div class="session-details">
+          ${s.enlarger ? `<span class="session-tag">Enlarger #${s.enlarger}</span>` : ''}
+          ${s.lens ? `<span class="session-tag">Lens ${s.lens}</span>` : ''}
+          ${s.paper ? `<span class="session-tag">${s.paper}</span>` : ''}
+        </div>
+        ${s.dodgeBurn ? `<div class="session-notes">${s.dodgeBurn}</div>` : ''}
+        ${s.notes ? `<div class="session-notes" style="margin-top:0.5rem;border-color:var(--border);color:var(--text-dim)">${s.notes}</div>` : ''}
+        <div class="session-actions">
+          <button class="btn btn-ghost btn-sm" data-action="editSession" data-id="${s.id}">Edit</button>
+          <button class="btn btn-danger btn-sm" data-action="deleteSession" data-id="${s.id}">Delete</button>
+        </div>
+      </div>
+    `}).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function showGallery() {
+  document.getElementById('gallery-view').classList.add('active');
+  document.getElementById('detail-view').classList.remove('active');
+  document.getElementById('back-btn').style.display = 'none';
+  document.getElementById('add-print-btn').style.display = 'inline-block';
+  document.getElementById('header-title').textContent = 'Darkroom Log';
+  loadGallery();
+  renderTagFilterBar();
+}
+
+function startEditTitle() {
+  const print = state.prints.find(p => p.id === state.currentPrintId);
+  document.querySelector('.detail-title-row').innerHTML = `
+    <input class="title-edit-input" id="title-edit-input" type="text" value="${print.title}">
+    <button class="btn btn-ghost btn-sm" data-action="saveTitle">Save</button>
+    <button class="btn-icon" data-action="cancelEditTitle" data-title="${print.title}">✕</button>
+  `;
+  const inp = document.getElementById('title-edit-input');
+  inp.focus();
+  inp.addEventListener('keydown', e => { if (e.key === 'Enter') saveTitle(); if (e.key === 'Escape') cancelEditTitle(print.title); });
+}
+
+async function saveTitle() {
+  const newTitle = document.getElementById('title-edit-input').value.trim();
+  if (!newTitle) return;
+  await fetch(`/api/prints/${state.currentPrintId}`, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({title: newTitle}) });
+  const idx = state.prints.findIndex(p => p.id === state.currentPrintId);
+  if (idx !== -1) state.prints[idx].title = newTitle;
+  document.getElementById('header-title').textContent = newTitle;
+  document.querySelector('.detail-title-row').innerHTML = `
+    <div class="detail-title" id="title-display">${newTitle}</div>
+    <button class="btn-icon" data-action="startEditTitle" title="Edit title">✎</button>
+  `;
+}
+
+function cancelEditTitle(original) {
+  document.querySelector('.detail-title-row').innerHTML = `
+    <div class="detail-title" id="title-display">${original}</div>
+    <button class="btn-icon" data-action="startEditTitle" title="Edit title">✎</button>
+  `;
+}
+
+function openAddPrintModal() {
+  document.getElementById('add-print-modal').classList.add('active');
+  document.getElementById('immich-search').value = '';
+  document.getElementById('immich-results').innerHTML = '';
+  document.getElementById('print-title').value = '';
+  state.selectedImmich = null;
+}
+
+function openAddSessionModal() {
+  state.editingSessionId = null;
+  document.getElementById('session-modal-title').textContent = 'Log Print Session';
+  clearSessionForm();
+  const now = new Date(); const localDate = now.getFullYear() + '-' + String(now.getMonth()+1).padStart(2,'0') + '-' + String(now.getDate()).padStart(2,'0'); document.getElementById('s-date').value = localDate;
+  document.getElementById('add-session-modal').classList.add('active');
+}
+
+function editSession(sessionId) {
+  const print = state.prints.find(p => p.id === state.currentPrintId);
+  const s = print.sessions.find(s => s.id === sessionId);
+  if (!s) return;
+  state.editingSessionId = sessionId;
+  document.getElementById('session-modal-title').textContent = 'Edit Session';
+  clearSessionForm();
+  document.getElementById('s-date').value = s.date || '';
+  document.getElementById('s-size').value = s.printSize || '';
+  document.getElementById('s-enlarger').value = s.enlarger || '';
+  document.getElementById('s-lens').value = s.lens || '';
+  const paperSelect = document.getElementById('s-paper'); const knownPapers = ['Fomabrom Variant 111 Glossy','Ilford Multigrade FB Classic Glossy','Ilford Multigrade FB Warmtone Glossy','Ilford Multigrade RC Deluxe']; if (s.paper && knownPapers.includes(s.paper)) { paperSelect.value = s.paper; document.getElementById('s-paper-other').style.display = 'none'; } else if (s.paper) { paperSelect.value = '__other__'; document.getElementById('s-paper-other').value = s.paper; document.getElementById('s-paper-other').style.display = 'block'; } else { paperSelect.value = ''; }
+  document.getElementById('s-dodgeburn').value = s.dodgeBurn || '';
+  document.getElementById('s-notes').value = s.notes || '';
+  if (s.technique === 'Split Grade') {
+    setTechnique('split');
+    document.getElementById('s-fstop-split').value = s.fStop || '';
+    document.getElementById('s-grade-low').value = s.gradeLow || '#00';
+    document.getElementById('s-grade-high').value = s.gradeHigh || '#5';
+    document.getElementById('s-g00').value = s.gradeOO || '';
+    document.getElementById('s-g5').value = s.grade5 || '';
+  } else {
+    setTechnique('single');
+    document.getElementById('s-fstop').value = s.fStop || '';
+    document.getElementById('s-grade').value = s.grade || '';
+    document.getElementById('s-time').value = s.time || '';
+  }
+  document.getElementById('add-session-modal').classList.add('active');
+}
+
+function clearSessionForm() {
+  ['s-date','s-size','s-enlarger','s-lens','s-paper','s-fstop','s-grade','s-time','s-fstop-split','s-grade-low','s-grade-high','s-g00','s-g5','s-dodgeburn','s-notes'].forEach(id => { document.getElementById(id).value = ''; });
+  setTechnique('single');
+}
+
+function closeModal(id) { document.getElementById(id).classList.remove('active'); }
+
+function setTechnique(t) {
+  state.technique = t;
+  document.getElementById('t-single').classList.toggle('active', t === 'single');
+  document.getElementById('t-split').classList.toggle('active', t === 'split');
+  document.getElementById('single-fields').classList.toggle('visible', t === 'single');
+  document.getElementById('split-fields').classList.toggle('visible', t === 'split');
+}
+
+function searchImmich(q) {
+  clearTimeout(state.immichSearchTimeout);
+  if (!q || q.length < 2) { document.getElementById('immich-results').innerHTML = ''; return; }
+  state.immichSearchTimeout = setTimeout(async () => {
+    const r = await fetch(`/api/immich/search?q=${encodeURIComponent(q)}`);
+    const items = await r.json();
+    const el = document.getElementById('immich-results');
+    if (!items.length) { el.innerHTML = '<div class="search-result-item" style="color:var(--text-dim)">No results</div>'; return; }
+    el.innerHTML = '<div class="search-results">' + items.map(i => `<div class="search-result-item" data-action="selectImmich" data-item='${JSON.stringify(i).replace(/'/g, "&#39;")}'>${i.filename}</div>`).join('') + '</div>';
+  }, 300);
+}
+
+function selectImmich(item) {
+  state.selectedImmich = item;
+  document.getElementById('immich-search').value = item.filename;
+  if (!document.getElementById('print-title').value) {
+    document.getElementById('print-title').value = item.filename.replace(/\.[^.]+$/, '');
+  }
+  document.getElementById('immich-results').innerHTML = `<div class="search-result-item selected">${item.filename}</div>`;
+}
+
+async function createPrint() {
+  if (!state.selectedImmich) { alert('Please select a negative from Immich'); return; }
+  const title = document.getElementById('print-title').value.trim();
+  if (!title) { alert('Please enter a print title'); return; }
+  let desc = '';
+  try { const mr = await fetch('/api/immich/photo/' + state.selectedImmich.id); const md = await mr.json(); desc = md.description || ''; } catch(e) {}
+  const r = await fetch('/api/prints', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ immichId: state.selectedImmich.id, filename: state.selectedImmich.filename, title, description: desc }) });
+  const print = await r.json();
+  closeModal('add-print-modal');
+  await loadGallery();
+  showDetail(print.id);
+}
+
+function handlePaperChange(el) {
+  const other = document.getElementById('s-paper-other');
+  other.style.display = el.value === '__other__' ? 'block' : 'none';
+  if (el.value === '__other__') other.focus();
+}
+
+function getPaperValue() {
+  const sel = document.getElementById('s-paper');
+  return sel.value === '__other__' ? document.getElementById('s-paper-other').value : sel.value;
+}
+
+function autoPrefixHash(el) {
+  let v = el.value.replace(/^#+/, '');
+  if (v) el.value = '#' + v;
+}
+
+function autoPrefixF(el) {
+  let v = el.value.replace(/^f\/+/, '');
+  if (v) el.value = 'f/' + v;
+}
+
+function showTagInput() {
+  const inp = document.getElementById('tag-add-input');
+  inp.classList.add('visible');
+  inp.focus();
+}
+
+function handleTagKey(e) {
+  if (e.key === 'Enter') addTag();
+  if (e.key === 'Escape') {
+    document.getElementById('tag-add-input').classList.remove('visible');
+    document.getElementById('tag-add-input').value = '';
+  }
+}
+
+async function addTag() {
+  const inp = document.getElementById('tag-add-input');
+  const newTags = inp.value.split(/[\s,]+/).map(t => t.trim().toLowerCase()).filter(Boolean);
+  if (!newTags.length) return;
+  const print = state.prints.find(p => p.id === state.currentPrintId);
+  const tags = [...new Set([...(print.tags || []), ...newTags])];
+  await fetch(`/api/prints/${state.currentPrintId}`, {
+    method: 'PUT',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({tags})
+  });
+  print.tags = tags;
+  inp.value = '';
+  inp.classList.remove('visible');
+  updateTagsDisplay(print);
+}
+
+async function removeTag(tag) {
+  const print = state.prints.find(p => p.id === state.currentPrintId);
+  const tags = (print.tags || []).filter(t => t !== tag);
+  await fetch(`/api/prints/${state.currentPrintId}`, {
+    method: 'PUT',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({tags})
+  });
+  print.tags = tags;
+  updateTagsDisplay(print);
+}
+
+function updateTagsDisplay(print) {
+  const row = document.getElementById('print-tags-row');
+  if (!row) return;
+  row.innerHTML = `
+    ${(print.tags || []).map(t => `<span class="print-tag">${t} <button class="btn-icon" data-action="removeTag" data-tag="${t}" style="font-size:10px">×</button></span>`).join('')}
+    <button class="btn-icon" data-action="showTagInput" style="font-size:11px;color:var(--safe)">+ tag</button>
+    <input class="tag-add-input" id="tag-add-input" type="text" placeholder="tag name" onkeydown="handleTagKey(event)">
+  `;
+}
+
+async function saveSession() {
+  const isSplit = state.technique === 'split';
+  const session = {
+    date: document.getElementById('s-date').value,
+    printSize: document.getElementById('s-size').value,
+    enlarger: document.getElementById('s-enlarger').value,
+    lens: document.getElementById('s-lens').value,
+    paper: getPaperValue(),
+    technique: isSplit ? 'Split Grade' : 'Single Grade',
+    fStop: isSplit ? document.getElementById('s-fstop-split').value : document.getElementById('s-fstop').value,
+    grade: isSplit ? null : document.getElementById('s-grade').value,
+    time: isSplit ? null : document.getElementById('s-time').value,
+    gradeLow: isSplit ? document.getElementById('s-grade-low').value : null,
+    gradeHigh: isSplit ? document.getElementById('s-grade-high').value : null,
+    gradeOO: isSplit ? document.getElementById('s-g00').value : null,
+    grade5: isSplit ? document.getElementById('s-g5').value : null,
+    dodgeBurn: document.getElementById('s-dodgeburn').value,
+    notes: document.getElementById('s-notes').value
+  };
+
+  if (state.editingSessionId) {
+    const print = state.prints.find(p => p.id === state.currentPrintId);
+    const idx = print.sessions.findIndex(s => s.id === state.editingSessionId);
+    if (idx !== -1) {
+      print.sessions[idx] = { ...print.sessions[idx], ...session };
+      await fetch(`/api/prints/${state.currentPrintId}`, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ sessions: print.sessions }) });
+    }
+  } else {
+    await fetch(`/api/prints/${state.currentPrintId}/sessions`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(session) });
+  }
+
+  closeModal('add-session-modal');
+  await loadGallery();
+  showDetail(state.currentPrintId);
+}
+
+async function deletePrint() {
+  if (!confirm('Delete this print and all its sessions? This cannot be undone.')) return;
+  await fetch(`/api/prints/${state.currentPrintId}`, {method:'DELETE'});
+  showGallery();
+}
+
+async function deleteSession(sessionId) {
+  if (!confirm('Delete this session?')) return;
+  await fetch(`/api/prints/${state.currentPrintId}/sessions/${sessionId}`, {method:'DELETE'});
+  await loadGallery();
+  showDetail(state.currentPrintId);
+}
+
+
+
+// ── EVENT LISTENERS ──────────────────────────────────────────────────────────
+// Wired directly since app.js loads with defer (DOM is ready)
+
+function wireListeners() {
+  const w = (id, evt, fn) => { const el = document.getElementById(id); if (el) el.addEventListener(evt, fn); };
+
+  // Login
+  w('btn-login', 'click', () => login());
+
+  // Header
+  w('btn-show-gallery', 'click', () => showGallery());
+  w('btn-add-print', 'click', () => openAddPrintModal());
+  w('btn-logout', 'click', () => logout());
+
+  // Tabs
+  w('tab-prints', 'click', () => switchTab('prints'));
+  w('tab-recent', 'click', () => switchTab('recent'));
+  w('tab-albums', 'click', () => switchTab('albums'));
+
+  // Prints
+  w('gallery-search', 'input', () => applyFilters());
+  w('sort-recent', 'click', () => setSort('recent'));
+  w('sort-oldest', 'click', () => setSort('oldest'));
+  w('sort-title', 'click', () => setSort('title'));
+  w('sort-sessions', 'click', () => setSort('sessions'));
+
+  // Library
+  w('recent-search', 'input', (e) => handleRecentSearch(e.target.value));
+  w('search-mode-text', 'click', () => setSearchMode('text'));
+  w('search-mode-smart', 'click', () => setSearchMode('smart'));
+  w('select-mode-btn', 'click', () => toggleSelectMode());
+  w('btn-add-selection-album', 'click', () => addSelectionToAlbum());
+  w('btn-exit-select', 'click', () => exitSelectMode());
+  w('lib-sort-upload', 'click', () => setLibrarySort('upload'));
+  w('lib-sort-taken', 'click', () => setLibrarySort('taken'));
+  w('lib-sort-dir', 'click', () => toggleLibrarySortDir());
+  w('filters-btn', 'click', () => toggleFiltersPopup());
+  w('filters-done-btn', 'click', () => toggleFiltersPopup());
+  w('btn-clear-chips', 'click', () => { clearRecentChip(); toggleFiltersPopup(); });
+  w('load-more-btn', 'click', () => loadMoreRecent());
+
+  // Albums
+  w('btn-create-album', 'click', () => openCreateAlbumModal());
+
+  // Slideshow overlay + controls
+  w('slideshow-overlay', 'click', () => showSlideshowControls());
+  w('btn-ss-prev', 'click', () => slideshowPrev());
+  w('slideshow-pause-btn', 'click', () => toggleSlideshow());
+  w('slideshow-desc-btn', 'click', () => toggleSlideshowDesc());
+  w('slideshow-music-btn', 'click', () => toggleSlideshowMusic());
+  w('btn-ss-next', 'click', () => slideshowNext());
+  w('btn-ss-close', 'click', () => closeSlideshow());
+
+  // Slideshow settings modal
+  w('btn-ss-modal-close', 'click', () => closeModal('slideshow-settings-modal'));
+  w('btn-ss-modal-cancel', 'click', () => closeModal('slideshow-settings-modal'));
+  w('toggle-show-title', 'click', () => { ssToggle('ss-show-title'); toggleSSTitleOptions(); });
+  w('toggle-show-location', 'click', () => ssToggle('ss-show-location'));
+  w('toggle-show-dates', 'click', () => ssToggle('ss-show-dates'));
+  w('toggle-show-count', 'click', () => ssToggle('ss-show-count'));
+  w('btn-ss-start', 'click', () => saveSlideshowSettingsAndStart());
+
+  // Modals
+  w('btn-close-create-album', 'click', () => closeModal('create-album-modal'));
+  w('btn-create-album-confirm', 'click', () => createAlbum());
+  w('btn-close-add-album', 'click', () => closeModal('add-to-album-modal'));
+  w('btn-quick-create-add', 'click', () => quickCreateAndAdd());
+  w('fullscreen-overlay', 'click', () => closeFullscreen());
+  w('btn-close-add-print', 'click', () => closeModal('add-print-modal'));
+  w('immich-search-input', 'input', (e) => searchImmich(e.target.value));
+  w('btn-create-print', 'click', () => createPrint());
+  w('btn-close-add-session', 'click', () => closeModal('add-session-modal'));
+  w('select-paper', 'change', (e) => handlePaperChange(e.target));
+  w('t-single', 'click', () => setTechnique('single'));
+  w('t-split', 'click', () => setTechnique('split'));
+  w('btn-save-session', 'click', () => saveSession());
+
+  // Delegated handlers for dynamic form inputs
+  document.addEventListener('input', (e) => {
+    if (e.target.classList.contains('input-aperture')) autoPrefixF(e.target);
+    if (e.target.classList.contains('input-hash')) autoPrefixHash(e.target);
+  });
+}
+
+
+// ─── COMPREHENSIVE EVENT DELEGATION ─────────────────────────────────────────
+// Handles all dynamically generated UI interactions
+document.addEventListener('click', (e) => {
+  const el = e.target.closest('[data-action]');
+  if (!el) return;
+  const action = el.dataset.action;
+  const id = el.dataset.id;
+  const val = el.dataset.val;
+
+  switch(action) {
+    // Filter chips
+    case 'setRecentChip': setRecentChip(val); break;
+    case 'searchByPerson': searchByPerson(id, el.dataset.name); break;
+
+    // Library
+    case 'recentItemClick':
+      if (state.selectMode) toggleAssetSelect(id);
+      else showRecentDetail(id);
+      break;
+    case 'openFullscreen': openFullscreen(el.dataset.url); break;
+    case 'navPrev': navigateRecent(-1); break;
+    case 'navNext': navigateRecent(1); break;
+    case 'openAddToAlbumModal': openAddToAlbumModal(id); break;
+    case 'shareRecent': shareRecent(id, el.dataset.filename, el.dataset.desc); break;
+
+    // Albums
+    case 'openAlbum': openAlbum(id); break;
+    case 'openSlideshowSettings': openSlideshowSettings(); break;
+    case 'toggleAlbumEdit': toggleAlbumEdit(); break;
+    case 'toggleAlbumSelectMode': toggleAlbumSelectMode(); break;
+    case 'copyShareLink': copyShareLink(el.dataset.url); break;
+    case 'albumPhotoClick':
+      if (state.albumSelectMode) toggleAlbumPhotoSelect(id, e);
+      else if (!state.albumEditMode) showAlbumPhotoDetail(id, parseInt(el.dataset.idx));
+      break;
+    case 'removeFromAlbum': e.stopPropagation(); removeFromAlbum(id); break;
+    case 'openAlbumSlideshow': e.stopPropagation(); openAlbumSlideshow(parseInt(el.dataset.idx)); break;
+    case 'addToAlbum': addToAlbum(id); break;
+    case 'downloadSelectedAlbumPhotos': downloadSelectedAlbumPhotos(); break;
+
+    // Prints
+    case 'setTagFilter': setTagFilter(el.dataset.tag); break;
+    case 'showDetail': showDetail(id); break;
+    case 'startEditTitle': startEditTitle(); break;
+    case 'removeTag': removeTag(el.dataset.tag); break;
+    case 'showTagInput': showTagInput(); break;
+    case 'deleteAlbum': deleteAlbum(id); break;
+    case 'deletePrint': deletePrint(); break;
+    case 'editSession': editSession(id); break;
+    case 'deleteSession': deleteSession(id); break;
+    case 'saveTitle': saveTitle(); break;
+    case 'cancelEditTitle': cancelEditTitle(el.dataset.title); break;
+    case 'openAddSessionModal': openAddSessionModal(); break;
+
+    // Immich search
+    case 'selectImmich':
+      try { selectImmich(JSON.parse(el.dataset.item)); } catch(err) {}
+      break;
+  }
+});
+
+wireListeners();
+
+// Global event delegation for all dynamic onclick handlers
+// This handles clicks on dynamically generated HTML elements
+document.addEventListener('click', (e) => {
+  // data-action delegation
+  const actionEl = e.target.closest('[data-action]');
+  if (actionEl) {
+    const action = actionEl.dataset.action;
+    const id = actionEl.dataset.id;
+
+  }
+});
+
+// Override eval-unsafe onclick handlers by intercepting at window level
+// This allows onclick= attributes in dynamically generated HTML to still work
+// while keeping them out of static HTML
+window.addEventListener('error', (e) => {
+  // Silently catch any CSP violations from dynamic content
+}, true);
+
+

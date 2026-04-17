@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Album</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+  :root{--bg:#0a0a0a;--surface:#111;--border:#222;--safe:#c8611a;--text:#e8e0d8;--text-dim:#6b6560}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:'IBM Plex Sans',sans-serif;min-height:100vh}
+  .header{background:var(--surface);border-bottom:1px solid var(--border);padding:0 1rem;height:52px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}
+  .header-title{font-family:'IBM Plex Mono',monospace;font-size:12px;letter-spacing:.15em;text-transform:uppercase;color:var(--safe)}
+  .album-title{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text-dim)}
+  .toolbar{max-width:1200px;margin:0 auto;padding:.75rem 1rem;display:flex;gap:.5rem;border-bottom:1px solid var(--border)}
+  .btn{padding:.5rem 1rem;background:transparent;border:1px solid var(--border);color:var(--text-dim);font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.1em;text-transform:uppercase;cursor:pointer}
+  .btn:hover{border-color:var(--safe);color:var(--safe)}
+  .photo-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--border);max-width:1200px;margin:0 auto}
+  @media(min-width:600px){.photo-grid{grid-template-columns:repeat(5,1fr)}}
+  .photo-item{aspect-ratio:1;overflow:hidden;background:var(--surface);cursor:pointer}
+  .photo-item img{width:100%;height:100%;object-fit:cover;opacity:.85;transition:opacity .2s}
+  .photo-item:hover img{opacity:1}
+  .loading{padding:3rem;text-align:center;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text-dim)}
+  /* Slideshow */
+  .ss-overlay{display:none;position:fixed;inset:0;background:#000;z-index:300;overflow:hidden}
+  .ss-overlay.active{display:block}
+  .ss-slide{position:absolute;inset:0;overflow:hidden;opacity:0;transition:opacity 1.5s ease-in-out}
+  .ss-slide.ss-visible{opacity:1}
+  .ss-slide .ss-bg{position:absolute;inset:-20px;background-size:cover;background-position:center;filter:blur(20px) brightness(0.35);transform:scale(1.1)}
+  .ss-slide .ss-img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;transform-origin:center center}
+  .ss-slide.ss-visible .ss-img{animation:kenburns 8s ease-in-out forwards}
+  @keyframes kenburns{0%{transform:var(--kb-start)}100%{transform:var(--kb-end)}}
+  .ss-counter{position:fixed;top:1rem;right:1rem;font-family:'IBM Plex Mono',monospace;font-size:11px;color:rgba(255,255,255,.5);z-index:401;transition:opacity .5s}
+  .ss-description{position:fixed;bottom:5rem;left:50%;transform:translateX(-50%);font-family:'IBM Plex Mono',monospace;font-size:12px;color:rgba(255,255,255,.75);text-align:center;max-width:80vw;padding:0 2rem;z-index:401;pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .ss-controls{position:fixed;bottom:1.5rem;left:50%;transform:translateX(-50%);display:flex;gap:.75rem;z-index:401;transition:opacity .5s}
+  .ss-hidden{opacity:0;pointer-events:none}
+  .ss-title-main{font-family:'IBM Plex Mono',monospace;font-size:64px;letter-spacing:0.25em;text-transform:uppercase;color:#c8611a;font-weight:300;line-height:1.2}
+  .ss-title-sub{font-family:'IBM Plex Mono',monospace;font-size:14px;letter-spacing:0.2em;text-transform:uppercase;color:#6b6560;margin-bottom:0.25rem}
+  .ss-btn{background:rgba(0,0,0,.6);border:1px solid #333;color:#fff;width:40px;height:40px;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center}
+  .embed-hero{display:none;position:relative;width:100%;height:350px;overflow:hidden;cursor:pointer;background:#000;-webkit-tap-highlight-color:transparent}
+  .embed-hero img{width:100%;height:100%;object-fit:cover;opacity:0.85}
+  .embed-hero-overlay{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:linear-gradient(to bottom,rgba(0,0,0,0.2),rgba(0,0,0,0.5));cursor:pointer;-webkit-tap-highlight-color:transparent}
+  .embed-hero-title{font-family:'IBM Plex Mono',monospace;font-size:20px;letter-spacing:0.25em;text-transform:uppercase;color:#fff;font-weight:300;margin-bottom:1.5rem}
+  .embed-hero-play{width:56px;height:56px;border:1.5px solid rgba(255,255,255,0.7);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:20px;color:#fff;padding-left:4px;transition:all 0.2s}
+  .embed-hero:hover .embed-hero-play{border-color:#c8611a;color:#c8611a;transform:scale(1.05)}
+  .ss-btn:hover{border-color:var(--safe);color:var(--safe)}
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="header-title">Darkroom Log</div>
+  <div class="album-title" id="album-name"></div>
+</div>
+<div class="toolbar">
+  <button class="btn" id="btn-slideshow">▶ Slideshow</button>
+</div>
+<div class="embed-hero" id="embed-hero" id="btn-slideshow">
+  <img id="embed-hero-img" src="" alt="">
+  <button class="embed-hero-overlay" data-action="startSlideshow" style="border:none;background:none;width:100%;padding:0">
+    <div class="embed-hero-title" id="embed-hero-title"></div>
+    <div class="embed-hero-play">▶</div>
+  </div>
+</div>
+<div class="photo-grid" id="photo-grid">
+  <div class="loading" style="grid-column:1/-1">Loading...</div>
+</div>
+
+<div id="ss-title-card" style="display:none;position:fixed;inset:0;background:#0a0a0a;z-index:320;flex-direction:column;align-items:center;justify-content:center;opacity:0;transition:opacity 1s ease-in-out;pointer-events:none">
+  <div id="ss-title-card-content" style="text-align:center;padding:2rem;max-width:700px"></div>
+</div>
+
+<div class="ss-overlay" id="ss-overlay">
+  <div id="ss-slide-a" class="ss-slide"></div>
+  <div id="ss-slide-b" class="ss-slide"></div>
+  <div class="ss-counter" id="ss-counter"></div>
+  <div class="ss-description" id="ss-description"></div>
+  <div class="ss-controls" id="ss-controls">
+    <button class="ss-btn" id="btn-ss-prev">‹</button>
+    <button class="ss-btn" id="ss-pause" >❚❚</button>
+    <button class="ss-btn" id="ss-desc-btn"  title="Toggle description">✦</button>
+    <button class="ss-btn" id="ss-music-btn"  title="Toggle music">♪</button>
+    <button class="ss-btn" id="btn-ss-next">›</button>
+    <button class="ss-btn"  id="ss-fs-btn" title="Fullscreen">⤢</button>
+    <button class="ss-btn" id="btn-ss-close">✕</button>
+  </div>
+</div>
+
+<script src="/album.js"></script>
+</body>
+</html>
