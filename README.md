@@ -27,11 +27,23 @@ A self-hosted darkroom printing log and analog photo library, built for Immich i
 - Select and download originals with original filenames
 - Shareable public links
 
+### Immich Albums
+- Browse your Immich albums as a grid
+- Open any album to sort, filter, and select photos
+- Add Immich photos directly to Darkroom albums
+- Full photo detail (EXIF, map, fullscreen, download, share)
+
 ### Slideshow
 - Ken Burns slideshow with smooth crossfades
 - Title card with byline and photo count
 - Background music support (drop MP3s in `/music`)
 - Description overlay, fullscreen, auto-hide controls
+
+### Navigation & Gestures
+- Swipe down in any photo detail to go back
+- Swipe left/right (or tap edge zones) to navigate prev/next
+- Scroll position preserved when opening and closing photos — no flash to top
+- Keyboard: arrow keys and ESC work throughout
 
 ### Public Album Embed
 - Public album page (`/album/:slug`) — no login required

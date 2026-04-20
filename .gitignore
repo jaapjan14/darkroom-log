@@ -1,4 +1,7 @@
 node_modules/
-data/
+data/prints.json
+data/filter-cache.json
+*.bak-*
 *.env
 .DS_Store
+

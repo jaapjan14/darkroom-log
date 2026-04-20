@@ -22,6 +22,7 @@ const IMMICH_URL = process.env.IMMICH_URL || 'http://192.168.0.199:2283/api';
 const IMMICH_KEY = process.env.IMMICH_KEY || '';
 const DATA_FILE = '/data/prints.json';
 const ALBUMS_FILE = '/data/albums.json';
+const SETTINGS_FILE = '/data/settings.json';
 
 // Ensure data files exist
 if (!fs.existsSync(DATA_FILE)) fs.writeFileSync(DATA_FILE, JSON.stringify([]));
@@ -45,6 +46,15 @@ const saveAlbums = (data) => {
   fs.writeFileSync(ALBUMS_FILE, JSON.stringify(data, null, 2));
 };
 
+const loadSettings = () => {
+  try { return JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')); }
+  catch(e) { return {}; }
+};
+
+const saveSettings = (data) => {
+  fs.writeFileSync(SETTINGS_FILE, JSON.stringify(data, null, 2));
+};
+
 const slugify = (str) => str.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 
 app.use(express.json());
@@ -56,7 +66,7 @@ app.use((req, res, next) => {
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'SAMEORIGIN');
-  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), fullscreen=*');
   res.setHeader('Content-Security-Policy',
     "default-src 'self'; " +
     "script-src 'self' blob:; " +
@@ -110,6 +120,7 @@ app.post('/api/login', async (req, res) => {
     return res.status(429).json({ error: 'Too many login attempts. Try again in 15 minutes.' });
   }
   const { password } = req.body;
+  if (!password) return res.status(401).json({ error: 'Invalid password' });
   const valid = await bcrypt.compare(password, PASSWORD_HASH);
   if (valid) {
     req.session.authenticated = true;
@@ -188,21 +199,19 @@ app.get('/api/immich/photo/:id', requireAuth, async (req, res) => {
 // Immich proxy - recent uploads
 app.get('/api/immich/recent', requireAuth, async (req, res) => {
   const page = parseInt(req.query.page) || 1;
-  const size = parseInt(req.query.size) || 30;
+  const size = parseInt(req.query.size) || 500;
   const sort = req.query.sort || 'upload';
   const dir = req.query.dir || 'desc';
   try {
     let allItems = [];
-
     if (sort === 'taken') {
-      // Date taken — use Immich order param (sorts by localDateTime)
       const order = dir === 'asc' ? 'asc' : 'desc';
-      const response = await fetch(`${IMMICH_URL}/search/metadata`, {
+      const r = await fetch(`${IMMICH_URL}/search/metadata`, {
         method: 'POST',
         headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
         body: JSON.stringify({ size, page, order })
       });
-      const data = await response.json();
+      const data = await r.json();
       allItems = (data.assets && data.assets.items) || [];
       res.json({ assets: allItems.map(a => ({
         id: a.id,
@@ -213,32 +222,23 @@ app.get('/api/immich/recent', requireAuth, async (req, res) => {
       })), total: data.assets?.total || 0 });
       return;
     }
-
-    // Upload date — use expanding window
-    const windows = [7, 30, 90, 180, 365];
-    for (const days of windows) {
-      const after = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
-      const response = await fetch(`${IMMICH_URL}/search/metadata`, {
-        method: 'POST',
-        headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ size: 1000, page: 1, createdAfter: after })
-      });
-      const data = await response.json();
-      allItems = (data.assets && data.assets.items) || [];
-      if (allItems.length >= size * page) break;
-    }
+    const r = await fetch(`${IMMICH_URL}/search/metadata`, {
+      method: 'POST',
+      headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ size, page })
+    });
+    const data = await r.json();
+    allItems = (data.assets && data.assets.items) || [];
     allItems.sort((a, b) => dir === 'asc'
       ? new Date(a.createdAt) - new Date(b.createdAt)
       : new Date(b.createdAt) - new Date(a.createdAt));
-    const start = (page - 1) * size;
-    const items = allItems.slice(start, start + size);
-    res.json({ assets: items.map(a => ({
+    res.json({ assets: allItems.map(a => ({
       id: a.id,
       originalFileName: a.originalFileName,
       fileCreatedAt: a.fileCreatedAt,
       createdAt: a.createdAt,
       localDateTime: a.localDateTime
-    })), total: allItems.length });
+    })), total: data.assets?.total || 0 });
   } catch(e) {
     res.status(500).json({ error: e.message });
   }
@@ -272,6 +272,7 @@ app.get('/api/immich/original/:id', requireAuth, async (req, res) => {
 
 // Filter options cache
 const FILTER_CACHE_FILE = '/data/filter-cache.json';
+
 let filterCacheBuilding = false;
 
 function loadFilterCache() {
@@ -359,41 +360,26 @@ app.get('/api/immich/filter-options', requireAuth, async (req, res) => {
 
 // Server-side text search across metadata
 app.post('/api/immich/text-search', requireAuth, async (req, res) => {
-  const { query, size = 60, page = 1 } = req.body;
+  const { query, size = 60, page = 1, model, lensModel, city } = req.body;
   try {
-    // Search across multiple fields by running parallel queries
+    const chips = {};
+    if (model) chips.model = model;
+    if (lensModel) chips.lensModel = lensModel;
+    if (city) chips.city = city;
+    const meta = (fields) => fetch(`${IMMICH_URL}/search/metadata`, {
+      method: 'POST',
+      headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ size, page, ...chips, ...fields })
+    });
+    // Search across fields — skip fields already occupied by a chip filter
     const searches = [
-      fetch(`${IMMICH_URL}/search/metadata`, {
-        method: 'POST',
-        headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ size, page, lensModel: query })
-      }),
-      fetch(`${IMMICH_URL}/search/metadata`, {
-        method: 'POST',
-        headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ size, page, make: query })
-      }),
-      fetch(`${IMMICH_URL}/search/metadata`, {
-        method: 'POST',
-        headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ size, page, model: query })
-      }),
-      fetch(`${IMMICH_URL}/search/metadata`, {
-        method: 'POST',
-        headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ size, page, city: query })
-      }),
-      fetch(`${IMMICH_URL}/search/metadata`, {
-        method: 'POST',
-        headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ size, page, description: query })
-      }),
-      fetch(`${IMMICH_URL}/search/metadata`, {
-        method: 'POST',
-        headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ size, page, originalFileName: query })
-      })
-    ];
+      !chips.lensModel && meta({ lensModel: query }),
+      meta({ make: query }),
+      !chips.model && meta({ model: query }),
+      !chips.city && meta({ city: query }),
+      meta({ description: query }),
+      meta({ originalFileName: query }),
+    ].filter(Boolean);
 
     const results = await Promise.all(searches.map(p => p.then(r => r.json()).catch(() => ({assets:{items:[]}}))));
     
@@ -421,12 +407,16 @@ app.post('/api/immich/text-search', requireAuth, async (req, res) => {
 
 // Smart search (CLIP)
 app.post('/api/immich/smart-search', requireAuth, async (req, res) => {
-  const { query, size = 60, page = 1 } = req.body;
+  const { query, size = 60, page = 1, model, lensModel, city } = req.body;
   try {
+    const body = { query, size, page };
+    if (model) body.model = model;
+    if (lensModel) body.lensModel = lensModel;
+    if (city) body.city = city;
     const r = await fetch(`${IMMICH_URL}/search/smart`, {
       method: 'POST',
       headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, size, page })
+      body: JSON.stringify(body)
     });
     const data = await r.json();
     const items = (data.assets && data.assets.items) || [];
@@ -557,7 +547,13 @@ app.get('/api/geocode', requireAuth, async (req, res) => {
 
 // Prints CRUD
 app.get('/api/prints', requireAuth, (req, res) => {
-  res.json(loadData());
+  const data = loadData();
+  data.forEach(p => {
+    if (p.sessions && p.sessions.length > 1) {
+      p.sessions.sort((a, b) => Number(b.id) - Number(a.id));
+    }
+  });
+  res.json(data);
 });
 
 app.get('/api/prints/:immichId', requireAuth, (req, res) => {
@@ -676,6 +672,23 @@ app.delete('/api/albums/:id', requireAuth, (req, res) => {
   res.json({ success: true });
 });
 
+// DELETE Immich asset permanently
+app.delete('/api/immich/assets/:id', requireAuth, async (req, res) => {
+  try {
+    const r = await fetch(`${IMMICH_URL}/assets`, {
+      method: 'DELETE',
+      headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: [req.params.id], force: false })
+    });
+    if (!r.ok) return res.status(r.status).json({ error: 'Immich delete failed' });
+    // Also remove from any local albums
+    const albums = loadAlbums();
+    albums.forEach(a => { a.assets = a.assets.filter(id => id !== req.params.id); });
+    saveAlbums(albums);
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // PUBLIC album view (no auth)
 app.get('/api/public/album/:slug', (req, res) => {
   const albums = loadAlbums();
@@ -755,6 +768,42 @@ app.get('/api/albums/music/*', (req, res) => {
   const file = path.join('/music', filename);
   if (!fs.existsSync(file)) return res.status(404).end();
   res.sendFile(file);
+});
+
+// ── IMMICH ALBUMS (browse Immich albums including archived assets) ──────────
+
+app.get('/api/immich/immich-albums', requireAuth, async (req, res) => {
+  try {
+    const r = await fetch(`${IMMICH_URL}/albums`, { headers: { 'x-api-key': IMMICH_KEY } });
+    const data = await r.json();
+    res.json(data);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/immich/immich-albums/:id', requireAuth, async (req, res) => {
+  try {
+    const r = await fetch(`${IMMICH_URL}/albums/${req.params.id}`, {
+      headers: { 'x-api-key': IMMICH_KEY }
+    });
+    const data = await r.json();
+    res.json(data);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Settings: get configured Immich album IDs (UI overrides env var IMMICH_ALBUMS)
+app.get('/api/settings/immich-albums', requireAuth, (req, res) => {
+  const settings = loadSettings();
+  const envAlbums = process.env.IMMICH_ALBUMS
+    ? process.env.IMMICH_ALBUMS.split(',').map(s => s.trim()).filter(Boolean)
+    : [];
+  res.json({ albums: settings.immichAlbums !== undefined ? settings.immichAlbums : envAlbums });
+});
+
+app.post('/api/settings/immich-albums', requireAuth, (req, res) => {
+  const settings = loadSettings();
+  settings.immichAlbums = req.body.albums || [];
+  saveSettings(settings);
+  res.json({ success: true });
 });
 
 // Serve SPA

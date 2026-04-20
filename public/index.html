@@ -22,7 +22,7 @@
     --red: #d64040;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: var(--bg); color: var(--text); font-family: 'IBM Plex Sans', sans-serif; font-size: 14px; min-height: 100vh; line-height: 1.5; }
+  body { background: var(--bg); color: var(--text); font-family: 'IBM Plex Sans', sans-serif; font-size: 14px; line-height: 1.5; overflow: hidden; height: 100dvh; }
   .container { max-width: 100%; margin: 0 auto; }
   #login-screen { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 2rem; }
   .login-box { width: 100%; max-width: 320px; }
@@ -36,6 +36,7 @@
   .ss-toggle-label { font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--text-mid); }
   input, select, textarea { width: 100%; background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 0.75rem 1rem; font-family: 'IBM Plex Mono', monospace; font-size: 13px; outline: none; border-radius: 0; -webkit-appearance: none; transition: border-color 0.2s; }
   input:focus, select:focus, textarea:focus { border-color: var(--safe); }
+  input[type="checkbox"] { width: 16px; height: 16px; padding: 0; background: none; border: none; -webkit-appearance: checkbox; appearance: checkbox; flex-shrink: 0; }
   textarea { resize: vertical; min-height: 80px; }
   .btn { display: block; width: 100%; padding: 0.85rem 1.5rem; background: var(--safe); color: #fff; border: none; font-family: 'IBM Plex Mono', monospace; font-size: 12px; letter-spacing: 0.1em; text-transform: uppercase; cursor: pointer; transition: background 0.2s; }
   .btn:hover { background: #d97020; }
@@ -54,7 +55,7 @@
   .header-title { font-family: 'IBM Plex Mono', monospace; font-size: 12px; letter-spacing: 0.15em; text-transform: uppercase; color: var(--safe); }
   .header-actions { display: flex; gap: 0.5rem; align-items: center; }
   .view { display: none; }
-  .view.active { display: block; }
+  .view.active { display: block; position: fixed; top: 92px; left: 0; right: 0; bottom: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; }
   .gallery-toolbar { padding: 1rem; border-bottom: 1px solid var(--border); display: flex; gap: 0.5rem; max-width: 1200px; margin: 0 auto; }
   .gallery-toolbar input { flex: 1; }
   .gallery-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--border); max-width: 1200px; margin: 0 auto; }
@@ -130,7 +131,7 @@
   .select-check { position: absolute; top: 6px; left: 6px; width: 22px; height: 22px; background: rgba(0,0,0,0.5); border: 1px solid #555; color: transparent; font-size: 13px; display: flex; align-items: center; justify-content: center; border-radius: 50%; }
   .select-check.checked { background: var(--safe); border-color: var(--safe); color: #fff; }
   /* TABS */
-  .tab-bar { background: var(--surface); border-bottom: 1px solid var(--border); display: flex; max-width: 100%; }
+  .tab-bar { background: var(--surface); border-bottom: 1px solid var(--border); display: flex; max-width: 100%; position: sticky; top: 52px; z-index: 99; height: 40px; }
   .tab-bar-inner { max-width: 720px; margin: 0 auto; width: 100%; display: flex; }
   .tab-btn { font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.15em; text-transform: uppercase; padding: 0.75rem 1.5rem; background: none; border: none; color: var(--text-dim); cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.15s; }
   .tab-btn.active { color: var(--safe); border-bottom-color: var(--safe); }
@@ -203,11 +204,17 @@
   }
   .detail-layout { display: block; }
   @media (min-width: 600px) {
-    .detail-layout { display: grid; grid-template-columns: 3fr 2fr; min-height: calc(100vh - 52px); }
-    .detail-left { position: sticky; top: 52px; height: calc(100vh - 52px); display: flex; align-items: center; justify-content: center; overflow: hidden; background: #000; }
+    .detail-layout { display: grid; grid-template-columns: 3fr 2fr; min-height: 100%; }
+    .detail-left { position: sticky; top: 0; height: calc(100dvh - 92px); display: flex; align-items: center; justify-content: center; overflow: hidden; background: #000; }
     .detail-image { max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; display: block; }
     .detail-right { overflow-y: auto; border-left: 1px solid var(--border); }
+    #recent-detail-view.active { overflow-y: hidden; }
   }
+  /* recent-detail-view is a fixed overlay — underlying grid scroll is never disturbed */
+  #recent-detail-view { position: fixed; top: 92px; left: 0; right: 0; bottom: 0; z-index: 50; overflow-y: auto; -webkit-overflow-scrolling: touch; background: var(--bg); transition: opacity 0.22s ease; }
+  #recent-detail-view.dismissing { opacity: 0; }
+  #detail-view { z-index: 50; transition: opacity 0.22s ease; background: var(--bg); }
+  #detail-view.dismissing { opacity: 0; }
 </style>
 </head>
 <body>
@@ -242,6 +249,7 @@
       <button class="tab-btn active" id="tab-prints" >Prints</button>
       <button class="tab-btn" id="tab-recent" >Library</button>
       <button class="tab-btn" id="tab-albums" >Albums</button>
+      <button class="tab-btn" id="tab-immich" >Immich</button>
     </div>
   </div>
 
@@ -252,10 +260,10 @@
     <div class="gallery-controls">
       <div class="sort-bar">
         <span class="sort-label">Sort</span>
-        <button class="sort-btn active" id="sort-recent"  id="sort-recent">Recent</button>
-        <button class="sort-btn" id="sort-oldest"  id="sort-oldest">Oldest</button>
-        <button class="sort-btn" id="sort-title"  id="sort-title">Title A→Z</button>
-        <button class="sort-btn" id="sort-sessions"  id="sort-sessions">Most Sessions</button>
+        <button class="sort-btn active" id="sort-recent">Recent</button>
+        <button class="sort-btn" id="sort-oldest">Oldest</button>
+        <button class="sort-btn" id="sort-title">Title A→Z</button>
+        <button class="sort-btn" id="sort-sessions">Most Sessions</button>
       </div>
     </div>
     <div class="gallery-grid" id="gallery-grid">
@@ -273,6 +281,7 @@
       <div id="select-actions" style="display:none;gap:0.5rem;align-items:center">
         <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--text-dim)" id="select-count">0 selected</span>
         <button class="btn btn-ghost btn-sm" id="btn-add-selection-album" >+ Album</button>
+        <button class="btn btn-ghost btn-sm" id="btn-download-selection" >↓ DL</button>
         <button class="btn btn-danger btn-sm" id="btn-exit-select" >✕ Done</button>
       </div>
     </div>
@@ -340,9 +349,9 @@
     <div id="slideshow-description" style="position:fixed;bottom:4rem;left:50%;transform:translateX(-50%);font-family:'IBM Plex Mono',monospace;font-size:12px;color:rgba(255,255,255,0.7);text-align:center;max-width:80vw;padding:0 2rem;z-index:401;transition:opacity 0.5s;pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></div>
     <div class="slideshow-controls">
       <button class="nav-arrow" id="btn-ss-prev" >‹</button>
-      <button class="nav-arrow" id="slideshow-pause-btn"  id="slideshow-pause-btn">❚❚</button>
-      <button class="nav-arrow" id="slideshow-desc-btn"  id="slideshow-desc-btn" title="Toggle description">✦</button>
-      <button class="nav-arrow" id="slideshow-music-btn"  id="slideshow-music-btn" title="Toggle music">♪</button>
+      <button class="nav-arrow" id="slideshow-pause-btn">❚❚</button>
+      <button class="nav-arrow" id="slideshow-desc-btn" title="Toggle description">✦</button>
+      <button class="nav-arrow" id="slideshow-music-btn" title="Toggle music">♪</button>
       <button class="nav-arrow" id="btn-ss-next" >›</button>
       <button class="nav-arrow" id="btn-ss-close" >✕</button>
     </div>
@@ -350,6 +359,60 @@
 
   <div class="view" id="detail-view">
     <div id="detail-content"></div>
+  </div>
+
+  <!-- Immich albums list view -->
+  <div class="view" id="immich-view">
+    <div style="max-width:1200px;margin:0 auto;padding:0.75rem 1rem;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border)">
+      <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text-dim)">Immich Albums</span>
+      <button class="btn btn-ghost btn-sm" data-action="openImmichSettings">⚙ Configure</button>
+    </div>
+    <div id="immich-album-grid" style="max-width:1200px;margin:0 auto;padding:1rem"></div>
+  </div>
+
+  <!-- Immich album photo view -->
+  <div class="view" id="immich-album-view">
+    <div style="max-width:1200px;margin:0 auto;padding:0.5rem 1rem;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border)">
+      <span id="immich-album-name" style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text-dim)"></span>
+      <button class="btn btn-ghost btn-sm" id="immich-select-mode-btn" data-action="toggleImmichSelectMode">Select</button>
+    </div>
+    <div id="immich-select-toolbar" style="max-width:1200px;margin:0.5rem auto 0;width:100%;gap:0.5rem;align-items:center;padding:0 1rem;display:none">
+      <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--text-dim)" id="immich-select-count">0 selected</span>
+      <button class="btn btn-ghost btn-sm" id="btn-immich-add-album">+ Album</button>
+      <button class="btn btn-ghost btn-sm" data-action="downloadImmichSelected">↓ DL</button>
+      <button class="btn btn-danger btn-sm" data-action="exitImmichSelectMode">✕ Done</button>
+    </div>
+    <div style="max-width:1200px;margin:0 auto;padding:0.4rem 1rem;display:flex;gap:0.4rem;align-items:center;border-bottom:1px solid var(--border)">
+      <span class="sort-label">Sort</span>
+      <button class="sort-btn active" id="immich-sort-taken">Date Taken</button>
+      <button class="sort-btn" id="immich-sort-upload">Upload Date</button>
+      <button class="sort-btn" id="immich-sort-dir" style="margin-left:0.5rem">↓ Newest</button>
+    </div>
+    <div style="max-width:1200px;margin:0 auto;padding:0.25rem 1rem;position:relative">
+      <button class="sort-btn" id="immich-filters-btn" style="font-size:10px">⊞ Filters</button>
+      <span id="immich-active-chip-label" style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--safe);margin-left:0.5rem"></span>
+      <div id="immich-filter-backdrop" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:100"></div>
+      <div id="immich-filter-popup" style="display:none;position:absolute;top:2rem;left:0;background:var(--surface);border:1px solid var(--border);padding:1rem;z-index:101;min-width:320px;max-width:500px;max-height:60vh;overflow-y:auto">
+        <div id="immich-filter-popup-content"></div>
+      </div>
+    </div>
+    <div id="immich-album-gallery" style="max-width:1200px;margin:0 auto;padding:1rem"></div>
+  </div>
+</div>
+
+<!-- Immich Settings Modal -->
+<div id="immich-settings-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:200;align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:1.5rem;max-width:480px;width:90%;max-height:80vh;overflow-y:auto">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
+      <span style="font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600">Configure Immich Albums</span>
+      <button class="btn btn-ghost btn-sm" data-action="closeImmichSettings">✕</button>
+    </div>
+    <p style="font-size:11px;color:var(--text-dim);font-family:'IBM Plex Mono',monospace;margin-bottom:1rem">Select which Immich albums appear in this tab. You can also set defaults via the <code>IMMICH_ALBUMS</code> env var (comma-separated IDs).</p>
+    <div id="immich-settings-list" style="margin-bottom:1rem"><div class="loading">Loading albums...</div></div>
+    <div style="display:flex;gap:0.5rem;justify-content:flex-end">
+      <button class="btn btn-ghost btn-sm" data-action="closeImmichSettings">Cancel</button>
+      <button class="btn btn-safe btn-sm" data-action="saveImmichSettings">Save</button>
+    </div>
   </div>
 </div>
 
@@ -560,7 +623,7 @@
   </div>
 </div>
 
-<script src="/app.js?v=3" defer></script>
+<script src="/app.js?v=11" defer></script>
 <script>
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.getRegistrations().then(regs => regs.forEach(r => r.unregister()));

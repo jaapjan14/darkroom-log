@@ -1,7 +1,11 @@
 const slug=location.pathname.replace('/album/','').replace(/\//g,'');
 let album=null,assetMeta={};
 let ssActiveSlot='a',ssIndex=0,ssPausedState=false,ssTimer=null,ssHideTimer=null;
-let ssAudio=null,ssDescVisible=true,ssCleanupTimers=[];
+let ssAudio=null,ssAudioFade=null,ssDescVisible=true,ssCleanupTimers=[];
+
+// Cross-tab music coordination — stop music in any other darkroom tab when this one takes over
+const _bc = (() => { try { return new BroadcastChannel('darkroom-music'); } catch(e) { return null; } })();
+if (_bc) _bc.addEventListener('message', e => { if (e.data === 'stop') stopMusic(); });
 
 const KB=[
   {s:'scale(1.0) translate(-3%,-3%)',e:'scale(1.25) translate(2%,2%)'},
@@ -27,7 +31,13 @@ async function init(){
       document.getElementById('photo-grid').style.display = 'none';
     }
   } else {
+    // If ?autoplay landed inside an iframe, escalate to top-level so we escape the embed
+    if (new URLSearchParams(location.search).has('autoplay') && window !== window.top) {
+      try { window.top.location.href = window.location.href; } catch(e) {}
+      return;
+    }
     renderGrid();
+    if (new URLSearchParams(location.search).has('autoplay')) openSlideshow(0);
   }
 }
 
@@ -69,14 +79,30 @@ async function showTitleCard(){
   card.style.display='none';
 }
 
+function stopMusic(){
+  if(ssAudioFade){clearInterval(ssAudioFade);ssAudioFade=null;}
+  if(ssAudio){
+    ssAudio.pause();
+    ssAudio.src=''; // release resource so iOS bfcache can't keep it playing
+    ssAudio.load();
+    ssAudio=null;
+  }
+}
 function startMusic(){
   const settings=album.slideshowSettings||{};
+  stopMusic();
   if(!settings.musicFile)return;
-  ssAudio=new Audio('/api/albums/music/'+encodeURIComponent(settings.musicFile));
-  ssAudio.loop=true;ssAudio.volume=0;
-  ssAudio.play().catch(()=>{});
+  if(_bc) _bc.postMessage('stop'); // tell other tabs to stop their music
+  const audio=new Audio('/api/albums/music/'+encodeURIComponent(settings.musicFile));
+  ssAudio=audio;
+  audio.loop=true;audio.volume=0;
+  audio.play().catch(()=>{});
   let vol=0;
-  const fade=setInterval(()=>{vol=Math.min(vol+0.05,0.8);ssAudio.volume=vol;if(vol>=0.8)clearInterval(fade);},100);
+  ssAudioFade=setInterval(()=>{
+    if(ssAudio!==audio){clearInterval(ssAudioFade);ssAudioFade=null;return;}
+    vol=Math.min(vol+0.05,0.8);audio.volume=vol;
+    if(vol>=0.8){clearInterval(ssAudioFade);ssAudioFade=null;}
+  },100);
 }
 
 function cancelSlideCleanup(){
@@ -126,7 +152,13 @@ function ssPrev(){cancelSlideCleanup();showKBSlide((ssIndex-1+album.assets.lengt
 function ssToggle(){
   ssPausedState=!ssPausedState;
   document.getElementById('ss-pause').textContent=ssPausedState?'▶':'❚❚';
-  if(!ssPausedState)ssNext();else clearTimeout(ssTimer);
+  if(!ssPausedState){
+    if(ssAudio)ssAudio.play().catch(()=>{});
+    ssNext();
+  } else {
+    clearTimeout(ssTimer);
+    if(ssAudio)ssAudio.pause();
+  }
 }
 function ssToggleDesc(){
   ssDescVisible=!ssDescVisible;
@@ -147,27 +179,54 @@ function ssClose(){
   document.getElementById('ss-overlay').classList.remove('active');
   const card=document.getElementById('ss-title-card');
   if(card){card.style.opacity='0';card.style.display='none';}
-  if(ssAudio){ssAudio.pause();ssAudio=null;}
+  stopMusic();
+}
+function iosFallbackFullscreen(){
+  const dest = window.location.href.replace(/[?&]embed/g, '') + '?autoplay';
+  ssClose();
+  window.location.href = dest; // navigate iframe → ?autoplay → escalates to top frame
 }
 function ssFullscreen(){
   const el = document.getElementById('ss-overlay');
-  if (!document.fullscreenElement) {
-    el.requestFullscreen && el.requestFullscreen();
-    document.getElementById('ss-fs-btn').textContent = '⤡';
-  } else {
-    document.exitFullscreen && document.exitFullscreen();
+  const req = el.requestFullscreen || el.webkitRequestFullscreen;
+  const exit = document.exitFullscreen || document.webkitExitFullscreen;
+  const isFullscreen = document.fullscreenElement || document.webkitFullscreenElement;
+
+  if (isFullscreen) {
+    exit.call(document);
     document.getElementById('ss-fs-btn').textContent = '⤢';
+    return;
+  }
+
+  if (req) {
+    req.call(el).then(() => {
+      document.getElementById('ss-fs-btn').textContent = '⤡';
+    }).catch(() => {
+      // API exists but failed (e.g. cross-origin iframe without permission) — fall back to navigation
+      iosFallbackFullscreen();
+    });
+  } else {
+    iosFallbackFullscreen();
   }
 }
-document.addEventListener('fullscreenchange', () => {
+['fullscreenchange','webkitfullscreenchange'].forEach(ev => document.addEventListener(ev, () => {
   const btn = document.getElementById('ss-fs-btn');
-  if (btn) btn.textContent = document.fullscreenElement ? '⤡' : '⤢';
-});
+  if (btn) btn.textContent = (document.fullscreenElement || document.webkitFullscreenElement) ? '⤡' : '⤢';
+}));
 function showSSControls(){
   ['ss-controls','ss-counter'].forEach(id=>{const e=document.getElementById(id);if(e)e.classList.remove('ss-hidden');});
   clearTimeout(ssHideTimer);
-  ssHideTimer=setTimeout(()=>{const e=document.getElementById('ss-controls');if(e)e.classList.add('ss-hidden');},3000);
+  ssHideTimer=setTimeout(()=>{
+    ['ss-controls','ss-counter'].forEach(id=>{const e=document.getElementById(id);if(e)e.classList.add('ss-hidden');});
+  },3000);
 }
+document.addEventListener('mousemove', () => {
+  if(document.getElementById('ss-overlay')?.classList.contains('active')) showSSControls();
+});
+
+// Stop music when page is navigated away or put into bfcache (iOS back-swipe restore)
+window.addEventListener('pagehide', () => stopMusic());
+window.addEventListener('pageshow', e => { if (e.persisted) stopMusic(); });
 
 document.addEventListener('keydown',e=>{
   if(!document.getElementById('ss-overlay').classList.contains('active'))return;
@@ -184,6 +243,11 @@ const isEmbed = location.search.includes('embed');
 if (isEmbed) {
   document.querySelector('.header').style.display = 'none';
   document.querySelector('.toolbar').style.display = 'none';
+  // Hide fullscreen button on touch-primary devices (phones/tablets) — not reliable in cross-origin iframes on iOS
+  if (window.matchMedia('(hover: none) and (pointer: coarse)').matches) {
+    const fsBtn = document.getElementById('ss-fs-btn');
+    if (fsBtn) fsBtn.style.display = 'none';
+  }
 }
 // Wire all event listeners
 function wireAlbumListeners() {

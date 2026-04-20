@@ -2,6 +2,7 @@
 // Darkroom Log - Main Application
 // Auto-extracted from index.html
 
+
 let state = {
   prints: [],
   currentPrintId: null,
@@ -12,8 +13,8 @@ let state = {
   sort: 'recent',
   activeTag: null,
   currentTab: 'prints',
-  recentItems: [],
   recentPage: 1,
+  recentItems: [],
   recentLoaded: false,
   currentRecentId: null,
   currentRecentIndex: -1,
@@ -23,7 +24,6 @@ let state = {
   librarySort: 'upload',
   librarySortDir: 'desc',
   displayedItems: [],
-  recentScrollY: 0,
   previousView: 'recent-view',
   recentActivePerson: null,
   recentActiveChips: new Set(),
@@ -38,11 +38,22 @@ let state = {
   albumSelected: new Set(),
   selectMode: false,
   selectedAssets: new Set(),
-  albums: [],
   currentAlbum: null,
+  viewingFromAlbum: false,
   albumEditMode: false,
   pendingAddAssetId: null,
-  slideshow: { active: false, index: 0, timer: null, paused: false }
+  slideshow: { active: false, index: 0, timer: null, paused: false },
+  immichAlbumsLoaded: false,
+  immichAlbums: [],
+  currentImmichAlbumId: null,
+  currentImmichAlbumAssets: [],
+  immichSelectMode: false,
+  immichSelected: new Set(),
+  immichConfiguredIds: [],
+  immichDisplayedAssets: [],
+  immichSort: 'taken',
+  immichSortDir: 'desc',
+  immichActiveChips: new Set(),
 };
 
 async function login() {
@@ -62,20 +73,28 @@ async function logout() { await fetch('/api/logout', {method:'POST'}); location.
 // TAB SWITCHING
 function switchTab(tab) {
   state.currentTab = tab;
-  ['prints','recent','albums'].forEach(t => {
+  ['prints','recent','albums','immich'].forEach(t => {
     document.getElementById('tab-' + t).classList.toggle('active', t === tab);
   });
   document.getElementById('gallery-view').classList.toggle('active', tab === 'prints');
   document.getElementById('recent-view').classList.toggle('active', tab === 'recent');
   document.getElementById('albums-view').classList.toggle('active', tab === 'albums');
+  document.getElementById('immich-view').classList.toggle('active', tab === 'immich');
   document.getElementById('album-detail-view').classList.remove('active');
+  document.getElementById('immich-album-view').classList.remove('active');
   document.getElementById('detail-view').classList.remove('active');
   document.getElementById('recent-detail-view').classList.remove('active');
   document.getElementById('back-btn').style.display = 'none';
+  state.albumSelectMode = false;
+  state.albumSelected = new Set();
+  lastSelectedIdx = -1;
+  if (state.immichSelectMode) exitImmichSelectMode();
   document.getElementById('add-print-btn').style.display = tab === 'prints' ? 'inline-block' : 'none';
   document.getElementById('header-title').textContent = 'Darkroom Log';
   if (tab === 'recent' && !state.recentLoaded) loadRecent();
+  else if (tab === 'recent') applyRecentFilters();
   if (tab === 'albums') loadAlbumsTab();
+  if (tab === 'immich' && !state.immichAlbumsLoaded) loadImmichTab();
 }
 
 // RECENT UPLOADS
@@ -128,7 +147,7 @@ async function loadMoreRecent() {
 }
 
 async function fetchRecentPage() {
-  const size = 50;
+  const size = 500;
   const r = await fetch(`/api/immich/recent?page=${state.recentPage}&size=${size}&sort=${state.librarySort}&dir=${state.librarySortDir}`);
   const data = await r.json();
   const items = data.assets || [];
@@ -136,7 +155,6 @@ async function fetchRecentPage() {
   applyRecentFilters();
   document.getElementById('load-more-btn').style.display = (items.length === size && !document.getElementById('recent-search').value) ? 'block' : 'none';
   document.getElementById('load-more-btn').onclick = loadMoreRecent;
-  // Background metadata enrichment
   loadRecentMetaBatch(items.map(a => a.id));
 }
 
@@ -156,8 +174,7 @@ async function loadRecentMetaBatch(ids) {
         takenAt: meta.takenAt || ''
       };
 
-      // Only update filter chips, don't re-render grid
-      updateRecentFilterChips();
+      // filter chips updated by fetchFilterOptions, not per-photo metadata
     } catch(e) {}
     // Small delay to avoid hammering the server
     await new Promise(res => setTimeout(res, 50));
@@ -170,8 +187,14 @@ function setSearchMode(mode) {
   state.searchMode = mode;
   document.getElementById('search-mode-text').classList.toggle('active', mode === 'text');
   document.getElementById('search-mode-smart').classList.toggle('active', mode === 'smart');
+  state.recentActiveChips = new Set();
+  state.recentActivePerson = null;
+  state.recentSmartResults = [];
+  updateRecentFilterChips();
+  updateActiveChipLabel();
   const q = document.getElementById('recent-search').value;
   if (q) handleRecentSearch(q);
+  else applyRecentFilters();
 }
 
 function handleRecentSearch(q) {
@@ -208,7 +231,7 @@ async function runMultiChipSearch(chips) {
     const r = await fetch('/api/immich/combined-search', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ cameras, lenses, cities, unknowns, size: 60, page: 1 })
+      body: JSON.stringify({ cameras, lenses, cities, unknowns, size: 250, page: 1 })
     });
     const data = await r.json();
     const items = data.assets || [];
@@ -218,18 +241,18 @@ async function runMultiChipSearch(chips) {
     loadRecentMetaBatch(items.map(a => a.id));
     const loadMoreBtn = document.getElementById('load-more-btn');
     if (loadMoreBtn) {
-      loadMoreBtn.style.display = items.length === 60 ? 'block' : 'none';
+      loadMoreBtn.style.display = items.length === 250 ? 'block' : 'none';
       loadMoreBtn.onclick = async () => {
         state.searchPage++;
         const r2 = await fetch('/api/immich/combined-search', {
           method: 'POST',
           headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({ cameras, lenses, cities, size: 60, page: state.searchPage })
+          body: JSON.stringify({ cameras, lenses, cities, size: 250, page: state.searchPage })
         });
         const d2 = await r2.json();
         state.recentSmartResults = [...state.recentSmartResults, ...(d2.assets || [])];
         renderRecentGrid(state.recentSmartResults);
-        loadMoreBtn.style.display = (d2.assets || []).length === 60 ? 'block' : 'none';
+        loadMoreBtn.style.display = (d2.assets || []).length === 250 ? 'block' : 'none';
       };
     }
   } catch(e) {
@@ -249,7 +272,7 @@ async function runTextSearch(q, append = false) {
     const r = await fetch('/api/immich/text-search', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ query: q, size: 60, page: state.searchPage })
+      body: JSON.stringify({ query: q, size: 250, page: state.searchPage, ...categorizeChips() })
     });
     const data = await r.json();
     const newItems = data.assets || [];
@@ -260,7 +283,7 @@ async function runTextSearch(q, append = false) {
     // Show load more if we got a full page (likely more results)
     const loadMoreBtn = document.getElementById('load-more-btn');
     if (loadMoreBtn) {
-      loadMoreBtn.style.display = newItems.length === 60 ? 'block' : 'none';
+      loadMoreBtn.style.display = newItems.length === 250 ? 'block' : 'none';
       loadMoreBtn.onclick = () => {
         state.searchPage++;
         runTextSearch(state.searchQuery, true);
@@ -283,7 +306,7 @@ async function runSmartSearch(q, append = false) {
     const r = await fetch('/api/immich/smart-search', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ query: q, size: 60, page: state.searchPage })
+      body: JSON.stringify({ query: q, size: 250, page: state.searchPage, ...categorizeChips() })
     });
     const data = await r.json();
     const newItems = data.assets || [];
@@ -293,7 +316,7 @@ async function runSmartSearch(q, append = false) {
     loadRecentMetaBatch(newItems.map(a => a.id));
     const loadMoreBtn = document.getElementById('load-more-btn');
     if (loadMoreBtn) {
-      loadMoreBtn.style.display = newItems.length === 60 ? 'block' : 'none';
+      loadMoreBtn.style.display = newItems.length === 250 ? 'block' : 'none';
       loadMoreBtn.onclick = () => {
         state.searchPage++;
         runSmartSearch(state.searchQuery, true);
@@ -339,10 +362,28 @@ function applyRecentFilters() {
   renderRecentGrid(items);
 }
 
+let _outsideClickHandler = null;
 function toggleFiltersPopup() {
   const popup = document.getElementById('recent-filter-popup');
-  popup.style.display = popup.style.display === 'none' ? 'block' : 'none';
-  if (popup.style.display === 'block') updateRecentFilterChips();
+  const opening = popup.style.display === 'none';
+  popup.style.display = opening ? 'block' : 'none';
+  if (_outsideClickHandler) {
+    document.removeEventListener('mousedown', _outsideClickHandler);
+    _outsideClickHandler = null;
+  }
+  if (opening) {
+    updateRecentFilterChips();
+    setTimeout(() => {
+      _outsideClickHandler = function(e) {
+        if (!popup.contains(e.target) && e.target.id !== 'filters-btn') {
+          popup.style.display = 'none';
+          document.removeEventListener('mousedown', _outsideClickHandler);
+          _outsideClickHandler = null;
+        }
+      };
+      document.addEventListener('mousedown', _outsideClickHandler);
+    }, 0);
+  }
 }
 
 function updateRecentFilterChips() {
@@ -363,6 +404,7 @@ function updateRecentFilterChips() {
   if (lensEl) lensEl.innerHTML = lenses.map(l => chip(l, l)).join('') || loadingMsg;
   if (cityEl) cityEl.innerHTML = cities.map(c => chip(c, c)).join('') || loadingMsg;
   if (peopleEl) peopleEl.innerHTML = people.map(p => personChip(p)).join('') || loadingMsg;
+
 }
 
 async function searchByPerson(personId, name) {
@@ -381,7 +423,7 @@ async function searchByPerson(personId, name) {
     const r = await fetch('/api/immich/person-search', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ personId, size: 60 })
+      body: JSON.stringify({ personId, size: 250 })
     });
     const data = await r.json();
     state.recentSmartResults = data.assets || [];
@@ -389,12 +431,12 @@ async function searchByPerson(personId, name) {
     loadRecentMetaBatch(state.recentSmartResults.map(a => a.id));
     const loadMoreBtn = document.getElementById('load-more-btn');
     if (loadMoreBtn) {
-      loadMoreBtn.style.display = (data.assets || []).length === 60 ? 'block' : 'none';
+      loadMoreBtn.style.display = (data.assets || []).length === 250 ? 'block' : 'none';
       loadMoreBtn.onclick = () => {
         state.searchPage++;
         fetch('/api/immich/person-search', {
           method: 'POST', headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({ personId, size: 60, page: state.searchPage })
+          body: JSON.stringify({ personId, size: 250, page: state.searchPage })
         }).then(r => r.json()).then(d => {
           state.recentSmartResults = [...state.recentSmartResults, ...(d.assets || [])];
           renderRecentGrid(state.recentSmartResults);
@@ -408,6 +450,19 @@ async function searchByPerson(personId, name) {
 
 
 
+function categorizeChips() {
+  const chips = [...state.recentActiveChips];
+  const opts = state.filterOptions || {};
+  const cameraSet = new Set(opts.cameras || []);
+  const lensSet = new Set(opts.lenses || []);
+  const citySet = new Set(opts.cities || []);
+  return {
+    model: chips.find(c => cameraSet.has(c)),
+    lensModel: chips.find(c => lensSet.has(c)),
+    city: chips.find(c => citySet.has(c))
+  };
+}
+
 function setRecentChip(val) {
   if (state.recentActiveChips.has(val)) {
     state.recentActiveChips.delete(val);
@@ -416,15 +471,17 @@ function setRecentChip(val) {
   }
   updateActiveChipLabel();
   updateRecentFilterChips();
-  // Run server-side search with all active chips combined
   const chips = [...state.recentActiveChips];
+  const q = (document.getElementById('recent-search')?.value || '').trim();
   if (chips.length === 0) {
     state.recentSmartResults = [];
-    document.getElementById('recent-search').value = '';
     applyRecentFilters();
+  } else if (q) {
+    // Both chips and query — re-run search with chip filters applied
+    if (state.searchMode === 'smart') runSmartSearch(q);
+    else runTextSearch(q);
   } else {
-    // Run separate search for each chip and merge results
-    document.getElementById('recent-search').value = chips.join(' · ');
+    // Chips only, no query — metadata search
     runMultiChipSearch(chips);
   }
 }
@@ -460,33 +517,44 @@ function renderRecentGrid(items) {
 }
 
 function goBackFromDetail() {
+  state.viewingFromAlbum = false;
   const prev = state.previousView || 'recent-view';
-  document.getElementById('recent-detail-view').classList.remove('active');
-  document.getElementById(prev).classList.add('active');
+  // Fade overlay out — absorbs touch inertia before revealing grid
+  const overlay = document.getElementById('recent-detail-view');
+  overlay.classList.add('dismissing');
+  setTimeout(() => overlay.classList.remove('active', 'dismissing'), 230);
   document.getElementById('back-btn').style.display = 'none';
-  document.getElementById('header-title').textContent = prev === 'album-detail-view' 
-    ? (state.currentAlbum?.title || 'Album').toUpperCase()
-    : 'Darkroom Log';
-  document.getElementById('back-btn').onclick = showGallery;
-  disablePinchZoom();
-  if (prev === 'recent-view') {
-    requestAnimationFrame(() => requestAnimationFrame(() => window.scrollTo(0, state.recentScrollY || 0)));
+  if (prev === 'album-detail-view') {
+    document.getElementById('header-title').textContent = (state.currentAlbum?.title || 'Album').toUpperCase();
+  } else if (prev === 'immich-album-view') {
+    document.getElementById('header-title').textContent = document.getElementById('immich-album-name').textContent;
+    document.getElementById('back-btn').style.display = 'flex';
+    document.getElementById('back-btn').onclick = () => {
+      document.getElementById('immich-album-view').classList.remove('active');
+      document.getElementById('immich-view').classList.add('active');
+      document.getElementById('back-btn').style.display = 'none';
+      document.getElementById('header-title').textContent = 'Darkroom Log';
+    };
+  } else {
+    document.getElementById('header-title').textContent = 'Darkroom Log';
+    document.getElementById('back-btn').onclick = showGallery;
   }
+  disablePinchZoom();
   state.previousView = 'recent-view';
 }
 
 async function showRecentDetail(assetId) {
   state.currentRecentId = assetId;
   state.currentRecentIndex = (state.displayedItems || state.recentItems).findIndex(a => a.id === assetId);
-  // Save scroll position
-  state.recentScrollY = window.scrollY;
 
-  // Hide whatever view is currently active
-  ['recent-view','album-detail-view'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.classList.remove('active');
-  });
+  // Track which view is underneath the overlay (for header state on back)
+  const viewMap = { 'album-detail-view': 'album-detail-view', 'immich-album-view': 'immich-album-view' };
+  const fromView = Object.keys(viewMap).find(id => document.getElementById(id)?.classList.contains('active'));
+  state.previousView = fromView ? viewMap[fromView] : 'recent-view';
+
+  // Show the fixed overlay — underlying view stays active and keeps its scroll
   document.getElementById('recent-detail-view').classList.add('active');
+  document.getElementById('recent-detail-view').scrollTop = 0;
   document.getElementById('back-btn').style.display = 'flex';
   document.getElementById('header-title').textContent = 'Recent';
   enablePinchZoom();
@@ -520,7 +588,7 @@ async function renderRecentDetail(assetId) {
   content.innerHTML = `
     <div class="detail-layout">
       <div class="detail-left">
-        <div style="position:relative;width:100%;height:100%;display:flex;align-items:center;justify-content:center">
+        <div style="position:relative;width:100%;height:100%;display:flex;align-items:flex-start;justify-content:center">
           <img class="detail-image" 
                src="/api/immich/thumb/${assetId}"
                data-full="/api/immich/original/${assetId}"
@@ -541,7 +609,10 @@ async function renderRecentDetail(assetId) {
           </div>
           <div style="display:flex;gap:0.5rem">
             <button class="btn btn-ghost btn-sm" data-action="openAddToAlbumModal" data-id="${assetId}">+ Album</button>
+            ${state.viewingFromAlbum ? `<button class="btn btn-ghost btn-sm" data-action="removeFromAlbum" data-id="${assetId}" title="Remove from this album">− Remove</button>` : ''}
+          <button class="btn btn-ghost btn-sm" data-action="downloadRecent" data-id="${assetId}" data-filename="${meta.filename}">↓ DL</button>
           <button class="btn btn-ghost btn-sm" data-action="shareRecent" data-id="${assetId}" data-filename="${meta.filename}" data-desc="${(meta.description||'').replace(/'/g, '&apos;')}">↑ Share</button>
+          <button class="btn btn-danger btn-sm" data-action="deleteImmichAsset" data-id="${assetId}" data-filename="${meta.filename}" title="Delete from Immich">🗑</button>
           </div>
         </div>
         <div class="detail-meta">
@@ -607,6 +678,58 @@ async function shareRecent(assetId, filename, description) {
   }
 }
 
+async function downloadSelectedAssets() {
+  const ids = [...(state.selectedAssets || [])];
+  if (!ids.length) { alert('Select at least one photo first.'); return; }
+  for (const id of ids) {
+    let filename = state.recentMeta[id]?.filename || null;
+    if (!filename) {
+      try {
+        const m = await fetch('/api/immich/photo/' + id).then(r => r.json());
+        filename = m.filename || (id + '.jpg');
+        if (!state.recentMeta[id]) state.recentMeta[id] = {};
+        state.recentMeta[id].filename = filename;
+      } catch(e) { filename = id + '.jpg'; }
+    }
+    const r = await fetch('/api/immich/original/' + id);
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    await new Promise(r => setTimeout(r, 400));
+  }
+}
+
+async function deleteImmichAsset(assetId, filename) {
+  const label = filename || assetId;
+  if (!confirm(`Permanently delete "${label}" from Immich?\n\nThis cannot be undone.`)) return;
+  const r = await fetch('/api/immich/assets/' + assetId, { method: 'DELETE' });
+  if (!r.ok) { alert('Delete failed. Please try again.'); return; }
+  // Remove from local state and navigate back or to next photo
+  if (state.displayedItems) state.displayedItems = state.displayedItems.filter(a => a.id !== assetId);
+  if (state.recentItems) state.recentItems = state.recentItems.filter(a => a.id !== assetId);
+  delete state.recentMeta[assetId];
+  if (state.displayedItems && state.displayedItems.length > 0) {
+    const nextIdx = Math.min(state.currentRecentIndex, state.displayedItems.length - 1);
+    await showRecentDetail(state.displayedItems[nextIdx].id);
+  } else {
+    goBackFromDetail();
+  }
+}
+
+async function downloadRecent(assetId, filename) {
+  const fname = filename || assetId + '.jpg';
+  const r = await fetch('/api/immich/original/' + assetId);
+  const blob = await r.blob();
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = fname;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
 function enablePinchZoom() {
   const meta = document.querySelector('meta[name=viewport]');
   if (meta) meta.content = 'width=device-width, initial-scale=1.0';
@@ -627,6 +750,14 @@ function loadFullImage(img) {
     delete img.dataset.full;
   };
   fullImg.src = full;
+}
+
+function navigatePrint(dir) {
+  const prints = state.displayedPrints || state.prints;
+  const idx = prints.findIndex(p => p.id === state.currentPrintId);
+  if (idx === -1) return;
+  const next = prints[idx + dir];
+  if (next) showDetail(next.id);
 }
 
 async function navigateRecent(dir) {
@@ -675,12 +806,19 @@ document.addEventListener('keydown', e => {
       }
     }
   }
+  if (document.getElementById('detail-view').classList.contains('active')) {
+    if (e.key === 'ArrowLeft') navigatePrint(-1);
+    if (e.key === 'ArrowRight') navigatePrint(1);
+    if (e.key === 'Escape') { state.fullscreenOpen ? closeFullscreen() : closePrintDetail(); }
+  }
 });
 
 // Trackpad two-finger swipe up to go back
 let wheelAccum = 0;
 document.addEventListener('wheel', e => {
-  if (!document.getElementById('recent-detail-view').classList.contains('active')) return;
+  const inRecent = document.getElementById('recent-detail-view').classList.contains('active');
+  const inPrintDetail = document.getElementById('detail-view').classList.contains('active');
+  if (!inRecent && !inPrintDetail) return;
   if (state.fullscreenOpen) return;
   // Only trigger on the image side (detail-left), not the scrollable right panel
   const left = document.querySelector('.detail-left');
@@ -688,7 +826,7 @@ document.addEventListener('wheel', e => {
     wheelAccum += e.deltaY;
     if (wheelAccum < -80 && Math.abs(e.deltaX) < 40) {
       wheelAccum = 0;
-      goBackFromDetail();
+      inPrintDetail ? closePrintDetail() : goBackFromDetail();
     }
   } else {
     wheelAccum = 0;
@@ -699,19 +837,26 @@ document.addEventListener('wheel', e => {
 let touchStartX = null;
 let touchStartY = null;
 document.addEventListener('touchstart', e => {
-  if (document.getElementById('recent-detail-view').classList.contains('active')) {
+  const inRecent = document.getElementById('recent-detail-view').classList.contains('active');
+  const inPrintDetail = document.getElementById('detail-view').classList.contains('active');
+  if (inRecent || inPrintDetail) {
     touchStartX = e.touches[0].clientX;
     touchStartY = e.touches[0].clientY;
   }
 }, {passive: true});
 document.addEventListener('touchend', e => {
-  if (!touchStartX || !document.getElementById('recent-detail-view').classList.contains('active')) return;
+  const inRecent = document.getElementById('recent-detail-view').classList.contains('active');
+  const inPrintDetail = document.getElementById('detail-view').classList.contains('active');
+  if (!touchStartX || (!inRecent && !inPrintDetail)) return;
   const dx = e.changedTouches[0].clientX - touchStartX;
   const dy = e.changedTouches[0].clientY - touchStartY;
-  if (Math.abs(dy) > 80 && dy < 0 && Math.abs(dx) < 50) {
-    // Swipe up — go back
+  if (inPrintDetail && dy > 60 && Math.abs(dy) > Math.abs(dx) * 1.5) {
+    closePrintDetail();
+  } else if (inPrintDetail && Math.abs(dx) > 50 && Math.abs(dy) < 50) {
+    dx < 0 ? navigatePrint(1) : navigatePrint(-1);
+  } else if (inRecent && dy > 60 && Math.abs(dy) > Math.abs(dx) * 1.5) {
     goBackFromDetail();
-  } else if (Math.abs(dx) > 50 && Math.abs(dy) < 50) {
+  } else if (inRecent && Math.abs(dx) > 50 && Math.abs(dy) < 50) {
     dx < 0 ? navigateRecent(1) : navigateRecent(-1);
   }
   touchStartX = null;
@@ -747,6 +892,7 @@ function openAlbum(albumId) {
   state.albumEditMode = false;
   state.albumSelectMode = false;
   state.albumSelected = new Set();
+  lastSelectedIdx = -1;
   // Explicitly hide all views
   ['gallery-view','recent-view','recent-detail-view','albums-view','album-detail-view'].forEach(id => {
     const el = document.getElementById(id);
@@ -785,6 +931,7 @@ function renderAlbumDetail() {
     <div id="album-select-toolbar" style="max-width:1200px;margin:0.5rem auto 0;width:100%;gap:0.5rem;align-items:center;display:${state.albumSelectMode ? 'flex' : 'none'}">
       <span id="album-select-count" style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text-dim)">${state.albumSelected ? state.albumSelected.size : 0} selected</span>
       <button class="btn btn-ghost btn-sm" data-action="downloadSelectedAlbumPhotos">↓ Download</button>
+      <button class="btn btn-danger btn-sm" data-action="removeSelectedFromAlbum">− Remove</button>
       <button class="btn btn-ghost btn-sm" data-action="toggleAlbumSelectMode">✕ Cancel</button>
     </div>
   `;
@@ -802,9 +949,7 @@ function renderAlbumDetail() {
   grid.innerHTML = album.assets.map((assetId, idx) => `
     <div class="gallery-item${inSelectMode && selected.has(assetId) ? ' selected' : ''}"
          draggable="${editMode}"
-         ondragstart="dragStart(event, ${idx})"
-         ondragover="dragOver(event)"
-         ondrop="dragDrop(event, ${idx})"
+         data-drag-idx="${idx}"
          data-action="albumPhotoClick" data-id="${assetId}" data-idx="${idx}">
       <img src="/api/immich/thumb/${assetId}" loading="lazy" onerror="this.style.background='#1a1a1a'" style="cursor:pointer">
       ${editMode ? `<button class="album-photo-remove" data-action="removeFromAlbum" data-id="${assetId}">×</button>` : ''}
@@ -816,6 +961,7 @@ function renderAlbumDetail() {
 
 async function showAlbumPhotoDetail(assetId, idx) {
   state.previousView = 'album-detail-view';
+  state.viewingFromAlbum = true;
   const album = state.currentAlbum;
   state.recentItems = album.assets.map(id => ({ id, originalFileName: '', createdAt: '' }));
   state.displayedItems = state.recentItems;
@@ -894,6 +1040,21 @@ async function removeFromAlbum(assetId) {
     method: 'PUT', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({ assets: album.assets })
   });
+  if (document.getElementById('recent-detail-view')?.classList.contains('active')) goBackFromDetail();
+  renderAlbumDetail();
+}
+
+async function removeSelectedFromAlbum() {
+  const album = state.currentAlbum;
+  const toRemove = state.albumSelected || new Set();
+  if (!toRemove.size) return;
+  album.assets = album.assets.filter(a => !toRemove.has(a));
+  await fetch('/api/albums/' + album.id, {
+    method: 'PUT', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ assets: album.assets })
+  });
+  state.albumSelectMode = false;
+  state.albumSelected = new Set();
   renderAlbumDetail();
 }
 
@@ -967,18 +1128,25 @@ async function addToAlbum(albumId) {
   closeModal('add-to-album-modal');
   state.pendingAddAssetId = null;
   if (state.selectMode) exitSelectMode();
+  if (state.immichSelectMode) exitImmichSelectMode();
 }
 
 async function quickCreateAndAdd() {
   const title = document.getElementById('quick-album-name').value.trim();
   if (!title) return;
-  const r = await fetch('/api/albums', {
-    method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ title })
-  });
-  const album = await r.json();
-  state.albums.push(album);
-  await addToAlbum(album.id);
+  try {
+    const r = await fetch('/api/albums', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ title })
+    });
+    if (!r.ok) throw new Error('Server error');
+    const album = await r.json();
+    if (!album || !album.id) throw new Error('Invalid response');
+    state.albums.push(album);
+    await addToAlbum(album.id);
+  } catch(e) {
+    alert('Failed to create album. Please try again.');
+  }
 }
 
 function copyShareLink(url) {
@@ -1113,29 +1281,35 @@ async function showTitleCard(album) {
 }
 
 let ssAudio = null;
+let ssMusicFade = null;
 function startSlideshowMusic(settings) {
+  if (ssMusicFade) { clearInterval(ssMusicFade); ssMusicFade = null; }
   if (ssAudio) { ssAudio.pause(); ssAudio = null; }
   if (!settings.musicFile) return;
   ssAudio = new Audio('/api/albums/music/' + encodeURIComponent(settings.musicFile));
   ssAudio.loop = true;
   ssAudio.volume = 0;
   ssAudio.play().catch(() => {});
-  // Fade in
+  const targetAudio = ssAudio;
   let vol = 0;
-  const fade = setInterval(() => {
+  ssMusicFade = setInterval(() => {
+    if (ssAudio !== targetAudio) { clearInterval(ssMusicFade); ssMusicFade = null; return; }
     vol = Math.min(vol + 0.05, 0.8);
     ssAudio.volume = vol;
-    if (vol >= 0.8) clearInterval(fade);
+    if (vol >= 0.8) { clearInterval(ssMusicFade); ssMusicFade = null; }
   }, 100);
 }
 
 function stopSlideshowMusic() {
+  if (ssMusicFade) { clearInterval(ssMusicFade); ssMusicFade = null; }
   if (!ssAudio) return;
+  const targetAudio = ssAudio;
   let vol = ssAudio.volume;
-  const fade = setInterval(() => {
+  ssMusicFade = setInterval(() => {
+    if (ssAudio !== targetAudio) { clearInterval(ssMusicFade); ssMusicFade = null; return; }
     vol = Math.max(vol - 0.05, 0);
     ssAudio.volume = vol;
-    if (vol <= 0) { clearInterval(fade); ssAudio.pause(); ssAudio = null; }
+    if (vol <= 0) { clearInterval(ssMusicFade); ssMusicFade = null; ssAudio.pause(); ssAudio = null; }
   }, 80);
 }
 
@@ -1326,6 +1500,14 @@ document.addEventListener('touchend', e => {
   ssTouchX = null;
 }, {passive: true});
 
+// Stop stray music if page is restored from background without an active slideshow
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && !state.slideshow.active && ssAudio) {
+    ssAudio.pause();
+    ssAudio = null;
+  }
+});
+
 // ── SELECTION MODE ──────────────────────────────────────────────────────────
 function toggleSelectMode() {
   state.selectMode ? exitSelectMode() : enterSelectMode();
@@ -1336,7 +1518,8 @@ function enterSelectMode() {
   state.selectedAssets = new Set();
   document.getElementById('select-mode-btn').style.display = 'none';
   document.getElementById('select-actions').style.display = 'flex';
-  renderRecentGrid(state.recentItems);
+  const items = state.recentSmartResults && state.recentSmartResults.length ? state.recentSmartResults : state.recentItems;
+  renderRecentGrid(items);
 }
 
 function exitSelectMode() {
@@ -1344,7 +1527,8 @@ function exitSelectMode() {
   state.selectedAssets = new Set();
   document.getElementById('select-mode-btn').style.display = 'inline-block';
   document.getElementById('select-actions').style.display = 'none';
-  renderRecentGrid(state.recentItems);
+  const items = state.recentSmartResults && state.recentSmartResults.length ? state.recentSmartResults : state.recentItems;
+  renderRecentGrid(items);
 }
 
 function toggleAssetSelect(assetId) {
@@ -1454,6 +1638,7 @@ function applyFilters() {
 }
 
 function renderGallery(prints) {
+  state.displayedPrints = prints;
   const grid = document.getElementById('gallery-grid');
   if (!prints.length) { grid.innerHTML = '<div class="gallery-empty">No prints yet.<br>Tap + Print to add one.</div>'; return; }
   grid.innerHTML = prints.map(p => `
@@ -1470,10 +1655,12 @@ function renderGallery(prints) {
 async function showDetail(printId) {
   const print = state.prints.find(p => p.id === printId);
   if (!print) return;
+  const displayedPrints = state.displayedPrints || state.prints;
+  const printIdx = displayedPrints.findIndex(p => p.id === printId);
   state.currentPrintId = printId;
-  document.getElementById('gallery-view').classList.remove('active');
   document.getElementById('detail-view').classList.add('active');
   document.getElementById('back-btn').style.display = 'flex';
+  document.getElementById('back-btn').onclick = closePrintDetail;
   document.getElementById('add-print-btn').style.display = 'none';
   document.getElementById('header-title').textContent = print.title;
 
@@ -1483,13 +1670,22 @@ async function showDetail(printId) {
   let meta = {};
   try { const r = await fetch(`/api/immich/photo/${print.immichId}`); meta = await r.json(); } catch(e) {}
 
-  const sessions = print.sessions || [];
+  const sessions = (print.sessions || []).slice().sort((a, b) => Number(b.id) - Number(a.id));
   content.innerHTML = `
     <div class="detail-layout">
       <div class="detail-left">
-        <img class="detail-image" src="/api/immich/original/${print.immichId}" alt="${print.title}">
+        <div style="position:relative;width:100%;height:100%;display:flex;align-items:flex-start;justify-content:center">
+          <img class="detail-image" src="/api/immich/original/${print.immichId}" alt="${print.title}" data-action="openFullscreen" data-url="/api/immich/original/${print.immichId}" style="cursor:zoom-in;touch-action:manipulation">
+          <div data-action="printNavPrev" style="position:absolute;left:0;top:0;width:25%;height:100%;cursor:pointer;z-index:10;touch-action:manipulation"></div>
+          <div data-action="printNavNext" style="position:absolute;right:0;top:0;width:25%;height:100%;cursor:pointer;z-index:10;touch-action:manipulation"></div>
+        </div>
       </div>
       <div class="detail-right">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:0.5rem 1rem;border-bottom:1px solid var(--border)">
+      ${printIdx > 0 ? `<button class="nav-arrow" data-action="printNavPrev">&#8249;</button>` : `<div style="width:36px"></div>`}
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--text-dim)">${printIdx + 1} / ${displayedPrints.length}</div>
+      ${printIdx < displayedPrints.length - 1 ? `<button class="nav-arrow" data-action="printNavNext">&#8250;</button>` : `<div style="width:36px"></div>`}
+    </div>
     <div class="detail-meta">
       <div class="detail-title-row">
         <div class="detail-title" id="title-display">${print.title}</div>
@@ -1506,7 +1702,7 @@ async function showDetail(printId) {
       <div class="print-tags-row" id="print-tags-row">
         ${(print.tags || []).map(t => `<span class="print-tag">${t} <button class="btn-icon" data-action="removeTag" data-tag="${t}" style="font-size:10px">×</button></span>`).join('')}
         <button class="btn-icon" data-action="showTagInput" style="font-size:11px;color:var(--safe)">+ tag</button>
-        <input class="tag-add-input" id="tag-add-input" type="text" placeholder="tag name" onkeydown="handleTagKey(event)">
+        <input class="tag-add-input" id="tag-add-input" type="text" placeholder="tag name">
       </div>
     </div>
     <div class="sessions-header">
@@ -1557,12 +1753,17 @@ async function showDetail(printId) {
   `;
 }
 
-function showGallery() {
-  document.getElementById('gallery-view').classList.add('active');
-  document.getElementById('detail-view').classList.remove('active');
+function closePrintDetail() {
+  const overlay = document.getElementById('detail-view');
+  overlay.classList.add('dismissing');
+  setTimeout(() => overlay.classList.remove('active', 'dismissing'), 230);
   document.getElementById('back-btn').style.display = 'none';
   document.getElementById('add-print-btn').style.display = 'inline-block';
   document.getElementById('header-title').textContent = 'Darkroom Log';
+}
+
+function showGallery() {
+  closePrintDetail();
   loadGallery();
   renderTagFilterBar();
 }
@@ -1572,7 +1773,7 @@ function startEditTitle() {
   document.querySelector('.detail-title-row').innerHTML = `
     <input class="title-edit-input" id="title-edit-input" type="text" value="${print.title}">
     <button class="btn btn-ghost btn-sm" data-action="saveTitle">Save</button>
-    <button class="btn-icon" data-action="cancelEditTitle" data-title="${print.title}">✕</button>
+    <button class="btn-icon" data-action="cancelEditTitle" data-title="${encodeURIComponent(print.title)}">✕</button>
   `;
   const inp = document.getElementById('title-edit-input');
   inp.focus();
@@ -1764,7 +1965,7 @@ function updateTagsDisplay(print) {
   row.innerHTML = `
     ${(print.tags || []).map(t => `<span class="print-tag">${t} <button class="btn-icon" data-action="removeTag" data-tag="${t}" style="font-size:10px">×</button></span>`).join('')}
     <button class="btn-icon" data-action="showTagInput" style="font-size:11px;color:var(--safe)">+ tag</button>
-    <input class="tag-add-input" id="tag-add-input" type="text" placeholder="tag name" onkeydown="handleTagKey(event)">
+    <input class="tag-add-input" id="tag-add-input" type="text" placeholder="tag name">
   `;
 }
 
@@ -1819,6 +2020,300 @@ async function deleteSession(sessionId) {
 
 
 
+// ── IMMICH ALBUMS TAB ─────────────────────────────────────────────────────────
+
+async function loadImmichTab() {
+  const grid = document.getElementById('immich-album-grid');
+  grid.innerHTML = '<div class="loading">Loading...</div>';
+  try {
+    const { albums: configuredIds } = await fetch('/api/settings/immich-albums').then(r => r.json());
+    state.immichConfiguredIds = configuredIds;
+    if (!configuredIds.length) {
+      state.immichAlbumsLoaded = true;
+      grid.innerHTML = '<div style="text-align:center;padding:3rem;color:var(--text-dim);font-family:\'IBM Plex Mono\',monospace;font-size:12px">No albums configured.<br><br>Click ⚙ Configure to select Immich albums.</div>';
+      return;
+    }
+    const albumDetails = await Promise.all(
+      configuredIds.map(id => fetch(`/api/immich/immich-albums/${id}`).then(r => r.json()).catch(() => null))
+    );
+    state.immichAlbums = albumDetails.filter(Boolean);
+    state.immichAlbumsLoaded = true;
+    renderImmichAlbumGrid();
+  } catch(e) {
+    grid.innerHTML = '<div style="color:var(--red);padding:1rem">Error loading albums</div>';
+  }
+}
+
+function renderImmichAlbumGrid() {
+  const grid = document.getElementById('immich-album-grid');
+  if (!state.immichAlbums.length) {
+    grid.innerHTML = '<div style="text-align:center;padding:3rem;color:var(--text-dim)">No albums found.</div>';
+    return;
+  }
+  grid.innerHTML = '<div class="gallery-grid">' + state.immichAlbums.map(album => {
+    const thumb = album.albumThumbnailAssetId ? `/api/immich/thumb/${album.albumThumbnailAssetId}` : '';
+    const count = album.assetCount || (album.assets || []).length;
+    const name = (album.albumName || 'Untitled').replace(/"/g, '&quot;');
+    return `<div class="gallery-item" data-action="openImmichAlbum" data-id="${album.id}" data-name="${name}" style="cursor:pointer;position:relative">
+      ${thumb ? `<img src="${thumb}" loading="lazy" style="width:100%;height:100%;object-fit:cover">` : '<div style="width:100%;height:100%;background:var(--surface2);display:flex;align-items:center;justify-content:center;color:var(--text-dim);font-size:24px">📷</div>'}
+      <div style="position:absolute;bottom:0;left:0;right:0;background:linear-gradient(transparent,rgba(0,0,0,0.75));padding:0.5rem;font-family:\'IBM Plex Mono\',monospace;font-size:10px;color:#fff;pointer-events:none">
+        <div style="font-weight:600;margin-bottom:2px">${album.albumName || 'Untitled'}</div>
+        <div style="opacity:0.7">${count} photo${count !== 1 ? 's' : ''}</div>
+      </div>
+    </div>`;
+  }).join('') + '</div>';
+}
+
+async function openImmichAlbum(albumId, albumName) {
+  const gallery = document.getElementById('immich-album-gallery');
+  gallery.innerHTML = '<div class="loading">Loading...</div>';
+  document.getElementById('immich-album-name').textContent = albumName;
+  document.getElementById('immich-view').classList.remove('active');
+  document.getElementById('immich-album-view').classList.add('active');
+  document.getElementById('immich-album-view').scrollTop = 0;
+  document.getElementById('back-btn').style.display = 'flex';
+  document.getElementById('header-title').textContent = albumName;
+  document.getElementById('back-btn').onclick = () => {
+    document.getElementById('immich-album-view').classList.remove('active');
+    document.getElementById('immich-view').classList.add('active');
+    document.getElementById('back-btn').style.display = 'none';
+    document.getElementById('header-title').textContent = 'Darkroom Log';
+    exitImmichSelectMode();
+  };
+  try {
+    const data = await fetch(`/api/immich/immich-albums/${albumId}`).then(r => r.json());
+    state.currentImmichAlbumId = albumId;
+    state.currentImmichAlbumAssets = data.assets || [];
+    state.immichActiveChips = new Set();
+    state.immichSelected = new Set();
+    state.immichSelectMode = false;
+    renderImmichSortBar();
+    applyImmichFiltersAndSort();
+  } catch(e) {
+    gallery.innerHTML = '<div style="color:var(--red);padding:1rem">Error loading album</div>';
+  }
+}
+
+function renderImmichSortBar() {
+  ['taken','upload'].forEach(s => {
+    const btn = document.getElementById('immich-sort-' + s);
+    if (btn) btn.classList.toggle('active', state.immichSort === s);
+  });
+  const dir = document.getElementById('immich-sort-dir');
+  if (dir) dir.textContent = state.immichSortDir === 'desc' ? '↓ Newest' : '↑ Oldest';
+}
+
+function setImmichSort(sort) {
+  state.immichSort = sort;
+  renderImmichSortBar();
+  applyImmichFiltersAndSort();
+}
+
+function toggleImmichSortDir() {
+  state.immichSortDir = state.immichSortDir === 'desc' ? 'asc' : 'desc';
+  renderImmichSortBar();
+  applyImmichFiltersAndSort();
+}
+
+function toggleImmichFilterPopup() {
+  const popup = document.getElementById('immich-filter-popup');
+  const backdrop = document.getElementById('immich-filter-backdrop');
+  if (popup.style.display === 'none') {
+    renderImmichFilterPopup();
+    popup.style.display = 'block';
+    backdrop.style.display = 'block';
+  } else {
+    popup.style.display = 'none';
+    backdrop.style.display = 'none';
+  }
+}
+
+function renderImmichFilterPopup() {
+  const assets = state.currentImmichAlbumAssets;
+  const cameras = [...new Set(assets.map(a => a.exifInfo?.model).filter(Boolean))].sort();
+  const lenses = [...new Set(assets.map(a => a.exifInfo?.lensModel).filter(Boolean))].sort();
+  const cities = [...new Set(assets.map(a => a.exifInfo?.city).filter(Boolean))].sort();
+  const chip = (val) => `<button class="tag-filter${state.immichActiveChips.has(val) ? ' active' : ''}" data-action="toggleImmichChip" data-val="${val.replace(/"/g,'&quot;')}">${val}</button>`;
+  let html = '';
+  if (cameras.length) html += `<div style="font-family:'IBM Plex Mono',monospace;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--text-dim);margin-bottom:0.5rem">Camera</div><div style="display:flex;flex-wrap:wrap;gap:0.3rem;margin-bottom:1rem">${cameras.map(chip).join('')}</div>`;
+  if (lenses.length) html += `<div style="font-family:'IBM Plex Mono',monospace;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--text-dim);margin-bottom:0.5rem">Lens</div><div style="display:flex;flex-wrap:wrap;gap:0.3rem;margin-bottom:1rem">${lenses.map(chip).join('')}</div>`;
+  if (cities.length) html += `<div style="font-family:'IBM Plex Mono',monospace;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--text-dim);margin-bottom:0.5rem">Location</div><div style="display:flex;flex-wrap:wrap;gap:0.3rem;margin-bottom:1rem">${cities.map(chip).join('')}</div>`;
+  if (!html) html = '<div style="color:var(--text-dim);font-size:11px">No filter options available.</div>';
+  document.getElementById('immich-filter-popup-content').innerHTML = html;
+}
+
+function toggleImmichChip(val) {
+  if (state.immichActiveChips.has(val)) state.immichActiveChips.delete(val);
+  else state.immichActiveChips.add(val);
+  const label = document.getElementById('immich-active-chip-label');
+  if (label) label.textContent = state.immichActiveChips.size ? [...state.immichActiveChips].join(' · ') : '';
+  renderImmichFilterPopup();
+  applyImmichFiltersAndSort();
+}
+
+function applyImmichFiltersAndSort() {
+  let assets = [...state.currentImmichAlbumAssets];
+  if (state.immichActiveChips.size) {
+    assets = assets.filter(a => {
+      const vals = [a.exifInfo?.model, a.exifInfo?.lensModel, a.exifInfo?.city].filter(Boolean);
+      return [...state.immichActiveChips].every(chip => vals.includes(chip));
+    });
+  }
+  const dir = state.immichSortDir === 'asc' ? 1 : -1;
+  if (state.immichSort === 'taken') {
+    assets.sort((a, b) => dir * (new Date(a.localDateTime || a.fileCreatedAt) - new Date(b.localDateTime || b.fileCreatedAt)));
+  } else {
+    assets.sort((a, b) => dir * (new Date(a.createdAt) - new Date(b.createdAt)));
+  }
+  state.immichDisplayedAssets = assets;
+  renderImmichGallery(assets);
+}
+
+function renderImmichGallery(assets) {
+  const gallery = document.getElementById('immich-album-gallery');
+  if (!assets) assets = state.immichDisplayedAssets.length ? state.immichDisplayedAssets : state.currentImmichAlbumAssets;
+  if (!assets.length) {
+    gallery.innerHTML = '<div style="text-align:center;padding:3rem;color:var(--text-dim)">No photos in this album.</div>';
+    return;
+  }
+  const action = state.immichSelectMode ? 'toggleImmichAsset' : 'openImmichPhoto';
+  gallery.innerHTML = '<div class="gallery-grid">' + assets.map((a, idx) => `
+    <div class="gallery-item ${state.immichSelectMode ? 'selectable' : ''} ${state.immichSelected.has(a.id) ? 'selected' : ''}"
+         data-action="${action}" data-id="${a.id}" data-idx="${idx}">
+      <img src="/api/immich/thumb/${a.id}" loading="lazy" style="width:100%;height:100%;object-fit:cover">
+      ${state.immichSelectMode ? `<div class="select-check${state.immichSelected.has(a.id) ? ' active' : ''}"></div>` : ''}
+    </div>
+  `).join('') + '</div>';
+}
+
+function toggleImmichSelectMode() {
+  state.immichSelectMode = true;
+  state.immichSelected = new Set();
+  document.getElementById('immich-select-mode-btn').style.display = 'none';
+  document.getElementById('immich-select-toolbar').style.display = 'flex';
+  document.getElementById('immich-select-count').textContent = '0 selected';
+  renderImmichGallery();
+}
+
+function exitImmichSelectMode() {
+  state.immichSelectMode = false;
+  state.immichSelected = new Set();
+  lastImmichSelectedIdx = -1;
+  document.getElementById('immich-select-mode-btn').style.display = 'inline-block';
+  document.getElementById('immich-select-toolbar').style.display = 'none';
+  renderImmichGallery();
+}
+
+let lastImmichSelectedIdx = -1;
+
+function toggleImmichAsset(assetId, e) {
+  const assets = state.immichDisplayedAssets.length ? state.immichDisplayedAssets : state.currentImmichAlbumAssets;
+  const idx = assets.findIndex(a => a.id === assetId);
+  if (e && e.shiftKey && lastImmichSelectedIdx >= 0) {
+    const from = Math.min(lastImmichSelectedIdx, idx);
+    const to = Math.max(lastImmichSelectedIdx, idx);
+    for (let i = from; i <= to; i++) state.immichSelected.add(assets[i].id);
+  } else {
+    if (state.immichSelected.has(assetId)) state.immichSelected.delete(assetId);
+    else state.immichSelected.add(assetId);
+    lastImmichSelectedIdx = idx;
+  }
+  document.getElementById('immich-select-count').textContent = state.immichSelected.size + ' selected';
+  renderImmichGallery();
+}
+
+function addImmichSelectionToAlbum() {
+  if (!state.immichSelected.size) { alert('Select at least one photo first.'); return; }
+  state.pendingAddAssetId = [...state.immichSelected];
+  const list = document.getElementById('album-pick-list');
+  if (!state.albums.length) {
+    list.innerHTML = '<div style="color:var(--text-dim);font-family:IBM Plex Mono,monospace;font-size:11px;margin-bottom:0.5rem">No albums yet</div>';
+  } else {
+    list.innerHTML = state.albums.map(a => `
+      <button class="btn btn-ghost btn-sm" style="width:100%;text-align:left;margin-bottom:0.4rem" data-action="addToAlbum" data-id="${a.id}">${a.title} (${a.assets.length})</button>
+    `).join('');
+  }
+  document.getElementById('add-to-album-modal').classList.add('active');
+}
+
+function openImmichPhoto(assetId, idx) {
+  state.displayedItems = state.immichDisplayedAssets.length ? state.immichDisplayedAssets : state.currentImmichAlbumAssets;
+  state.lastClickedImmichEl = document.querySelector(`#immich-album-gallery [data-id="${assetId}"]`);
+  showRecentDetail(assetId);
+}
+
+async function downloadImmichSelected() {
+  const ids = [...state.immichSelected];
+  if (!ids.length) { alert('Select at least one photo first.'); return; }
+  for (const id of ids) {
+    let filename = state.recentMeta[id]?.filename || null;
+    if (!filename) {
+      try {
+        const m = await fetch('/api/immich/photo/' + id).then(r => r.json());
+        filename = m.filename || (id + '.jpg');
+        if (!state.recentMeta[id]) state.recentMeta[id] = {};
+        state.recentMeta[id].filename = filename;
+      } catch(e) { filename = id + '.jpg'; }
+    }
+    const r = await fetch('/api/immich/original/' + id);
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    await new Promise(r => setTimeout(r, 400));
+  }
+}
+
+// ── IMMICH SETTINGS MODAL ─────────────────────────────────────────────────────
+
+async function openImmichSettings() {
+  const modal = document.getElementById('immich-settings-modal');
+  const list = document.getElementById('immich-settings-list');
+  modal.style.display = 'flex';
+  list.innerHTML = '<div class="loading">Loading all Immich albums...</div>';
+  try {
+    const [allAlbums, { albums: configuredIds }] = await Promise.all([
+      fetch('/api/immich/immich-albums').then(r => r.json()),
+      fetch('/api/settings/immich-albums').then(r => r.json())
+    ]);
+    const configured = new Set(configuredIds);
+    list.innerHTML = (allAlbums || []).map(album => {
+      const thumb = album.albumThumbnailAssetId
+        ? `<img src="/api/immich/thumb/${album.albumThumbnailAssetId}" style="width:40px;height:40px;object-fit:cover;border-radius:3px;flex-shrink:0">`
+        : '<div style="width:40px;height:40px;background:var(--surface2);border-radius:3px;flex-shrink:0"></div>';
+      return `<label style="display:flex;align-items:center;gap:0.75rem;padding:0.5rem 0;border-bottom:1px solid var(--border);cursor:pointer">
+        <input type="checkbox" data-album-id="${album.id}" ${configured.has(album.id) ? 'checked' : ''} style="width:16px;height:16px;flex-shrink:0;accent-color:var(--safe)">
+        ${thumb}
+        <div>
+          <div style="font-size:13px;color:var(--text)">${album.albumName || 'Untitled'}</div>
+          <div style="font-size:10px;color:var(--text-dim);font-family:'IBM Plex Mono',monospace">${album.assetCount || 0} photos</div>
+        </div>
+      </label>`;
+    }).join('');
+  } catch(e) {
+    list.innerHTML = '<div style="color:var(--red)">Error loading albums</div>';
+  }
+}
+
+function closeImmichSettings() {
+  document.getElementById('immich-settings-modal').style.display = 'none';
+}
+
+async function saveImmichSettings() {
+  const checkboxes = document.querySelectorAll('#immich-settings-list input[type="checkbox"]');
+  const albums = [...checkboxes].filter(cb => cb.checked).map(cb => cb.dataset.albumId);
+  await fetch('/api/settings/immich-albums', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ albums })
+  });
+  closeImmichSettings();
+  state.immichAlbumsLoaded = false;
+  loadImmichTab();
+}
+
 // ── EVENT LISTENERS ──────────────────────────────────────────────────────────
 // Wired directly since app.js loads with defer (DOM is ready)
 
@@ -1837,6 +2332,7 @@ function wireListeners() {
   w('tab-prints', 'click', () => switchTab('prints'));
   w('tab-recent', 'click', () => switchTab('recent'));
   w('tab-albums', 'click', () => switchTab('albums'));
+  w('tab-immich', 'click', () => switchTab('immich'));
 
   // Prints
   w('gallery-search', 'input', () => applyFilters());
@@ -1851,6 +2347,7 @@ function wireListeners() {
   w('search-mode-smart', 'click', () => setSearchMode('smart'));
   w('select-mode-btn', 'click', () => toggleSelectMode());
   w('btn-add-selection-album', 'click', () => addSelectionToAlbum());
+  w('btn-download-selection', 'click', () => downloadSelectedAssets());
   w('btn-exit-select', 'click', () => exitSelectMode());
   w('lib-sort-upload', 'click', () => setLibrarySort('upload'));
   w('lib-sort-taken', 'click', () => setLibrarySort('taken'));
@@ -1858,10 +2355,31 @@ function wireListeners() {
   w('filters-btn', 'click', () => toggleFiltersPopup());
   w('filters-done-btn', 'click', () => toggleFiltersPopup());
   w('btn-clear-chips', 'click', () => { clearRecentChip(); toggleFiltersPopup(); });
-  w('load-more-btn', 'click', () => loadMoreRecent());
+
+  // Immich sort/filter
+  w('btn-immich-add-album', 'click', () => addImmichSelectionToAlbum());
+  w('immich-sort-taken', 'click', () => setImmichSort('taken'));
+  w('immich-sort-upload', 'click', () => setImmichSort('upload'));
+  w('immich-sort-dir', 'click', () => toggleImmichSortDir());
+  w('immich-filters-btn', 'click', () => toggleImmichFilterPopup());
+  w('immich-filter-backdrop', 'click', () => toggleImmichFilterPopup());
 
   // Albums
   w('btn-create-album', 'click', () => openCreateAlbumModal());
+
+  // Album drag-to-reorder — CSP-safe delegated listeners
+  const _albumGrid = document.getElementById('album-photo-grid');
+  if (_albumGrid) {
+    _albumGrid.addEventListener('dragstart', e => {
+      const el = e.target.closest('[data-drag-idx]');
+      if (el) dragStart(e, parseInt(el.dataset.dragIdx));
+    });
+    _albumGrid.addEventListener('dragover', e => dragOver(e));
+    _albumGrid.addEventListener('drop', e => {
+      const el = e.target.closest('[data-drag-idx]');
+      if (el) dragDrop(e, parseInt(el.dataset.dragIdx));
+    });
+  }
 
   // Slideshow overlay + controls
   w('slideshow-overlay', 'click', () => showSlideshowControls());
@@ -1901,6 +2419,11 @@ function wireListeners() {
     if (e.target.classList.contains('input-aperture')) autoPrefixF(e.target);
     if (e.target.classList.contains('input-hash')) autoPrefixHash(e.target);
   });
+
+  // Delegated keydown for dynamically generated tag input
+  document.addEventListener('keydown', (e) => {
+    if (e.target.classList.contains('tag-add-input')) handleTagKey(e);
+  });
 }
 
 
@@ -1926,7 +2449,11 @@ document.addEventListener('click', (e) => {
     case 'openFullscreen': openFullscreen(el.dataset.url); break;
     case 'navPrev': navigateRecent(-1); break;
     case 'navNext': navigateRecent(1); break;
+    case 'printNavPrev': navigatePrint(-1); break;
+    case 'printNavNext': navigatePrint(1); break;
     case 'openAddToAlbumModal': openAddToAlbumModal(id); break;
+    case 'downloadRecent': downloadRecent(id, el.dataset.filename); break;
+    case 'deleteImmichAsset': deleteImmichAsset(id, el.dataset.filename); break;
     case 'shareRecent': shareRecent(id, el.dataset.filename, el.dataset.desc); break;
 
     // Albums
@@ -1943,6 +2470,22 @@ document.addEventListener('click', (e) => {
     case 'openAlbumSlideshow': e.stopPropagation(); openAlbumSlideshow(parseInt(el.dataset.idx)); break;
     case 'addToAlbum': addToAlbum(id); break;
     case 'downloadSelectedAlbumPhotos': downloadSelectedAlbumPhotos(); break;
+    case 'removeSelectedFromAlbum': removeSelectedFromAlbum(); break;
+
+    // Immich Albums tab
+    case 'openImmichAlbum': openImmichAlbum(id, el.dataset.name); break;
+    case 'openImmichPhoto': openImmichPhoto(id, el.dataset.idx); break;
+    case 'toggleImmichAsset': toggleImmichAsset(id, e); break;
+    case 'toggleImmichSelectMode': toggleImmichSelectMode(); break;
+    case 'exitImmichSelectMode': exitImmichSelectMode(); break;
+    case 'downloadImmichSelected': downloadImmichSelected(); break;
+    case 'openImmichSettings': openImmichSettings(); break;
+    case 'closeImmichSettings': closeImmichSettings(); break;
+    case 'saveImmichSettings': saveImmichSettings(); break;
+    case 'setImmichSort': setImmichSort(el.dataset.sort); break;
+    case 'toggleImmichSortDir': toggleImmichSortDir(); break;
+    case 'toggleImmichFilterPopup': toggleImmichFilterPopup(); break;
+    case 'toggleImmichChip': toggleImmichChip(el.dataset.val); break;
 
     // Prints
     case 'setTagFilter': setTagFilter(el.dataset.tag); break;
@@ -1955,7 +2498,7 @@ document.addEventListener('click', (e) => {
     case 'editSession': editSession(id); break;
     case 'deleteSession': deleteSession(id); break;
     case 'saveTitle': saveTitle(); break;
-    case 'cancelEditTitle': cancelEditTitle(el.dataset.title); break;
+    case 'cancelEditTitle': cancelEditTitle(decodeURIComponent(el.dataset.title)); break;
     case 'openAddSessionModal': openAddSessionModal(); break;
 
     // Immich search
@@ -1966,24 +2509,3 @@ document.addEventListener('click', (e) => {
 });
 
 wireListeners();
-
-// Global event delegation for all dynamic onclick handlers
-// This handles clicks on dynamically generated HTML elements
-document.addEventListener('click', (e) => {
-  // data-action delegation
-  const actionEl = e.target.closest('[data-action]');
-  if (actionEl) {
-    const action = actionEl.dataset.action;
-    const id = actionEl.dataset.id;
-
-  }
-});
-
-// Override eval-unsafe onclick handlers by intercepting at window level
-// This allows onclick= attributes in dynamically generated HTML to still work
-// while keeping them out of static HTML
-window.addEventListener('error', (e) => {
-  // Silently catch any CSP violations from dynamic content
-}, true);
-
-

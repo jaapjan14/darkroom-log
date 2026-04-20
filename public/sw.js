@@ -1,4 +1,4 @@
-const CACHE = 'darkroom-v4';
+const CACHE = 'darkroom-v24';
 const STATIC = [
   '/',
   '/favicon.png',
@@ -19,12 +19,12 @@ self.addEventListener('activate', e => {
 });
 
 self.addEventListener('fetch', e => {
-  // Network first for API calls
-  if (e.request.url.includes('/api/')) {
+  // Network first for API calls and JS bundles
+  if (e.request.url.includes('/api/') || e.request.url.match(/\/(app|album)\.js/)) {
     e.respondWith(fetch(e.request).catch(() => caches.match(e.request)));
     return;
   }
-  // Cache first for static assets
+  // Cache first for everything else
   e.respondWith(
     caches.match(e.request).then(cached => cached || fetch(e.request))
   );
