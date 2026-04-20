@@ -17,7 +17,8 @@ A self-hosted darkroom printing log and analog photo library, built for Immich i
 ### Library
 - Browse your full Immich photo library
 - Sort by upload date or date taken (ascending/descending)
-- Text search and CLIP smart search
+- **Combined search** — merges Immich text search and CLIP smart search into a single result set, something Immich's native UI doesn't offer
+- Search by recognized person/face
 - Filter chips: camera, lens, location, people
 - Select mode with shift-click range selection
 
