@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.4.3 (2026-04-19)
+
+### Dependencies
+- **multer upgraded to 2.x** — resolves known vulnerabilities in multer 1.x; music upload tested and confirmed working
+
+---
+
 ## v1.4.2 (2026-04-19)
 
 ### Bug Fixes
