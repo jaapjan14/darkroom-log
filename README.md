@@ -29,7 +29,9 @@ A self-hosted darkroom printing log and analog photo library, built for Immich i
 
 ### Immich Albums
 - Browse your Immich albums as a grid
-- Open any album to sort, filter, and select photos
+- **Sort photos by upload date or date taken** — a feature missing from Immich's native album view
+- Filter by camera, lens, or location within an album
+- Select mode with shift-click range selection
 - Add Immich photos directly to Darkroom albums
 - Full photo detail (EXIF, map, fullscreen, download, share)
 
