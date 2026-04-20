@@ -41,6 +41,12 @@ A self-hosted darkroom printing log and analog photo library, built for Immich i
 - Background music support (drop MP3s in `/music`)
 - Description overlay, fullscreen, auto-hide controls
 
+### Mobile & PWA
+- Fully responsive — designed and tested on iPhone
+- Install to home screen via Safari → **Add to Home Screen** for a native app-like experience
+- Runs as a standalone app — no browser chrome, no address bar
+- Swipe gestures, tap zones, and smooth animations throughout
+
 ### Navigation & Gestures
 - Swipe down in any photo detail to go back
 - Swipe left/right (or tap edge zones) to navigate prev/next
