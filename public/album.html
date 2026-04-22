@@ -25,11 +25,11 @@
   /* Slideshow */
   .ss-overlay{display:none;position:fixed;inset:0;background:#000;z-index:300;overflow:hidden}
   .ss-overlay.active{display:block}
-  .ss-slide{position:absolute;inset:0;overflow:hidden;opacity:0;transition:opacity 1.5s ease-in-out}
+  .ss-slide{position:absolute;inset:0;overflow:hidden;opacity:0;transition:opacity 1.5s ease-in-out;will-change:opacity}
   .ss-slide.ss-visible{opacity:1}
   .ss-slide .ss-bg{position:absolute;inset:-20px;background-size:cover;background-position:center;filter:blur(20px) brightness(0.35);transform:scale(1.1)}
-  .ss-slide .ss-img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;transform-origin:center center}
-  .ss-slide.ss-visible .ss-img{animation:kenburns 8s ease-in-out forwards}
+  .ss-slide .ss-img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;transform-origin:center center;will-change:transform}
+  /* animation applied via inline style in JS so it persists through fade-out */
   @keyframes kenburns{0%{transform:var(--kb-start)}100%{transform:var(--kb-end)}}
   .ss-counter{position:fixed;top:1rem;right:1rem;font-family:'IBM Plex Mono',monospace;font-size:11px;color:rgba(255,255,255,.5);z-index:401;transition:opacity .5s}
   .ss-description{position:fixed;bottom:5rem;left:50%;transform:translateX(-50%);font-family:'IBM Plex Mono',monospace;font-size:12px;color:rgba(255,255,255,.75);text-align:center;max-width:80vw;padding:0 2rem;z-index:401;pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -71,8 +71,8 @@
 </div>
 
 <div class="ss-overlay" id="ss-overlay">
-  <div id="ss-slide-a" class="ss-slide"></div>
-  <div id="ss-slide-b" class="ss-slide"></div>
+  <div id="ss-slide-a" class="ss-slide"><div class="ss-bg" id="ss-bg-a"></div><img class="ss-img" id="ss-img-a"></div>
+  <div id="ss-slide-b" class="ss-slide"><div class="ss-bg" id="ss-bg-b"></div><img class="ss-img" id="ss-img-b"></div>
   <div class="ss-counter" id="ss-counter"></div>
   <div class="ss-description" id="ss-description"></div>
   <div class="ss-controls" id="ss-controls">
@@ -86,6 +86,6 @@
   </div>
 </div>
 
-<script src="/album.js"></script>
+<script src="/album.js?v=20"></script>
 </body>
 </html>

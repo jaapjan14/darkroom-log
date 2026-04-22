@@ -76,7 +76,7 @@ app.use((req, res, next) => {
     "media-src 'self' blob:; " +
     "connect-src 'self'; " +
     "object-src 'none'; " +
-    "frame-ancestors 'self' https://*.squarespace.com https://lakatua.me https://*.lakatua.me https://lakatua.com https://*.lakatua.com;"
+    "frame-ancestors 'self' https://*.squarespace.com https://lakatua.me https://*.lakatua.me https://lakatua.com https://*.lakatua.com https://substack.com https://*.substack.com;"
   );
   next();
 });
@@ -189,7 +189,8 @@ app.get('/api/immich/photo/:id', requireAuth, async (req, res) => {
       state: data.exifInfo?.state || data.state || '',
       country: data.exifInfo?.country || data.country || '',
       width: data.exifInfo?.exifImageWidth || '',
-      height: data.exifInfo?.exifImageHeight || ''
+      height: data.exifInfo?.exifImageHeight || '',
+      isArchived: data.isArchived || false
     });
   } catch(e) {
     res.status(500).json({ error: e.message });
@@ -672,7 +673,21 @@ app.delete('/api/albums/:id', requireAuth, (req, res) => {
   res.json({ success: true });
 });
 
-// DELETE Immich asset permanently
+// Permanently delete assets (bypass trash) — must be before /:id to avoid Express param shadowing
+app.delete('/api/immich/assets/permanent', requireAuth, async (req, res) => {
+  try {
+    const { ids = [] } = req.body;
+    const r = await fetch(`${IMMICH_URL}/assets`, {
+      method: 'DELETE',
+      headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids, force: true })
+    });
+    if (!r.ok) return res.status(r.status).json({ error: 'Immich permanent delete failed' });
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Move Immich asset to trash (force: false = 30-day soft delete)
 app.delete('/api/immich/assets/:id', requireAuth, async (req, res) => {
   try {
     const r = await fetch(`${IMMICH_URL}/assets`, {
@@ -732,7 +747,22 @@ app.get('/api/public/photo/:id', async (req, res) => {
 
 // Serve public album page
 app.get('/album/:slug', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'album.html'));
+  const albums = loadAlbums();
+  const album = albums.find(a => a.slug === req.params.slug);
+  const html = fs.readFileSync(path.join(__dirname, 'public', 'album.html'), 'utf8');
+  if (!album) return res.send(html);
+  const base = `https://${req.get('host')}`;
+  const coverId = album.cover || album.assets[0];
+  const imgTag = coverId ? `<meta property="og:image" content="${base}/api/public/thumb/${coverId}">` : '';
+  const tags = [
+    `<meta property="og:type" content="website">`,
+    `<meta property="og:url" content="${base}/album/${album.slug}">`,
+    `<meta property="og:title" content="${album.title}">`,
+    `<meta property="og:description" content="View the full album on Darkroom Log">`,
+    imgTag,
+    `<meta name="twitter:card" content="summary_large_image">`,
+  ].filter(Boolean).join('\n');
+  res.send(html.replace('</head>', `${tags}\n</head>`));
 });
 
 
@@ -785,6 +815,141 @@ app.get('/api/immich/immich-albums/:id', requireAuth, async (req, res) => {
     const r = await fetch(`${IMMICH_URL}/albums/${req.params.id}`, {
       headers: { 'x-api-key': IMMICH_KEY }
     });
+    const data = await r.json();
+    res.json(data);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Create a new Immich album and optionally add assets to it
+app.post('/api/immich/immich-albums', requireAuth, async (req, res) => {
+  try {
+    const { albumName, assetIds = [] } = req.body;
+    const r = await fetch(`${IMMICH_URL}/albums`, {
+      method: 'POST',
+      headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ albumName, assetIds })
+    });
+    if (!r.ok) return res.status(r.status).json({ error: 'Immich create album failed' });
+    const data = await r.json();
+    res.json(data);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Fetch all archived assets
+app.get('/api/immich/archived', requireAuth, async (req, res) => {
+  try {
+    const r = await fetch(`${IMMICH_URL}/search/metadata`, {
+      method: 'POST',
+      headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ visibility: 'archive', size: 1000, page: 1 })
+    });
+    const data = await r.json();
+    res.json({ assets: data.assets?.items || [] });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Fetch trashed assets via timeline API (search/metadata doesn't support trash visibility)
+app.get('/api/immich/trash', requireAuth, async (req, res) => {
+  try {
+    const bucketsR = await fetch(`${IMMICH_URL}/timeline/buckets?isTrashed=true&size=1000`, {
+      headers: { 'x-api-key': IMMICH_KEY }
+    });
+    const buckets = await bucketsR.json();
+    const assetArrays = await Promise.all(buckets.map(async bucket => {
+      const r = await fetch(`${IMMICH_URL}/timeline/bucket?isTrashed=true&timeBucket=${bucket.timeBucket}&size=1000`, {
+        headers: { 'x-api-key': IMMICH_KEY }
+      });
+      const data = await r.json();
+      const ids = data.id || [];
+      const createdAts = data.fileCreatedAt || [];
+      return ids.map((id, i) => ({ id, fileCreatedAt: createdAts[i], createdAt: createdAts[i] }));
+    }));
+    res.json({ assets: assetArrays.flat() });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Restore assets from trash
+app.post('/api/immich/assets/restore-trash', requireAuth, async (req, res) => {
+  try {
+    const { ids = [] } = req.body;
+    const r = await fetch(`${IMMICH_URL}/trash/restore/assets`, {
+      method: 'POST',
+      headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids })
+    });
+    if (!r.ok) return res.status(r.status).json({ error: 'Immich restore from trash failed' });
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+
+// Delete an Immich album (does not delete assets from library)
+app.delete('/api/immich/immich-albums/:id', requireAuth, async (req, res) => {
+  try {
+    const r = await fetch(`${IMMICH_URL}/albums/${req.params.id}`, {
+      method: 'DELETE',
+      headers: { 'x-api-key': IMMICH_KEY }
+    });
+    if (!r.ok) return res.status(r.status).json({ error: 'Immich delete album failed' });
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Add assets to an existing Immich album
+app.put('/api/immich/immich-albums/:id/assets', requireAuth, async (req, res) => {
+  try {
+    const { ids = [] } = req.body;
+    const r = await fetch(`${IMMICH_URL}/albums/${req.params.id}/assets`, {
+      method: 'PUT',
+      headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids })
+    });
+    if (!r.ok) return res.status(r.status).json({ error: 'Immich add assets failed' });
+    const data = await r.json();
+    res.json(data);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Remove assets from an Immich album (does not delete assets from library)
+app.delete('/api/immich/immich-albums/:id/assets', requireAuth, async (req, res) => {
+  try {
+    const { ids = [] } = req.body;
+    const r = await fetch(`${IMMICH_URL}/albums/${req.params.id}/assets`, {
+      method: 'DELETE',
+      headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids })
+    });
+    if (!r.ok) return res.status(r.status).json({ error: 'Immich remove assets failed' });
+    const data = await r.json();
+    res.json(data);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Archive assets — hides them from the main library (isArchived: true)
+app.put('/api/immich/assets/archive', requireAuth, async (req, res) => {
+  try {
+    const { ids = [] } = req.body;
+    const r = await fetch(`${IMMICH_URL}/assets`, {
+      method: 'PUT',
+      headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids, isArchived: true })
+    });
+    if (!r.ok) return res.status(r.status).json({ error: 'Immich archive failed' });
+    const data = await r.json();
+    res.json(data);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Restore assets from archive (isArchived: false)
+app.put('/api/immich/assets/restore', requireAuth, async (req, res) => {
+  try {
+    const { ids = [] } = req.body;
+    const r = await fetch(`${IMMICH_URL}/assets`, {
+      method: 'PUT',
+      headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids, isArchived: false })
+    });
+    if (!r.ok) return res.status(r.status).json({ error: 'Immich restore failed' });
     const data = await r.json();
     res.json(data);
   } catch(e) { res.status(500).json({ error: e.message }); }

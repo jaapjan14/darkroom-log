@@ -8,12 +8,12 @@ const _bc = (() => { try { return new BroadcastChannel('darkroom-music'); } catc
 if (_bc) _bc.addEventListener('message', e => { if (e.data === 'stop') stopMusic(); });
 
 const KB=[
-  {s:'scale(1.0) translate(-3%,-3%)',e:'scale(1.25) translate(2%,2%)'},
-  {s:'scale(1.25) translate(3%,2%)',e:'scale(1.0) translate(-2%,-2%)'},
-  {s:'scale(1.0) translate(4%,-4%)',e:'scale(1.3) translate(-3%,3%)'},
-  {s:'scale(1.3) translate(-4%,3%)',e:'scale(1.0) translate(3%,-2%)'},
-  {s:'scale(1.0) translate(0%,-5%)',e:'scale(1.25) translate(0%,3%)'},
-  {s:'scale(1.25) translate(0%,4%)',e:'scale(1.0) translate(0%,-3%)'},
+  {s:'scale(1.08) translate(-3%,-3%)',e:'scale(1.25) translate(2%,2%)'},
+  {s:'scale(1.25) translate(3%,2%)',e:'scale(1.08) translate(-2%,-2%)'},
+  {s:'scale(1.08) translate(4%,-4%)',e:'scale(1.3) translate(-3%,3%)'},
+  {s:'scale(1.3) translate(-4%,3%)',e:'scale(1.08) translate(3%,-2%)'},
+  {s:'scale(1.08) translate(0%,-5%)',e:'scale(1.25) translate(0%,3%)'},
+  {s:'scale(1.25) translate(0%,4%)',e:'scale(1.08) translate(0%,-3%)'},
 ];
 
 async function init(){
@@ -25,7 +25,7 @@ async function init(){
   if (isEmbed) {
     const coverId = album.cover || album.assets[0];
     if (coverId) {
-      document.getElementById('embed-hero-img').src = '/api/public/thumb/' + coverId;
+      document.getElementById('embed-hero-img').src = '/api/public/original/' + coverId;
       document.getElementById('embed-hero-title').textContent = album.title;
       document.getElementById('embed-hero').style.display = 'block';
       document.getElementById('photo-grid').style.display = 'none';
@@ -37,26 +37,55 @@ async function init(){
       return;
     }
     renderGrid();
-    if (new URLSearchParams(location.search).has('autoplay')) openSlideshow(0);
+    if (!new URLSearchParams(location.search).has('gallery')) openSlideshowPaused(0);
   }
 }
 
 function renderGrid(){
   const g=document.getElementById('photo-grid');
   if(!album.assets.length){g.innerHTML='<div class="loading" style="grid-column:1/-1">No photos.</div>';return;}
-  g.innerHTML=album.assets.map((id,i)=>`<div class="photo-item" data-action="openSlideshow" data-idx="${i}"><img src="/api/public/thumb/${id}" loading="lazy"></div>`).join('');
+  g.innerHTML=album.assets.map((id,i)=>`<div class="photo-item" data-action="openSlideshow" data-idx="${i}"><img src="/api/public/original/${id}" loading="lazy"></div>`).join('');
 }
 
 async function openSlideshow(idx){
   ssIndex=idx;ssPausedState=false;ssActiveSlot='a';ssDescVisible=true;ssCleanupTimers=[];
-  document.getElementById('ss-slide-a').innerHTML='';
-  document.getElementById('ss-slide-b').innerHTML='';
   document.getElementById('ss-overlay').classList.add('active');
   startMusic();
   await showTitleCard();
   showKBSlide(idx);
   scheduleNext();
   showSSControls();
+}
+async function openSlideshowPaused(idx){
+  ssIndex=idx;ssPausedState=true;ssActiveSlot='a';ssDescVisible=true;ssCleanupTimers=[];
+  document.getElementById('ss-overlay').classList.add('active');
+  const settings=album.slideshowSettings||{};
+  const card=document.getElementById('ss-title-card');
+  const content=document.getElementById('ss-title-card-content');
+  let html=`<div class="ss-title-main">${album.title}</div>`;
+  html+=`<div style="width:60px;height:1px;background:#c8611a;margin:1.5rem auto"></div>`;
+  if(settings.byline)html+=`<div class="ss-title-sub">Photography by ${settings.byline}</div>`;
+  if(settings.showCount)html+=`<div class="ss-title-sub" style="margin-top:0.75rem">${album.assets.length} PHOTOS</div>`;
+  html+=`<button id="ss-play-btn" style="margin-top:2.5rem;width:72px;height:72px;border-radius:50%;background:transparent;border:2px solid #c8611a;color:#c8611a;font-size:26px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;padding-left:4px;transition:background 0.2s,color 0.2s">▶</button>`;
+  content.innerHTML=html;
+  card.style.pointerEvents='auto';
+  card.style.display='flex';
+  await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+  card.style.opacity='1';
+  const playBtn=document.getElementById('ss-play-btn');
+  playBtn.addEventListener('mouseenter',()=>{playBtn.style.background='#c8611a';playBtn.style.color='#0a0a0a';});
+  playBtn.addEventListener('mouseleave',()=>{playBtn.style.background='transparent';playBtn.style.color='#c8611a';});
+  playBtn.addEventListener('click',async()=>{
+    card.style.opacity='0';
+    await new Promise(r=>setTimeout(r,800));
+    card.style.display='none';
+    card.style.pointerEvents='none';
+    ssPausedState=false;
+    startMusic();
+    showKBSlide(idx);
+    scheduleNext();
+    showSSControls();
+  });
 }
 function startSlideshow(){openSlideshow(0);}
 
@@ -108,42 +137,60 @@ function startMusic(){
 function cancelSlideCleanup(){
   ssCleanupTimers.forEach(t=>clearTimeout(t));
   ssCleanupTimers=[];
-  // Hide the inactive slot cleanly without touching the visible one
   const inactiveSlot = ssActiveSlot === 'a' ? 'b' : 'a';
   const inactiveEl = document.getElementById('ss-slide-' + inactiveSlot);
-  if (inactiveEl) { inactiveEl.classList.remove('ss-visible'); inactiveEl.innerHTML=''; inactiveEl.style.zIndex=1; }
+  if (inactiveEl) { inactiveEl.classList.remove('ss-visible'); inactiveEl.style.zIndex=1; }
+}
+
+function prepareSlot(ns, idx){
+  const id=album.assets[idx];
+  const img=document.getElementById('ss-img-'+ns);
+  const bg=document.getElementById('ss-bg-'+ns);
+  bg.style.backgroundImage=`url('/api/public/original/${id}')`;
+  if(!img.src.endsWith('/api/public/original/'+id)){
+    img.src='/api/public/original/'+id;
+  }
+  if(!assetMeta[id]){
+    fetch('/api/public/photo/'+id).then(r=>r.json()).then(m=>{assetMeta[id]=m;}).catch(()=>{});
+  }
+  return img;
 }
 
 function showKBSlide(idx){
   ssIndex=idx;
   const id=album.assets[idx];
   document.getElementById('ss-counter').textContent=(idx+1)+' / '+album.assets.length;
-  const desc=document.getElementById('ss-description');
-  if(assetMeta[id]){desc.textContent=assetMeta[id].description||'';}
-  else{
-    desc.textContent='';
-    fetch('/api/public/photo/'+id).then(r=>r.json()).then(m=>{
-      assetMeta[id]=m;
-      if(ssIndex===idx)desc.textContent=m.description||'';
-    }).catch(()=>{});
-  }
-  const move=KB[idx%KB.length];
   const ns=ssActiveSlot==='a'?'b':'a';
   const cur=document.getElementById('ss-slide-'+ssActiveSlot);
   const nxt=document.getElementById('ss-slide-'+ns);
-  nxt.innerHTML=`<div class="ss-bg" style="background-image:url('/api/public/thumb/${id}')"></div><img class="ss-img" src="/api/public/original/${id}">`;
-  nxt.style.zIndex=1;nxt.classList.remove('ss-visible');
-  const img=nxt.querySelector('.ss-img');
+  nxt.classList.remove('ss-visible');
+  nxt.style.zIndex=1;
+  const img=prepareSlot(ns, idx);
   const show=()=>{
+    const desc=document.getElementById('ss-description');
+    if(assetMeta[id]){desc.textContent=assetMeta[id].description||'';}
+    else desc.textContent='';
+    nxt.style.zIndex=3;
+    // Set KB vars here (not prepareSlot) — CSS vars in @keyframes are live, changing them
+    // on a running animation causes an immediate position jump.
+    const move=KB[idx%KB.length];
     img.style.setProperty('--kb-start',move.s);
     img.style.setProperty('--kb-end',move.e);
-    nxt.style.zIndex=3;void nxt.offsetWidth;nxt.classList.add('ss-visible');
+    img.style.animation='none';
+    void img.offsetWidth;
+    img.style.animation='kenburns 14s linear forwards';
+    requestAnimationFrame(()=>requestAnimationFrame(()=>nxt.classList.add('ss-visible')));
+    if(!ssPausedState) scheduleNext();
     const t1=setTimeout(()=>{cur.classList.remove('ss-visible');},1500);
-    const t2=setTimeout(()=>{cur.innerHTML='';cur.style.zIndex=1;ssActiveSlot=ns;ssCleanupTimers=ssCleanupTimers.filter(t=>t!==t1&&t!==t2);},3500);
+    const t2=setTimeout(()=>{
+      cur.style.zIndex=1;
+      ssActiveSlot=ns;
+      ssCleanupTimers=ssCleanupTimers.filter(t=>t!==t1&&t!==t2);
+      prepareSlot(ns==='a'?'b':'a', (idx+1)%album.assets.length);
+    },3500);
     ssCleanupTimers.push(t1,t2);
   };
-  if(img.complete)show();else img.onload=show;
-  new Image().src='/api/public/original/'+album.assets[(idx+1)%album.assets.length];
+  if(img.complete && img.naturalWidth>0)show();else{img.onload=show;img.onerror=show;}
 }
 
 function scheduleNext(){clearTimeout(ssTimer);if(!ssPausedState)ssTimer=setTimeout(ssNext,7000);}
@@ -153,8 +200,10 @@ function ssToggle(){
   ssPausedState=!ssPausedState;
   document.getElementById('ss-pause').textContent=ssPausedState?'▶':'❚❚';
   if(!ssPausedState){
-    if(ssAudio)ssAudio.play().catch(()=>{});
-    ssNext();
+    if(!ssAudio)startMusic();
+    else ssAudio.play().catch(()=>{});
+    showKBSlide(ssIndex);
+    scheduleNext();
   } else {
     clearTimeout(ssTimer);
     if(ssAudio)ssAudio.pause();
