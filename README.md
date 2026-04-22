@@ -39,8 +39,9 @@ A self-hosted darkroom printing log and analog photo library, built for Immich i
 ### Slideshow
 - **Smooth Ken Burns pan/zoom** — linear motion with no mid-cycle jumps or snap-back artifacts
 - Title card with byline and photo count; circular play button to start
-- Background music with fade-in, pause/resume synced to slideshow
-- Description overlay, fullscreen, auto-hide controls
+- Background music with fade-in; pause/resume synced to slideshow state
+- Description overlay, fullscreen (`⤢`), auto-hide controls with mousemove keep-alive
+- Swipe down to close; swipe left/right to navigate
 
 ### Mobile & PWA
 - Fully responsive — designed and tested on iPhone
@@ -54,10 +55,13 @@ A self-hosted darkroom printing log and analog photo library, built for Immich i
 - Scroll position preserved when opening and closing photos — no flash to top
 - Keyboard: arrow keys and ESC work throughout
 
-### Public Album Embed
+### Public Album
 - Public album page (`/album/:slug`) — no login required, opens directly to slideshow
+- **Branded header** — "Jacob Lakatua Photography" with lakatua.me link and inline slideshow button
+- **Grid view** — click any photo to open it in a paused single-image view with Ken Burns zoom
 - Rich link cards on Substack, iMessage, and social — OG meta tags injected server-side
-- Embed in Squarespace, Substack, Webflow, or any iframe
+- Embed in Squarespace, Substack, Webflow, or any iframe (`?embed` hides header)
+- Swipe down to close slideshow; swipe left/right to navigate
 - Safari and mobile compatible
 
 ## Security
