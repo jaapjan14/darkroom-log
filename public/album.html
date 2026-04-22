@@ -11,11 +11,16 @@
   *{box-sizing:border-box;margin:0;padding:0}
   body{background:var(--bg);color:var(--text);font-family:'IBM Plex Sans',sans-serif;min-height:100vh}
   .header{background:var(--surface);border-bottom:1px solid var(--border);padding:0 1rem;height:52px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}
-  .header-title{font-family:'IBM Plex Mono',monospace;font-size:12px;letter-spacing:.15em;text-transform:uppercase;color:var(--safe)}
+  .header-left{display:flex;align-items:center;gap:1.25rem}
+  .header-brand{display:flex;flex-direction:column;gap:5px;text-decoration:none}
+  .header-brand-name{font-family:'IBM Plex Mono',monospace;font-size:12px;letter-spacing:.15em;text-transform:uppercase;color:var(--safe);line-height:1}
+  .header-brand-url{font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.1em;color:var(--text-dim);line-height:1}
+  .header-brand:hover .header-brand-url{color:var(--safe)}
+  .header-nav{display:flex;gap:.35rem;align-items:center}
+  .header-nav-btn{background:transparent;border:1px solid var(--border);color:var(--text-dim);font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.1em;text-transform:uppercase;cursor:pointer;padding:.3rem .65rem;transition:border-color .15s,color .15s;white-space:nowrap}
+  .header-nav-btn:hover{border-color:var(--safe);color:var(--safe)}
+  .header-nav-btn.active{border-color:var(--safe);color:var(--safe)}
   .album-title{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text-dim)}
-  .toolbar{max-width:1200px;margin:0 auto;padding:.75rem 1rem;display:flex;gap:.5rem;border-bottom:1px solid var(--border)}
-  .btn{padding:.5rem 1rem;background:transparent;border:1px solid var(--border);color:var(--text-dim);font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.1em;text-transform:uppercase;cursor:pointer}
-  .btn:hover{border-color:var(--safe);color:var(--safe)}
   .photo-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--border);max-width:1200px;margin:0 auto}
   @media(min-width:600px){.photo-grid{grid-template-columns:repeat(5,1fr)}}
   .photo-item{aspect-ratio:1;overflow:hidden;background:var(--surface);cursor:pointer}
@@ -49,11 +54,16 @@
 </head>
 <body>
 <div class="header">
-  <div class="header-title">Darkroom Log</div>
+  <div class="header-left">
+    <a class="header-brand" href="https://lakatua.me" target="_blank" rel="noopener">
+      <span class="header-brand-name">Jacob Lakatua Photography</span>
+      <span class="header-brand-url">lakatua.me ↗</span>
+    </a>
+    <div class="header-nav">
+      <button class="header-nav-btn" id="btn-slideshow">▶ Slideshow</button>
+    </div>
+  </div>
   <div class="album-title" id="album-name"></div>
-</div>
-<div class="toolbar">
-  <button class="btn" id="btn-slideshow">▶ Slideshow</button>
 </div>
 <div class="embed-hero" id="embed-hero">
   <img id="embed-hero-img" src="" alt="">
@@ -86,6 +96,6 @@
   </div>
 </div>
 
-<script src="/album.js?v=20"></script>
+<script src="/album.js?v=27"></script>
 </body>
 </html>

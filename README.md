@@ -37,9 +37,9 @@ A self-hosted darkroom printing log and analog photo library, built for Immich i
 - Full photo detail (EXIF, map, fullscreen, download, share)
 
 ### Slideshow
-- Ken Burns slideshow with smooth crossfades
-- Title card with byline and photo count
-- Background music support (drop MP3s in `/music`)
+- **Smooth Ken Burns pan/zoom** — linear motion with no mid-cycle jumps or snap-back artifacts
+- Title card with byline and photo count; circular play button to start
+- Background music with fade-in, pause/resume synced to slideshow
 - Description overlay, fullscreen, auto-hide controls
 
 ### Mobile & PWA
@@ -55,9 +55,9 @@ A self-hosted darkroom printing log and analog photo library, built for Immich i
 - Keyboard: arrow keys and ESC work throughout
 
 ### Public Album Embed
-- Public album page (`/album/:slug`) — no login required
-- Cinematic hero banner with play button
-- Embed in Squarespace, Webflow, or any iframe
+- Public album page (`/album/:slug`) — no login required, opens directly to slideshow
+- Rich link cards on Substack, iMessage, and social — OG meta tags injected server-side
+- Embed in Squarespace, Substack, Webflow, or any iframe
 - Safari and mobile compatible
 
 ## Security

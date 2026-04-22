@@ -45,6 +45,8 @@ let state = {
   slideshow: { active: false, index: 0, timer: null, paused: false },
   immichAlbumsLoaded: false,
   immichAlbums: [],
+  viewingArchived: false,
+  viewingTrash: false,
   currentImmichAlbumId: null,
   currentImmichAlbumAssets: [],
   immichSelectMode: false,
@@ -54,6 +56,7 @@ let state = {
   immichSort: 'taken',
   immichSortDir: 'desc',
   immichActiveChips: new Set(),
+  immichSearchQuery: '',
 };
 
 async function login() {
@@ -601,18 +604,25 @@ async function renderRecentDetail(assetId) {
         </div>
       </div>
       <div class="detail-right">
-        <div class="recent-nav-bar" style="justify-content:space-between">
-          <div style="display:flex;gap:0.5rem;align-items:center">
-            ${hasPrev ? `<button class="nav-arrow" data-action="navPrev">‹</button>` : `<div style="width:36px"></div>`}
+        <div style="padding:0.5rem 1rem;display:flex;flex-direction:column;gap:0.4rem;border-bottom:1px solid var(--border)">
+          <div style="display:flex;gap:0.4rem;align-items:center;flex-wrap:wrap">
+            ${hasPrev ? `<button class="nav-arrow" data-action="navPrev">‹</button>` : `<div style="width:28px"></div>`}
             ${hasNext ? `<button class="nav-arrow" data-action="navNext">›</button>` : ''}
-            <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--text-dim);padding-top:2px">${idx+1} / ${total}</div>
-          </div>
-          <div style="display:flex;gap:0.5rem">
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--text-dim);margin-right:0.25rem">${idx+1} / ${total}</div>
             <button class="btn btn-ghost btn-sm" data-action="openAddToAlbumModal" data-id="${assetId}">+ Album</button>
-            ${state.viewingFromAlbum ? `<button class="btn btn-ghost btn-sm" data-action="removeFromAlbum" data-id="${assetId}" title="Remove from this album">− Remove</button>` : ''}
-          <button class="btn btn-ghost btn-sm" data-action="downloadRecent" data-id="${assetId}" data-filename="${meta.filename}">↓ DL</button>
-          <button class="btn btn-ghost btn-sm" data-action="shareRecent" data-id="${assetId}" data-filename="${meta.filename}" data-desc="${(meta.description||'').replace(/'/g, '&apos;')}">↑ Share</button>
-          <button class="btn btn-danger btn-sm" data-action="deleteImmichAsset" data-id="${assetId}" data-filename="${meta.filename}" title="Delete from Immich">🗑</button>
+            ${state.viewingFromAlbum ? `<button class="btn btn-ghost btn-sm" data-action="removeFromAlbum" data-id="${assetId}">− Remove</button>` : ''}
+            ${state.previousView === 'immich-album-view' && !state.viewingArchived && !state.viewingTrash ? `<button class="btn btn-ghost btn-sm" data-action="removeFromImmichAlbumDetail" data-id="${assetId}">− Remove</button>` : ''}
+            <button class="btn btn-ghost btn-sm" data-action="downloadRecent" data-id="${assetId}" data-filename="${meta.filename}">↓ DL</button>
+          </div>
+          <div style="display:flex;gap:0.4rem">
+            ${state.viewingTrash ? `
+              <button class="btn btn-ghost btn-sm" data-action="restoreFromTrashDetail" data-id="${assetId}">Restore</button>
+              <button class="btn btn-danger btn-sm" data-action="permanentDeleteDetail" data-id="${assetId}" data-filename="${meta.filename}">🗑 Delete Forever</button>
+            ` : `
+              <button class="btn btn-ghost btn-sm" data-action="shareRecent" data-id="${assetId}" data-filename="${meta.filename}" data-desc="${(meta.description||'').replace(/'/g, '&apos;')}">↑ Share</button>
+              <button class="${meta.isArchived ? 'btn btn-ghost btn-sm' : 'btn btn-danger btn-sm'}" data-action="${meta.isArchived ? 'restoreFromDetail' : 'archiveFromDetail'}" data-id="${assetId}">${meta.isArchived ? 'Restore' : 'Archive'}</button>
+              <button class="btn btn-danger btn-sm" data-action="deleteImmichAsset" data-id="${assetId}" data-filename="${meta.filename}">🗑</button>
+            `}
           </div>
         </div>
         <div class="detail-meta">
@@ -696,7 +706,9 @@ async function downloadSelectedAssets() {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = filename;
+    document.body.appendChild(a);
     a.click();
+    document.body.removeChild(a);
     URL.revokeObjectURL(a.href);
     await new Promise(r => setTimeout(r, 400));
   }
@@ -704,7 +716,7 @@ async function downloadSelectedAssets() {
 
 async function deleteImmichAsset(assetId, filename) {
   const label = filename || assetId;
-  if (!confirm(`Permanently delete "${label}" from Immich?\n\nThis cannot be undone.`)) return;
+  if (!confirm(`Move "${label}" to trash?\n\nImmich keeps items in trash for 30 days before permanent removal.`)) return;
   const r = await fetch('/api/immich/assets/' + assetId, { method: 'DELETE' });
   if (!r.ok) { alert('Delete failed. Please try again.'); return; }
   // Remove from local state and navigate back or to next photo
@@ -726,7 +738,9 @@ async function downloadRecent(assetId, filename) {
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = fname;
+  document.body.appendChild(a);
   a.click();
+  document.body.removeChild(a);
   URL.revokeObjectURL(a.href);
 }
 
@@ -757,7 +771,11 @@ function navigatePrint(dir) {
   const idx = prints.findIndex(p => p.id === state.currentPrintId);
   if (idx === -1) return;
   const next = prints[idx + dir];
-  if (next) showDetail(next.id);
+  if (!next) return;
+  if (state.fullscreenOpen) {
+    document.getElementById('fullscreen-img').src = '/api/immich/original/' + next.immichId;
+  }
+  showDetail(next.id);
 }
 
 async function navigateRecent(dir) {
@@ -781,6 +799,14 @@ function openFullscreen(src) {
 function closeFullscreen() {
   document.getElementById('fullscreen-overlay').classList.remove('active');
   state.fullscreenOpen = false;
+}
+
+function fullscreenNavigate(dir) {
+  if (document.getElementById('detail-view').classList.contains('active')) {
+    navigatePrint(dir);
+  } else {
+    navigateRecent(dir);
+  }
 }
 
 
@@ -923,7 +949,7 @@ function renderAlbumDetail() {
     <div style="max-width:1200px;margin:0 auto;width:100%;display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
       <button class="btn btn-ghost btn-sm" data-action="openSlideshowSettings">▶ Slideshow</button>
       <button class="btn btn-ghost btn-sm" data-action="toggleAlbumEdit">${editMode ? '✓ Done' : '⇄ Reorder'}</button>
-      ${editMode ? `<button class="btn btn-danger btn-sm" data-action="deleteAlbum" data-id="${album.id}">Delete</button>` : ''}
+      <button class="btn btn-danger btn-sm" data-action="deleteAlbum" data-id="${album.id}">Delete</button>
       <button class="btn btn-ghost btn-sm" data-action="toggleAlbumSelectMode">Select</button>
       <div style="flex:1"></div>
       <div class="share-link-box" data-action="copyShareLink" data-url="${shareUrl}" title="Copy share link" style="font-size:10px">🔗 ${shareUrl}</div>
@@ -1012,7 +1038,9 @@ async function downloadSelectedAlbumPhotos() {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = filename;
+    document.body.appendChild(a);
     a.click();
+    document.body.removeChild(a);
     URL.revokeObjectURL(a.href);
     await new Promise(r => setTimeout(r, 400));
   }
@@ -1101,6 +1129,21 @@ async function createAlbum() {
 function openAddToAlbumModal(assetId) {
   state.pendingAddAssetId = assetId;
   document.getElementById('quick-album-name').value = '';
+  document.getElementById('quick-immich-album-name').value = '';
+  renderDarkroomAlbumPickList();
+  switchAlbumModalTab('darkroom');
+  document.getElementById('add-to-album-modal').classList.add('active');
+}
+
+function switchAlbumModalTab(tab) {
+  document.getElementById('album-panel-darkroom').style.display = tab === 'darkroom' ? '' : 'none';
+  document.getElementById('album-panel-immich').style.display = tab === 'immich' ? '' : 'none';
+  document.getElementById('album-tab-darkroom').classList.toggle('active', tab === 'darkroom');
+  document.getElementById('album-tab-immich').classList.toggle('active', tab === 'immich');
+  if (tab === 'immich') renderImmichAlbumPickList();
+}
+
+function renderDarkroomAlbumPickList() {
   const list = document.getElementById('album-pick-list');
   if (!state.albums.length) {
     list.innerHTML = '<div style="color:var(--text-dim);font-family:IBM Plex Mono,monospace;font-size:11px;margin-bottom:0.5rem">No albums yet</div>';
@@ -1109,7 +1152,145 @@ function openAddToAlbumModal(assetId) {
       <button class="btn btn-ghost btn-sm" style="width:100%;text-align:left;margin-bottom:0.4rem" data-action="addToAlbum" data-id="${a.id}">${a.title} (${a.assets.length})</button>
     `).join('');
   }
-  document.getElementById('add-to-album-modal').classList.add('active');
+}
+
+async function renderImmichAlbumPickList() {
+  const list = document.getElementById('immich-album-pick-list');
+  list.innerHTML = '<div class="loading">Loading...</div>';
+  try {
+    const albums = await fetch('/api/immich/immich-albums').then(r => r.json());
+    if (!albums || !albums.length) {
+      list.innerHTML = '<div style="color:var(--text-dim);font-family:IBM Plex Mono,monospace;font-size:11px">No Immich albums found</div>';
+      return;
+    }
+    list.innerHTML = albums.map(a => `
+      <button class="btn btn-ghost btn-sm" style="width:100%;text-align:left;margin-bottom:0.4rem" data-action="addToImmichAlbum" data-id="${a.id}">${a.albumName || 'Untitled'} (${a.assetCount || 0})</button>
+    `).join('');
+  } catch(e) {
+    list.innerHTML = '<div style="color:var(--red);font-size:11px">Error loading albums</div>';
+  }
+}
+
+async function addToImmichAlbum(albumId) {
+  const ids = Array.isArray(state.pendingAddAssetId) ? state.pendingAddAssetId : [state.pendingAddAssetId];
+  try {
+    const r = await fetch(`/api/immich/immich-albums/${albumId}/assets`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids })
+    });
+    if (!r.ok) throw new Error('Failed');
+    closeModal('add-to-album-modal');
+    state.pendingAddAssetId = null;
+    if (state.immichSelectMode) exitImmichSelectMode();
+  } catch(e) { alert('Failed to add to Immich album.'); }
+}
+
+async function quickCreateAndAddImmich() {
+  const name = document.getElementById('quick-immich-album-name').value.trim();
+  if (!name) return;
+  const ids = Array.isArray(state.pendingAddAssetId) ? state.pendingAddAssetId : [state.pendingAddAssetId];
+  try {
+    const r = await fetch('/api/immich/immich-albums', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ albumName: name, assetIds: ids })
+    });
+    if (!r.ok) throw new Error('Failed');
+    closeModal('add-to-album-modal');
+    state.pendingAddAssetId = null;
+    if (state.immichSelectMode) exitImmichSelectMode();
+  } catch(e) { alert('Failed to create Immich album.'); }
+}
+
+async function removeFromImmichAlbum(assetId) {
+  if (!state.currentImmichAlbumId) return;
+  const ids = Array.isArray(assetId) ? assetId : [assetId];
+  const count = ids.length;
+  if (!confirm(`Remove ${count} photo${count !== 1 ? 's' : ''} from this album?\n\nThe photo${count !== 1 ? 's' : ''} will stay in your Immich library.`)) return;
+  try {
+    const r = await fetch(`/api/immich/immich-albums/${state.currentImmichAlbumId}/assets`, {
+      method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids })
+    });
+    if (!r.ok) throw new Error('Failed');
+    state.currentImmichAlbumAssets = state.currentImmichAlbumAssets.filter(a => !ids.includes(a.id));
+    applyImmichFiltersAndSort();
+    if (state.immichSelectMode) exitImmichSelectMode();
+    if (document.getElementById('recent-detail-view').classList.contains('active')) goBackFromDetail();
+  } catch(e) { alert('Failed to remove from album.'); }
+}
+
+async function archiveImmichAssets(assetIds) {
+  const ids = Array.isArray(assetIds) ? assetIds : [assetIds];
+  const count = ids.length;
+  if (!confirm(`Archive ${count} photo${count !== 1 ? 's' : ''}?\n\nThey will be hidden from the main Immich library. You can restore them later.`)) return;
+  try {
+    const r = await fetch('/api/immich/assets/archive', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids })
+    });
+    if (!r.ok) throw new Error('Failed');
+    state.currentImmichAlbumAssets = state.currentImmichAlbumAssets.filter(a => !ids.includes(a.id));
+    applyImmichFiltersAndSort();
+    if (state.immichSelectMode) exitImmichSelectMode();
+    if (document.getElementById('recent-detail-view').classList.contains('active')) goBackFromDetail();
+  } catch(e) { alert('Archive failed.'); }
+}
+
+async function restoreImmichAssets(assetIds) {
+  const ids = Array.isArray(assetIds) ? assetIds : [assetIds];
+  const count = ids.length;
+  if (!confirm(`Restore ${count} photo${count !== 1 ? 's' : ''} from archive?\n\nThey will reappear in the main Immich library.`)) return;
+  try {
+    const r = await fetch('/api/immich/assets/restore', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids })
+    });
+    if (!r.ok) throw new Error('Failed');
+    // Update isArchived flag in local state rather than removing from view
+    state.currentImmichAlbumAssets = state.currentImmichAlbumAssets.map(a =>
+      ids.includes(a.id) ? { ...a, isArchived: false } : a
+    );
+    applyImmichFiltersAndSort();
+    if (state.immichSelectMode) exitImmichSelectMode();
+    if (document.getElementById('recent-detail-view').classList.contains('active')) {
+      await renderRecentDetail(state.currentRecentId);
+    }
+  } catch(e) { alert('Restore failed.'); }
+}
+
+function updateImmichArchiveBtn() {
+  const btn = document.getElementById('btn-immich-archive-toggle');
+  const removeBtn = document.querySelector('#immich-select-toolbar [data-action="removeImmichSelectedFromAlbum"]');
+  const permDelBtn = document.getElementById('btn-immich-perm-delete');
+  if (!btn) return;
+  // In trash view: show Restore From Trash, hide Archive, hide Remove, show Delete Forever
+  if (state.viewingTrash) {
+    btn.textContent = 'Restore';
+    btn.className = 'btn btn-ghost btn-sm';
+    btn.dataset.action = 'restoreFromTrashSelected';
+    if (removeBtn) removeBtn.style.display = 'none';
+    if (permDelBtn) permDelBtn.style.display = '';
+    return;
+  }
+  if (permDelBtn) permDelBtn.style.display = 'none';
+  // In archived view all photos are already archived — always show Restore, hide Remove
+  if (state.viewingArchived) {
+    btn.textContent = 'Restore';
+    btn.className = 'btn btn-ghost btn-sm';
+    btn.dataset.action = 'restoreImmichSelected';
+    if (removeBtn) removeBtn.style.display = 'none';
+    return;
+  }
+  if (removeBtn) removeBtn.style.display = '';
+  const selectedIds = [...state.immichSelected];
+  const assets = state.currentImmichAlbumAssets;
+  const allArchived = selectedIds.length > 0 && selectedIds.every(id => {
+    const a = assets.find(x => x.id === id);
+    return a && a.isArchived;
+  });
+  btn.textContent = allArchived ? 'Restore' : 'Archive';
+  btn.className = allArchived ? 'btn btn-ghost btn-sm' : 'btn btn-danger btn-sm';
+  btn.dataset.action = allArchived ? 'restoreImmichSelected' : 'archiveImmichSelected';
 }
 
 async function addToAlbum(albumId) {
@@ -1314,12 +1495,12 @@ function stopSlideshowMusic() {
 }
 
 const KB_MOVES = [
-  { start: 'scale(1.0) translate(-3%, -3%)',  end: 'scale(1.25) translate(2%, 2%)' },
-  { start: 'scale(1.25) translate(3%, 2%)',   end: 'scale(1.0) translate(-2%, -2%)' },
-  { start: 'scale(1.0) translate(4%, -4%)',   end: 'scale(1.3) translate(-3%, 3%)' },
-  { start: 'scale(1.3) translate(-4%, 3%)',   end: 'scale(1.0) translate(3%, -2%)' },
-  { start: 'scale(1.0) translate(0%, -5%)',   end: 'scale(1.25) translate(0%, 3%)' },
-  { start: 'scale(1.25) translate(0%, 4%)',   end: 'scale(1.0) translate(0%, -3%)' },
+  { start: 'scale(1.08) translate(-3%, -3%)',  end: 'scale(1.25) translate(2%, 2%)' },
+  { start: 'scale(1.25) translate(3%, 2%)',    end: 'scale(1.08) translate(-2%, -2%)' },
+  { start: 'scale(1.08) translate(4%, -4%)',   end: 'scale(1.3) translate(-3%, 3%)' },
+  { start: 'scale(1.3) translate(-4%, 3%)',    end: 'scale(1.08) translate(3%, -2%)' },
+  { start: 'scale(1.08) translate(0%, -5%)',   end: 'scale(1.25) translate(0%, 3%)' },
+  { start: 'scale(1.25) translate(0%, 4%)',    end: 'scale(1.08) translate(0%, -3%)' },
 ];
 
 let ssActiveSlot = 'a';
@@ -1331,7 +1512,7 @@ function cancelSlideCleanup() {
   // Hide the inactive slot cleanly without touching the visible one
   const inactiveSlot = ssActiveSlot === 'a' ? 'b' : 'a';
   const inactiveEl = document.getElementById('slideshow-slide-' + inactiveSlot);
-  if (inactiveEl) { inactiveEl.classList.remove('ss-visible'); inactiveEl.innerHTML = ''; inactiveEl.style.zIndex = 1; }
+  if (inactiveEl) { inactiveEl.classList.remove('ss-visible'); inactiveEl.style.zIndex = 1; }
 }
 
 function showSlide(idx) {
@@ -1374,21 +1555,23 @@ function showSlide(idx) {
   const show = () => {
     img.style.setProperty('--kb-start', move.start);
     img.style.setProperty('--kb-end', move.end);
+    img.style.animation = 'none';
+    void img.offsetWidth;
+    img.style.animation = 'kenburns 14s linear forwards';
     nextEl.style.zIndex = 3;
-    void nextEl.offsetWidth;
-    nextEl.classList.add('ss-visible');
+    requestAnimationFrame(() => requestAnimationFrame(() => nextEl.classList.add('ss-visible')));
+    if (!state.slideshow.paused) scheduleNext();
     const t1 = setTimeout(() => { currentEl.classList.remove('ss-visible'); }, 1500);
     const t2 = setTimeout(() => {
-      currentEl.innerHTML = '';
       currentEl.style.zIndex = 1;
       ssActiveSlot = nextSlot;
       ssCleanupTimers = ssCleanupTimers.filter(t => t !== t1 && t !== t2);
-    }, 3000);
+    }, 3500);
     ssCleanupTimers.push(t1, t2);
   };
 
-  if (img.complete) { show(); }
-  else { img.onload = show; }
+  if (img.complete && img.naturalWidth > 0) { show(); }
+  else { img.onload = show; img.onerror = show; }
 
   // Preload next image
   const preloadIdx = (idx + 1) % album.assets.length;
@@ -1462,10 +1645,13 @@ function toggleSlideshow() {
   state.slideshow.paused = !state.slideshow.paused;
   document.getElementById('slideshow-pause-btn').textContent = state.slideshow.paused ? '▶' : '❚❚';
   if (!state.slideshow.paused) {
-    // Advance immediately instead of waiting full 7s
-    slideshowNext();
+    if (!ssAudio) startSlideshowMusic(state.currentAlbum?.slideshowSettings || {});
+    else ssAudio.play().catch(() => {});
+    showSlide(state.slideshow.index);
+    scheduleNext();
   } else {
     if (state.slideshow.timer) clearTimeout(state.slideshow.timer);
+    if (ssAudio) ssAudio.pause();
   }
 }
 
@@ -1489,15 +1675,34 @@ document.addEventListener('keydown', e => {
   }
 });
 
-let ssTouchX = null;
+function slideshowFullscreen() {
+  const el = document.getElementById('slideshow-overlay');
+  const req = el.requestFullscreen || el.webkitRequestFullscreen;
+  const isFs = document.fullscreenElement || document.webkitFullscreenElement;
+  const btn = document.getElementById('ss-fs-btn');
+  if (isFs) {
+    (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+    if (btn) btn.textContent = '⤢';
+  } else if (req) {
+    req.call(el).then(() => { if (btn) btn.textContent = '⤡'; }).catch(() => {});
+  }
+}
+['fullscreenchange','webkitfullscreenchange'].forEach(ev => document.addEventListener(ev, () => {
+  const btn = document.getElementById('ss-fs-btn');
+  if (btn) btn.textContent = (document.fullscreenElement || document.webkitFullscreenElement) ? '⤡' : '⤢';
+}));
+
+let ssTouchX = null, ssTouchY = null;
 document.addEventListener('touchstart', e => {
-  if (state.slideshow.active) ssTouchX = e.touches[0].clientX;
+  if (state.slideshow.active) { ssTouchX = e.touches[0].clientX; ssTouchY = e.touches[0].clientY; }
 }, {passive: true});
 document.addEventListener('touchend', e => {
   if (!ssTouchX || !state.slideshow.active) return;
   const dx = e.changedTouches[0].clientX - ssTouchX;
-  if (Math.abs(dx) > 50) dx < 0 ? slideshowNext() : slideshowPrev();
-  ssTouchX = null;
+  const dy = e.changedTouches[0].clientY - ssTouchY;
+  if (dy > 70 && Math.abs(dy) > Math.abs(dx)) { closeSlideshow(); }
+  else if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy)) { dx < 0 ? slideshowNext() : slideshowPrev(); }
+  ssTouchX = null; ssTouchY = null;
 }, {passive: true});
 
 // Stop stray music if page is restored from background without an active slideshow
@@ -1545,16 +1750,7 @@ function toggleAssetSelect(assetId) {
 
 function addSelectionToAlbum() {
   if (!state.selectedAssets.size) { alert('Select at least one photo first.'); return; }
-  state.pendingAddAssetId = [...state.selectedAssets];
-  const list = document.getElementById('album-pick-list');
-  if (!state.albums.length) {
-    list.innerHTML = '<div style="color:var(--text-dim);font-family:IBM Plex Mono,monospace;font-size:11px;margin-bottom:0.5rem">No albums yet</div>';
-  } else {
-    list.innerHTML = state.albums.map(a => `
-      <button class="btn btn-ghost btn-sm" style="width:100%;text-align:left;margin-bottom:0.4rem" data-action="addToAlbum" data-id="${a.id}">${a.title} (${a.assets.length})</button>
-    `).join('');
-  }
-  document.getElementById('add-to-album-modal').classList.add('active');
+  openAddToAlbumModal([...state.selectedAssets]);
 }
 
 document.getElementById('login-password').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
@@ -2036,7 +2232,7 @@ async function loadImmichTab() {
     const albumDetails = await Promise.all(
       configuredIds.map(id => fetch(`/api/immich/immich-albums/${id}`).then(r => r.json()).catch(() => null))
     );
-    state.immichAlbums = albumDetails.filter(Boolean);
+    state.immichAlbums = albumDetails.filter(a => a && a.id);
     state.immichAlbumsLoaded = true;
     renderImmichAlbumGrid();
   } catch(e) {
@@ -2064,6 +2260,156 @@ function renderImmichAlbumGrid() {
   }).join('') + '</div>';
 }
 
+async function openArchivedView() {
+  const gallery = document.getElementById('immich-album-gallery');
+  gallery.innerHTML = '<div class="loading">Loading...</div>';
+  document.getElementById('immich-album-name').textContent = 'Archived';
+  document.getElementById('immich-view').classList.remove('active');
+  document.getElementById('immich-album-view').classList.add('active');
+  document.getElementById('immich-album-view').scrollTop = 0;
+  document.getElementById('back-btn').style.display = 'flex';
+  document.getElementById('header-title').textContent = 'Archived';
+  document.getElementById('immich-select-mode-btn').style.display = 'inline-block';
+  document.getElementById('immich-filters-btn').style.display = 'none';
+  const delBtn = document.querySelector('[data-action="deleteImmichAlbum"]');
+  if (delBtn) delBtn.style.display = 'none';
+  state.viewingArchived = true;
+  state.currentImmichAlbumId = null;
+  state.currentImmichAlbumAssets = [];
+  state.immichActiveChips = new Set();
+  state.immichSearchQuery = '';
+  const searchEl = document.getElementById('immich-album-search');
+  if (searchEl) searchEl.value = '';
+  state.immichSelected = new Set();
+  state.immichSelectMode = false;
+  document.getElementById('back-btn').onclick = () => {
+    document.getElementById('immich-album-view').classList.remove('active');
+    document.getElementById('immich-view').classList.add('active');
+    document.getElementById('back-btn').style.display = 'none';
+    document.getElementById('header-title').textContent = 'Darkroom Log';
+    document.getElementById('immich-filters-btn').style.display = '';
+    const delBtn = document.querySelector('[data-action="deleteImmichAlbum"]');
+    if (delBtn) delBtn.style.display = '';
+    state.viewingArchived = false;
+    exitImmichSelectMode();
+  };
+  try {
+    const data = await fetch('/api/immich/archived').then(r => r.json());
+    state.currentImmichAlbumAssets = data.assets || [];
+    renderImmichSortBar();
+    applyImmichFiltersAndSort();
+  } catch(e) {
+    gallery.innerHTML = '<div style="color:var(--red);padding:1rem">Error loading archived photos</div>';
+  }
+}
+
+async function openTrashView() {
+  const gallery = document.getElementById('immich-album-gallery');
+  gallery.innerHTML = '<div class="loading">Loading...</div>';
+  document.getElementById('immich-album-name').textContent = 'Trash';
+  document.getElementById('immich-view').classList.remove('active');
+  document.getElementById('immich-album-view').classList.add('active');
+  document.getElementById('immich-album-view').scrollTop = 0;
+  document.getElementById('back-btn').style.display = 'flex';
+  document.getElementById('header-title').textContent = 'Trash';
+  document.getElementById('immich-select-mode-btn').style.display = 'inline-block';
+  document.getElementById('immich-filters-btn').style.display = 'none';
+  const delBtn = document.querySelector('[data-action="deleteImmichAlbum"]');
+  if (delBtn) delBtn.style.display = 'none';
+  state.viewingTrash = true;
+  state.viewingArchived = false;
+  state.currentImmichAlbumId = null;
+  state.currentImmichAlbumAssets = [];
+  state.immichActiveChips = new Set();
+  state.immichSearchQuery = '';
+  const searchEl = document.getElementById('immich-album-search');
+  if (searchEl) searchEl.value = '';
+  state.immichSelected = new Set();
+  state.immichSelectMode = false;
+  document.getElementById('back-btn').onclick = () => {
+    document.getElementById('immich-album-view').classList.remove('active');
+    document.getElementById('immich-view').classList.add('active');
+    document.getElementById('back-btn').style.display = 'none';
+    document.getElementById('header-title').textContent = 'Darkroom Log';
+    document.getElementById('immich-filters-btn').style.display = '';
+    const delBtn = document.querySelector('[data-action="deleteImmichAlbum"]');
+    if (delBtn) delBtn.style.display = '';
+    state.viewingTrash = false;
+    exitImmichSelectMode();
+  };
+  try {
+    const data = await fetch('/api/immich/trash').then(r => r.json());
+    state.currentImmichAlbumAssets = data.assets || [];
+    renderImmichSortBar();
+    applyImmichFiltersAndSort();
+  } catch(e) {
+    gallery.innerHTML = '<div style="color:var(--red);padding:1rem">Error loading trash</div>';
+  }
+}
+
+async function restoreFromTrashAssets(assetIds) {
+  const ids = Array.isArray(assetIds) ? assetIds : [assetIds];
+  const count = ids.length;
+  if (!confirm(`Restore ${count} photo${count !== 1 ? 's' : ''} from trash?\n\nThey will be returned to the main Immich library.`)) return;
+  try {
+    const r = await fetch('/api/immich/assets/restore-trash', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids })
+    });
+    if (!r.ok) throw new Error('Failed');
+    state.currentImmichAlbumAssets = state.currentImmichAlbumAssets.filter(a => !ids.includes(a.id));
+    applyImmichFiltersAndSort();
+    if (state.immichSelectMode) exitImmichSelectMode();
+    if (document.getElementById('recent-detail-view').classList.contains('active')) goBackFromDetail();
+  } catch(e) { alert('Restore from trash failed.'); }
+}
+
+async function permanentDeleteAssets(assetIds, filenames) {
+  const ids = Array.isArray(assetIds) ? assetIds : [assetIds];
+  const count = ids.length;
+  if (!confirm(`Permanently delete ${count} photo${count !== 1 ? 's' : ''}?\n\n⚠️ This cannot be undone. Files will be removed from Immich forever.`)) return;
+  try {
+    const r = await fetch('/api/immich/assets/permanent', {
+      method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids })
+    });
+    if (!r.ok) throw new Error('Failed');
+    state.currentImmichAlbumAssets = state.currentImmichAlbumAssets.filter(a => !ids.includes(a.id));
+    applyImmichFiltersAndSort();
+    if (state.immichSelectMode) exitImmichSelectMode();
+    if (document.getElementById('recent-detail-view').classList.contains('active')) goBackFromDetail();
+  } catch(e) { alert('Permanent delete failed.'); }
+}
+
+function restoreFromTrashSelected() {
+  if (!state.immichSelected.size) { alert('Select at least one photo first.'); return; }
+  restoreFromTrashAssets([...state.immichSelected]);
+}
+
+function permanentDeleteImmichSelected() {
+  if (!state.immichSelected.size) { alert('Select at least one photo first.'); return; }
+  permanentDeleteAssets([...state.immichSelected]);
+}
+
+async function deleteImmichAlbum() {
+  const albumId = state.currentImmichAlbumId;
+  const albumName = document.getElementById('immich-album-name').textContent || 'this album';
+  if (!albumId) return;
+  if (!confirm(`Delete "${albumName}" from Immich?\n\nPhotos will stay in your library — only the album is removed.`)) return;
+  try {
+    const r = await fetch(`/api/immich/immich-albums/${albumId}`, { method: 'DELETE' });
+    if (!r.ok) throw new Error('Failed');
+    // Remove from local immich albums list and go back to the grid
+    state.immichAlbums = state.immichAlbums.filter(a => a.id !== albumId);
+    state.currentImmichAlbumId = null;
+    document.getElementById('immich-album-view').classList.remove('active');
+    document.getElementById('immich-view').classList.add('active');
+    document.getElementById('back-btn').style.display = 'none';
+    document.getElementById('header-title').textContent = 'Darkroom Log';
+    renderImmichAlbumGrid();
+  } catch(e) { alert('Failed to delete album.'); }
+}
+
 async function openImmichAlbum(albumId, albumName) {
   const gallery = document.getElementById('immich-album-gallery');
   gallery.innerHTML = '<div class="loading">Loading...</div>';
@@ -2073,6 +2419,10 @@ async function openImmichAlbum(albumId, albumName) {
   document.getElementById('immich-album-view').scrollTop = 0;
   document.getElementById('back-btn').style.display = 'flex';
   document.getElementById('header-title').textContent = albumName;
+  state.viewingArchived = false;
+  state.viewingTrash = false;
+  const delBtn = document.querySelector('[data-action="deleteImmichAlbum"]');
+  if (delBtn) delBtn.style.display = '';
   document.getElementById('back-btn').onclick = () => {
     document.getElementById('immich-album-view').classList.remove('active');
     document.getElementById('immich-view').classList.add('active');
@@ -2153,6 +2503,10 @@ function toggleImmichChip(val) {
 
 function applyImmichFiltersAndSort() {
   let assets = [...state.currentImmichAlbumAssets];
+  if (state.immichSearchQuery) {
+    const q = state.immichSearchQuery.toLowerCase();
+    assets = assets.filter(a => (a.originalFileName || '').toLowerCase().includes(q));
+  }
   if (state.immichActiveChips.size) {
     assets = assets.filter(a => {
       const vals = [a.exifInfo?.model, a.exifInfo?.lensModel, a.exifInfo?.city].filter(Boolean);
@@ -2219,21 +2573,28 @@ function toggleImmichAsset(assetId, e) {
     lastImmichSelectedIdx = idx;
   }
   document.getElementById('immich-select-count').textContent = state.immichSelected.size + ' selected';
+  updateImmichArchiveBtn();
   renderImmichGallery();
 }
 
-function addImmichSelectionToAlbum() {
+function openImmichAddToAlbum() {
   if (!state.immichSelected.size) { alert('Select at least one photo first.'); return; }
-  state.pendingAddAssetId = [...state.immichSelected];
-  const list = document.getElementById('album-pick-list');
-  if (!state.albums.length) {
-    list.innerHTML = '<div style="color:var(--text-dim);font-family:IBM Plex Mono,monospace;font-size:11px;margin-bottom:0.5rem">No albums yet</div>';
-  } else {
-    list.innerHTML = state.albums.map(a => `
-      <button class="btn btn-ghost btn-sm" style="width:100%;text-align:left;margin-bottom:0.4rem" data-action="addToAlbum" data-id="${a.id}">${a.title} (${a.assets.length})</button>
-    `).join('');
-  }
-  document.getElementById('add-to-album-modal').classList.add('active');
+  openAddToAlbumModal([...state.immichSelected]);
+}
+
+function removeImmichSelectedFromAlbum() {
+  if (!state.immichSelected.size) { alert('Select at least one photo first.'); return; }
+  removeFromImmichAlbum([...state.immichSelected]);
+}
+
+function archiveImmichSelected() {
+  if (!state.immichSelected.size) { alert('Select at least one photo first.'); return; }
+  archiveImmichAssets([...state.immichSelected]);
+}
+
+function restoreImmichSelected() {
+  if (!state.immichSelected.size) { alert('Select at least one photo first.'); return; }
+  restoreImmichAssets([...state.immichSelected]);
 }
 
 function openImmichPhoto(assetId, idx) {
@@ -2260,7 +2621,9 @@ async function downloadImmichSelected() {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = filename;
+    document.body.appendChild(a);
     a.click();
+    document.body.removeChild(a);
     URL.revokeObjectURL(a.href);
     await new Promise(r => setTimeout(r, 400));
   }
@@ -2357,12 +2720,13 @@ function wireListeners() {
   w('btn-clear-chips', 'click', () => { clearRecentChip(); toggleFiltersPopup(); });
 
   // Immich sort/filter
-  w('btn-immich-add-album', 'click', () => addImmichSelectionToAlbum());
+  // btn-immich-add-album removed — handled by data-action="openImmichAddToAlbum" delegation
   w('immich-sort-taken', 'click', () => setImmichSort('taken'));
   w('immich-sort-upload', 'click', () => setImmichSort('upload'));
   w('immich-sort-dir', 'click', () => toggleImmichSortDir());
   w('immich-filters-btn', 'click', () => toggleImmichFilterPopup());
   w('immich-filter-backdrop', 'click', () => toggleImmichFilterPopup());
+  w('immich-album-search', 'input', (e) => { state.immichSearchQuery = e.target.value; applyImmichFiltersAndSort(); });
 
   // Albums
   w('btn-create-album', 'click', () => openCreateAlbumModal());
@@ -2383,11 +2747,13 @@ function wireListeners() {
 
   // Slideshow overlay + controls
   w('slideshow-overlay', 'click', () => showSlideshowControls());
+  document.getElementById('slideshow-overlay')?.addEventListener('mousemove', () => { if (state.slideshow.active) showSlideshowControls(); });
   w('btn-ss-prev', 'click', () => slideshowPrev());
   w('slideshow-pause-btn', 'click', () => toggleSlideshow());
   w('slideshow-desc-btn', 'click', () => toggleSlideshowDesc());
   w('slideshow-music-btn', 'click', () => toggleSlideshowMusic());
   w('btn-ss-next', 'click', () => slideshowNext());
+  w('ss-fs-btn', 'click', (e) => { slideshowFullscreen(); e.stopPropagation(); });
   w('btn-ss-close', 'click', () => closeSlideshow());
 
   // Slideshow settings modal
@@ -2404,7 +2770,36 @@ function wireListeners() {
   w('btn-create-album-confirm', 'click', () => createAlbum());
   w('btn-close-add-album', 'click', () => closeModal('add-to-album-modal'));
   w('btn-quick-create-add', 'click', () => quickCreateAndAdd());
-  w('fullscreen-overlay', 'click', () => closeFullscreen());
+  w('btn-quick-create-immich', 'click', () => quickCreateAndAddImmich());
+  // Fullscreen tap zones: left 25% prev, right 25% next, center close; swipe left/right navigates
+  let _fsSwipeX = null, _fsSwipeY = null, _fsDidSwipe = false;
+  const _fsEl = document.getElementById('fullscreen-overlay');
+  _fsEl.addEventListener('touchstart', e => {
+    _fsSwipeX = e.touches[0].clientX;
+    _fsSwipeY = e.touches[0].clientY;
+    _fsDidSwipe = false;
+  }, {passive: true});
+  _fsEl.addEventListener('touchend', e => {
+    if (_fsSwipeX === null) return;
+    const dx = e.changedTouches[0].clientX - _fsSwipeX;
+    const dy = e.changedTouches[0].clientY - _fsSwipeY;
+    _fsSwipeX = null;
+    if (Math.abs(dx) > 40 && Math.abs(dy) < 60) {
+      _fsDidSwipe = true;
+      dx < 0 ? fullscreenNavigate(1) : fullscreenNavigate(-1);
+    } else if (dy > 60 && Math.abs(dy) > Math.abs(dx) * 1.5) {
+      _fsDidSwipe = true;
+      closeFullscreen();
+    }
+  }, {passive: true});
+  w('fullscreen-overlay', 'click', e => {
+    if (_fsDidSwipe) { _fsDidSwipe = false; return; }
+    const xPos = e.clientX;
+    const vw = window.innerWidth;
+    if (xPos < vw * 0.25) { fullscreenNavigate(-1); }
+    else if (xPos > vw * 0.75) { fullscreenNavigate(1); }
+    else { closeFullscreen(); }
+  });
   w('btn-close-add-print', 'click', () => closeModal('add-print-modal'));
   w('immich-search-input', 'input', (e) => searchImmich(e.target.value));
   w('btn-create-print', 'click', () => createPrint());
@@ -2452,7 +2847,12 @@ document.addEventListener('click', (e) => {
     case 'printNavPrev': navigatePrint(-1); break;
     case 'printNavNext': navigatePrint(1); break;
     case 'openAddToAlbumModal': openAddToAlbumModal(id); break;
-    case 'downloadRecent': downloadRecent(id, el.dataset.filename); break;
+    case 'addToImmichAlbum': addToImmichAlbum(id); break;
+    case 'switchAlbumTab': switchAlbumModalTab(el.dataset.tab); break;
+    case 'removeFromImmichAlbumDetail': removeFromImmichAlbum(id); break;
+    case 'archiveFromDetail': archiveImmichAssets(id); break;
+    case 'restoreFromDetail': restoreImmichAssets(id); break;
+case 'downloadRecent': downloadRecent(id, el.dataset.filename); break;
     case 'deleteImmichAsset': deleteImmichAsset(id, el.dataset.filename); break;
     case 'shareRecent': shareRecent(id, el.dataset.filename, el.dataset.desc); break;
 
@@ -2474,11 +2874,22 @@ document.addEventListener('click', (e) => {
 
     // Immich Albums tab
     case 'openImmichAlbum': openImmichAlbum(id, el.dataset.name); break;
+    case 'openArchivedView': openArchivedView(); break;
+    case 'openTrashView': openTrashView(); break;
+    case 'deleteImmichAlbum': deleteImmichAlbum(); break;
     case 'openImmichPhoto': openImmichPhoto(id, el.dataset.idx); break;
     case 'toggleImmichAsset': toggleImmichAsset(id, e); break;
     case 'toggleImmichSelectMode': toggleImmichSelectMode(); break;
     case 'exitImmichSelectMode': exitImmichSelectMode(); break;
     case 'downloadImmichSelected': downloadImmichSelected(); break;
+    case 'openImmichAddToAlbum': openImmichAddToAlbum(); break;
+    case 'removeImmichSelectedFromAlbum': removeImmichSelectedFromAlbum(); break;
+    case 'archiveImmichSelected': archiveImmichSelected(); break;
+    case 'restoreImmichSelected': restoreImmichSelected(); break;
+    case 'restoreFromTrashSelected': restoreFromTrashSelected(); break;
+    case 'permanentDeleteImmichSelected': permanentDeleteImmichSelected(); break;
+    case 'restoreFromTrashDetail': restoreFromTrashAssets(id); break;
+    case 'permanentDeleteDetail': permanentDeleteAssets(id); break;
     case 'openImmichSettings': openImmichSettings(); break;
     case 'closeImmichSettings': closeImmichSettings(); break;
     case 'saveImmichSettings': saveImmichSettings(); break;

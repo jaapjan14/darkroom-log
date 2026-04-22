@@ -44,7 +44,7 @@ async function init(){
 function renderGrid(){
   const g=document.getElementById('photo-grid');
   if(!album.assets.length){g.innerHTML='<div class="loading" style="grid-column:1/-1">No photos.</div>';return;}
-  g.innerHTML=album.assets.map((id,i)=>`<div class="photo-item" data-action="openSlideshow" data-idx="${i}"><img src="/api/public/original/${id}" loading="lazy"></div>`).join('');
+  g.innerHTML=album.assets.map((id,i)=>`<div class="photo-item" data-action="openPhoto" data-idx="${i}"><img src="/api/public/thumb/${id}" loading="lazy"></div>`).join('');
 }
 
 async function openSlideshow(idx){
@@ -88,6 +88,13 @@ async function openSlideshowPaused(idx){
   });
 }
 function startSlideshow(){openSlideshow(0);}
+function openPhotoView(idx){
+  ssIndex=idx;ssPausedState=true;ssActiveSlot='a';ssDescVisible=true;ssCleanupTimers=[];
+  document.getElementById('ss-overlay').classList.add('active');
+  document.getElementById('ss-pause').textContent='▶';
+  showKBSlide(idx);
+  showSSControls();
+}
 
 async function showTitleCard(){
   const settings=album.slideshowSettings||{};
@@ -146,7 +153,7 @@ function prepareSlot(ns, idx){
   const id=album.assets[idx];
   const img=document.getElementById('ss-img-'+ns);
   const bg=document.getElementById('ss-bg-'+ns);
-  bg.style.backgroundImage=`url('/api/public/original/${id}')`;
+  bg.style.backgroundImage=`url('/api/public/thumb/${id}')`;
   if(!img.src.endsWith('/api/public/original/'+id)){
     img.src='/api/public/original/'+id;
   }
@@ -284,14 +291,20 @@ document.addEventListener('keydown',e=>{
   if(e.key===' '){e.preventDefault();ssToggle();}
   if(e.key==='Escape')ssClose();
 });
-let tx=null;
-document.addEventListener('touchstart',e=>{if(document.getElementById('ss-overlay').classList.contains('active'))tx=e.touches[0].clientX;},{passive:true});
-document.addEventListener('touchend',e=>{if(!tx)return;const dx=e.changedTouches[0].clientX-tx;if(Math.abs(dx)>50)dx<0?ssNext():ssPrev();tx=null;},{passive:true});
+let tx=null,ty=null;
+document.addEventListener('touchstart',e=>{if(document.getElementById('ss-overlay').classList.contains('active')){tx=e.touches[0].clientX;ty=e.touches[0].clientY;}},{passive:true});
+document.addEventListener('touchend',e=>{
+  if(tx===null)return;
+  const dx=e.changedTouches[0].clientX-tx;
+  const dy=e.changedTouches[0].clientY-ty;
+  if(dy>70&&Math.abs(dy)>Math.abs(dx)){ssClose();}
+  else if(Math.abs(dx)>50&&Math.abs(dx)>Math.abs(dy)){dx<0?ssNext():ssPrev();}
+  tx=null;ty=null;
+},{passive:true});
 
 const isEmbed = location.search.includes('embed');
 if (isEmbed) {
   document.querySelector('.header').style.display = 'none';
-  document.querySelector('.toolbar').style.display = 'none';
   // Hide fullscreen button on touch-primary devices (phones/tablets) — not reliable in cross-origin iframes on iOS
   if (window.matchMedia('(hover: none) and (pointer: coarse)').matches) {
     const fsBtn = document.getElementById('ss-fs-btn');
@@ -330,6 +343,7 @@ document.addEventListener('click', (e) => {
   if (!el) return;
   const action = el.dataset.action;
   if (action === 'openSlideshow') openSlideshow(parseInt(el.dataset.idx));
+  if (action === 'openPhoto') openPhotoView(parseInt(el.dataset.idx));
   if (action === 'startSlideshow') startSlideshow();
 });
 

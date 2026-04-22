@@ -1,5 +1,44 @@
 # Changelog
 
+## v1.5.6 (2026-04-21)
+
+### Public Album
+- **Header redesign** — replaced separate toolbar with integrated header; "Jacob Lakatua Photography" branding with lakatua.me link, slideshow button inline
+- **Grid photo click opens single image view** — clicking a photo opens it paused in the slideshow overlay (zoom effect, controls visible) rather than starting a full autoplay slideshow
+- **Swipe-down to close** — swipe down on mobile closes the slideshow overlay back to the grid
+
+### Internal App Slideshow
+- **Ken Burns fixes backported** — all three root-cause fixes (live CSS var, inline animation, scheduleNext timing) applied to internal slideshow to match public album quality
+- **Fullscreen button** — `⤢` button added to slideshow controls; wired with mousemove handler to keep controls visible on hover
+- **Swipe-down to close** — swipe down closes the internal slideshow overlay
+- **Pause stops music** — pausing the slideshow now pauses audio; unpausing resumes it
+
+---
+
+## v1.5.5 (2026-04-21)
+
+### Ken Burns Transition Fix
+Three root causes of mid-cycle animation jumps resolved:
+- **Live CSS variable bug** — `--kb-start`/`--kb-end` are resolved dynamically inside `@keyframes`, so updating them in `prepareSlot()` during pre-load caused an immediate position snap on the running animation. Variables now set in `show()` only, right before animation restart.
+- **Animation torn off during fade-out** — animation was controlled by `.ss-slide.ss-visible .ss-img`, so removing `ss-visible` to trigger the opacity fade also stopped the animation mid-frame, snapping the image to `transform: none` while still visible. Animation now applied as inline style on the `<img>` element, persisting independently of parent class changes.
+- **Timing lock** — `scheduleNext()` was called from `ssNext()` (when the transition was requested), not from `show()` (when the image became visible). This locked slot B transitions to exact 14s multiples — coinciding with the animation's own completion boundary on images 3, 7, 11. `scheduleNext()` now fires from inside `show()`.
+
+---
+
+## v1.5.4 (2026-04-21)
+
+### New Features
+- **Trash view** — permanently delete assets from Immich (bypass 30-day trash); view and restore archived assets
+- **Create Immich album** — create a new Immich album from within the app and optionally add selected assets
+- **OG meta tags** on `/album/:slug` — `og:title`, `og:image`, `og:description`, `twitter:card` injected server-side so Substack, iMessage, and other crawlers generate rich link cards
+- **Public album defaults to slideshow** — bare `/album/:slug` opens the title card with a circular orange play button; `?gallery` shows the photo grid
+- **Substack embed support** — `substack.com` and `*.substack.com` added to CSP `frame-ancestors`; `lakatua.com` / `lakatua.me` also added
+
+### Bug Fixes
+- `isArchived` field now included in photo info responses
+
+---
+
 ## v1.4.3 (2026-04-19)
 
 ### Dependencies
