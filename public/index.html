@@ -67,7 +67,7 @@
   .gallery-item-title { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .gallery-item-count { font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--safe); margin-top: 2px; }
   .gallery-empty { padding: 3rem 1rem; text-align: center; color: var(--text-dim); font-family: 'IBM Plex Mono', monospace; font-size: 12px; grid-column: 1 / -1; }
-  .detail-image { width: 100%; max-height: 50vh; object-fit: contain; background: #000; display: block; }
+  .detail-image { width: 100%; min-height: 55vh; max-height: 80vh; object-fit: contain; background: #000; display: block; }
   .detail-meta { padding: 1rem; border-bottom: 1px solid var(--border); background: var(--surface); }
   .detail-title-row { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; }
   .detail-title { font-size: 24px; font-weight: 300; flex: 1; }
@@ -275,6 +275,7 @@
   <div class="view" id="recent-view">
     <div style="max-width:1200px;margin:0 auto;padding:0.75rem 1rem;border-bottom:1px solid var(--border);display:flex;gap:0.5rem;align-items:center">
       <input type="text" id="recent-search" placeholder="Search..." style="flex:1;font-size:13px" >
+      <button class="btn btn-ghost btn-sm" id="btn-clear-recent-search" data-action="clearRecentSearch" title="Clear search, chips, and person filter" style="white-space:nowrap">✕ Clear</button>
       <button class="sort-btn" id="search-mode-text"  style="white-space:nowrap">Text</button>
       <button class="sort-btn active" id="search-mode-smart"  style="white-space:nowrap">✦ Smart</button>
       <button class="btn btn-ghost btn-sm" id="select-mode-btn" >Select</button>
@@ -533,7 +534,7 @@
     <div class="modal-body">
       <div class="form-group">
         <label class="form-label">Search Negative (Immich)</label>
-        <input type="text" id="immich-search" placeholder="Filename or keyword..." id="immich-search-input">
+        <input type="text" id="immich-search" placeholder="Filename or keyword...">
         <div id="immich-results" style="margin-top:0.5rem"></div>
       </div>
       <div class="form-group">
@@ -648,7 +649,7 @@
   </div>
 </div>
 
-<script src="/app.js?v=28" defer></script>
+<script src="/app.js?v=30" defer></script>
 <script>
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.getRegistrations().then(regs => regs.forEach(r => r.unregister()));

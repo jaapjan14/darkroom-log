@@ -9,6 +9,13 @@ services:
       - SESSION_SECRET=changeme-use-a-long-random-string
       - IMMICH_URL=http://your-immich-host:2283/api
       - IMMICH_KEY=your-immich-api-key
+      # Public album branding (optional — leave blank to hide the brand block)
+      - BRAND_NAME=
+      - BRAND_URL=
+      - BRAND_SITE_LABEL=
+      # Space-separated origins allowed to embed /album/:slug via iframe
+      # Example: "https://*.squarespace.com https://yourdomain.com https://*.substack.com"
+      - CSP_FRAME_ANCESTORS=
     volumes:
       - ./data:/data
       - ./music:/music   # optional: drop mp3s here for slideshow music

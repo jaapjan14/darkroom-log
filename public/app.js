@@ -92,6 +92,14 @@ function switchTab(tab) {
   state.albumSelected = new Set();
   lastSelectedIdx = -1;
   if (state.immichSelectMode) exitImmichSelectMode();
+  if (tab !== 'recent' && state.recentActivePerson) {
+    state.recentActivePerson = null;
+    state.recentSmartResults = [];
+    const _rs = document.getElementById('recent-search');
+    if (_rs) _rs.value = '';
+    updateRecentFilterChips();
+    updateActiveChipLabel();
+  }
   document.getElementById('add-print-btn').style.display = tab === 'prints' ? 'inline-block' : 'none';
   document.getElementById('header-title').textContent = 'Darkroom Log';
   if (tab === 'recent' && !state.recentLoaded) loadRecent();
@@ -149,21 +157,39 @@ async function loadMoreRecent() {
   await fetchRecentPage();
 }
 
+function absorbAssetMeta(items) {
+  // Server folds exif metadata into list responses; populate state.recentMeta in one pass.
+  for (const a of items) {
+    if (!a || !a.id) continue;
+    state.recentMeta[a.id] = {
+      description: a.description || '',
+      model: a.model || '',
+      lens: a.lens || '',
+      city: a.city || '',
+      state: a.state || '',
+      filename: a.originalFileName || '',
+      takenAt: a.takenAt || a.localDateTime || a.fileCreatedAt || ''
+    };
+  }
+}
+
 async function fetchRecentPage() {
-  const size = 500;
+  const size = 250;
   const r = await fetch(`/api/immich/recent?page=${state.recentPage}&size=${size}&sort=${state.librarySort}&dir=${state.librarySortDir}`);
   const data = await r.json();
   const items = data.assets || [];
+  absorbAssetMeta(items);
   state.recentItems = [...state.recentItems, ...items];
   applyRecentFilters();
   document.getElementById('load-more-btn').style.display = (items.length === size && !document.getElementById('recent-search').value) ? 'block' : 'none';
   document.getElementById('load-more-btn').onclick = loadMoreRecent;
-  loadRecentMetaBatch(items.map(a => a.id));
 }
 
+// Fallback for any asset list whose server endpoint hasn't been updated to fold meta.
 async function loadRecentMetaBatch(ids) {
-  for (const id of ids) {
-    if (state.recentMeta[id]) continue; // already cached
+  const missing = ids.filter(id => id && !state.recentMeta[id]);
+  if (!missing.length) return;
+  for (const id of missing) {
     try {
       const r = await fetch('/api/immich/photo/' + id);
       const meta = await r.json();
@@ -176,11 +202,7 @@ async function loadRecentMetaBatch(ids) {
         filename: meta.filename || '',
         takenAt: meta.takenAt || ''
       };
-
-      // filter chips updated by fetchFilterOptions, not per-photo metadata
     } catch(e) {}
-    // Small delay to avoid hammering the server
-    await new Promise(res => setTimeout(res, 50));
   }
 }
 
@@ -204,7 +226,11 @@ function handleRecentSearch(q) {
   clearTimeout(smartSearchTimer);
   if (!q.trim()) {
     state.recentSmartResults = [];
-    applyRecentFilters();
+    if (state.recentActivePerson) {
+      runMultiChipSearch([...state.recentActiveChips], state.recentActivePerson);
+    } else {
+      applyRecentFilters();
+    }
     return;
   }
   if (q.trim().length > 1) {
@@ -215,7 +241,7 @@ function handleRecentSearch(q) {
   }
 }
 
-async function runMultiChipSearch(chips) {
+async function runMultiChipSearch(chips, personId = null) {
   const grid = document.getElementById('recent-grid');
   grid.innerHTML = '<div class="loading">Searching...</div>';
   try {
@@ -234,12 +260,13 @@ async function runMultiChipSearch(chips) {
     const r = await fetch('/api/immich/combined-search', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ cameras, lenses, cities, unknowns, size: 250, page: 1 })
+      body: JSON.stringify({ cameras, lenses, cities, unknowns, personId, size: 250, page: 1 })
     });
     const data = await r.json();
     const items = data.assets || [];
     state.recentSmartResults = items;
     state.searchPage = 1;
+    absorbAssetMeta(items);
     renderRecentGrid(items);
     loadRecentMetaBatch(items.map(a => a.id));
     const loadMoreBtn = document.getElementById('load-more-btn');
@@ -250,7 +277,7 @@ async function runMultiChipSearch(chips) {
         const r2 = await fetch('/api/immich/combined-search', {
           method: 'POST',
           headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({ cameras, lenses, cities, size: 250, page: state.searchPage })
+          body: JSON.stringify({ cameras, lenses, cities, personId, size: 250, page: state.searchPage })
         });
         const d2 = await r2.json();
         state.recentSmartResults = [...state.recentSmartResults, ...(d2.assets || [])];
@@ -275,11 +302,12 @@ async function runTextSearch(q, append = false) {
     const r = await fetch('/api/immich/text-search', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ query: q, size: 250, page: state.searchPage, ...categorizeChips() })
+      body: JSON.stringify({ query: q, size: 250, page: state.searchPage, personId: state.recentActivePerson, ...categorizeChips() })
     });
     const data = await r.json();
     const newItems = data.assets || [];
     state.searchTotal = data.total || newItems.length;
+    absorbAssetMeta(newItems);
     state.recentSmartResults = append ? [...state.recentSmartResults, ...newItems] : newItems;
     renderRecentGrid(state.recentSmartResults);
     loadRecentMetaBatch(newItems.map(a => a.id));
@@ -309,11 +337,12 @@ async function runSmartSearch(q, append = false) {
     const r = await fetch('/api/immich/smart-search', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ query: q, size: 250, page: state.searchPage, ...categorizeChips() })
+      body: JSON.stringify({ query: q, size: 250, page: state.searchPage, personId: state.recentActivePerson, ...categorizeChips() })
     });
     const data = await r.json();
     const newItems = data.assets || [];
     state.searchTotal = data.total || newItems.length;
+    absorbAssetMeta(newItems);
     state.recentSmartResults = append ? [...state.recentSmartResults, ...newItems] : newItems;
     renderRecentGrid(state.recentSmartResults);
     loadRecentMetaBatch(newItems.map(a => a.id));
@@ -413,15 +442,32 @@ function updateRecentFilterChips() {
 async function searchByPerson(personId, name) {
   state.recentActivePerson = state.recentActivePerson === personId ? null : personId;
   updateRecentFilterChips();
+  updateActiveChipLabel();
+  const q = (document.getElementById('recent-search')?.value || '').trim();
   if (!state.recentActivePerson) {
     state.recentSmartResults = [];
-    document.getElementById('recent-search').value = '';
-    applyRecentFilters();
+    if (q) {
+      if (state.searchMode === 'smart') runSmartSearch(q);
+      else runTextSearch(q);
+    } else if (state.recentActiveChips.size > 0) {
+      runMultiChipSearch([...state.recentActiveChips]);
+    } else {
+      applyRecentFilters();
+    }
+    return;
+  }
+  // Person just activated; intersect with query first, then chips, else person-only search
+  if (q) {
+    if (state.searchMode === 'smart') runSmartSearch(q);
+    else runTextSearch(q);
+    return;
+  }
+  if (state.recentActiveChips.size > 0) {
+    runMultiChipSearch([...state.recentActiveChips], state.recentActivePerson);
     return;
   }
   const grid = document.getElementById('recent-grid');
   grid.innerHTML = '<div class="loading">Searching...</div>';
-  document.getElementById('recent-search').value = name;
   try {
     const r = await fetch('/api/immich/person-search', {
       method: 'POST',
@@ -430,6 +476,7 @@ async function searchByPerson(personId, name) {
     });
     const data = await r.json();
     state.recentSmartResults = data.assets || [];
+    absorbAssetMeta(state.recentSmartResults);
     renderRecentGrid(state.recentSmartResults);
     loadRecentMetaBatch(state.recentSmartResults.map(a => a.id));
     const loadMoreBtn = document.getElementById('load-more-btn');
@@ -476,32 +523,51 @@ function setRecentChip(val) {
   updateRecentFilterChips();
   const chips = [...state.recentActiveChips];
   const q = (document.getElementById('recent-search')?.value || '').trim();
-  if (chips.length === 0) {
-    state.recentSmartResults = [];
-    applyRecentFilters();
-  } else if (q) {
-    // Both chips and query — re-run search with chip filters applied
+  if (q) {
+    // Query present — smart/text search composes personId + chips via categorizeChips
     if (state.searchMode === 'smart') runSmartSearch(q);
     else runTextSearch(q);
+  } else if (chips.length === 0 && !state.recentActivePerson) {
+    state.recentSmartResults = [];
+    applyRecentFilters();
   } else {
-    // Chips only, no query — metadata search
-    runMultiChipSearch(chips);
+    // Chips and/or person (no query) — combined search
+    runMultiChipSearch(chips, state.recentActivePerson);
   }
 }
 
 function updateActiveChipLabel() {
   const label = document.getElementById('active-chip-label');
   if (!label) return;
-  const chips = [...state.recentActiveChips];
-  label.textContent = chips.length ? chips.join(' · ') : '';
+  const parts = [];
+  if (state.recentActivePerson) {
+    const people = (state.filterOptions && state.filterOptions.people) || [];
+    const p = people.find(x => x.id === state.recentActivePerson);
+    if (p) parts.push('👤 ' + p.name);
+  }
+  parts.push(...[...state.recentActiveChips]);
+  label.textContent = parts.join(' · ');
 }
 
 function clearRecentChip() {
   state.recentActiveChips = new Set();
+  state.recentActivePerson = null;
   state.recentSmartResults = [];
   updateActiveChipLabel();
+  updateRecentFilterChips();
   const searchEl = document.getElementById('recent-search');
   if (searchEl) searchEl.value = '';
+  applyRecentFilters();
+}
+
+function clearRecentSearch() {
+  const searchEl = document.getElementById('recent-search');
+  if (searchEl) searchEl.value = '';
+  state.recentActivePerson = null;
+  state.recentActiveChips = new Set();
+  state.recentSmartResults = [];
+  updateRecentFilterChips();
+  updateActiveChipLabel();
   applyRecentFilters();
 }
 
@@ -592,13 +658,13 @@ async function renderRecentDetail(assetId) {
     <div class="detail-layout">
       <div class="detail-left">
         <div style="position:relative;width:100%;height:100%;display:flex;align-items:flex-start;justify-content:center">
-          <img class="detail-image" 
-               src="/api/immich/thumb/${assetId}"
+          <img class="detail-image"
+               src="/api/immich/thumb/${assetId}?size=preview"
                data-full="/api/immich/original/${assetId}"
                alt="${meta.filename || ''}"
-               data-action="openFullscreen" data-url="/api/immich/original/${assetId}" 
-               style="cursor:zoom-in;max-width:100%;max-height:calc(100vh - 52px);width:auto;height:auto;display:block"
-               onload="this.dataset.full && loadFullImage(this)">
+               data-action="openFullscreen" data-url="/api/immich/original/${assetId}"
+               style="cursor:zoom-in"
+               onload="scheduleDetailUpgrade(this)">
           <div data-action="navPrev" style="position:absolute;left:0;top:0;width:25%;height:100%;cursor:pointer;z-index:10"></div>
           <div data-action="navNext" style="position:absolute;right:0;top:0;width:25%;height:100%;cursor:pointer;z-index:10"></div>
         </div>
@@ -754,16 +820,24 @@ function disablePinchZoom() {
   if (meta) meta.content = 'width=device-width, initial-scale=1.0, maximum-scale=1.0';
 }
 
-function loadFullImage(img) {
+let _detailUpgradeTimer = null;
+let _detailUpgradeLoader = null;
+function scheduleDetailUpgrade(img) {
+  if (_detailUpgradeTimer) { clearTimeout(_detailUpgradeTimer); _detailUpgradeTimer = null; }
+  if (_detailUpgradeLoader) { _detailUpgradeLoader.onload = null; _detailUpgradeLoader.src = ''; _detailUpgradeLoader = null; }
   const full = img.dataset.full;
   if (!full) return;
-  const fullImg = new Image();
-  fullImg.onload = () => {
-    img.src = full;
-    img.style.filter = '';
-    delete img.dataset.full;
-  };
-  fullImg.src = full;
+  _detailUpgradeTimer = setTimeout(() => {
+    _detailUpgradeLoader = new Image();
+    _detailUpgradeLoader.onload = () => {
+      if (!document.body.contains(img)) return;
+      if (img.dataset.full !== full) return; // user navigated; stale upgrade
+      img.src = full;
+      delete img.dataset.full;
+      _detailUpgradeLoader = null;
+    };
+    _detailUpgradeLoader.src = full;
+  }, 400);
 }
 
 function navigatePrint(dir) {
@@ -866,6 +940,8 @@ document.addEventListener('touchstart', e => {
   const inRecent = document.getElementById('recent-detail-view').classList.contains('active');
   const inPrintDetail = document.getElementById('detail-view').classList.contains('active');
   if (inRecent || inPrintDetail) {
+    // Only track swipes that start on the image side — leave the info text free to scroll
+    if (!e.target.closest('.detail-left')) { touchStartX = null; return; }
     touchStartX = e.touches[0].clientX;
     touchStartY = e.touches[0].clientY;
   }
@@ -2688,7 +2764,7 @@ function wireListeners() {
 
   // Header
   w('btn-show-gallery', 'click', () => showGallery());
-  w('btn-add-print', 'click', () => openAddPrintModal());
+  w('add-print-btn', 'click', () => openAddPrintModal());
   w('btn-logout', 'click', () => logout());
 
   // Tabs
@@ -2801,7 +2877,7 @@ function wireListeners() {
     else { closeFullscreen(); }
   });
   w('btn-close-add-print', 'click', () => closeModal('add-print-modal'));
-  w('immich-search-input', 'input', (e) => searchImmich(e.target.value));
+  w('immich-search', 'input', (e) => searchImmich(e.target.value));
   w('btn-create-print', 'click', () => createPrint());
   w('btn-close-add-session', 'click', () => closeModal('add-session-modal'));
   w('select-paper', 'change', (e) => handlePaperChange(e.target));
@@ -2835,6 +2911,7 @@ document.addEventListener('click', (e) => {
     // Filter chips
     case 'setRecentChip': setRecentChip(val); break;
     case 'searchByPerson': searchByPerson(id, el.dataset.name); break;
+    case 'clearRecentSearch': clearRecentSearch(); break;
 
     // Library
     case 'recentItemClick':

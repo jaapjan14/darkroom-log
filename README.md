@@ -20,6 +20,7 @@ A self-hosted darkroom printing log and analog photo library, built for Immich i
 - **Combined search** — merges Immich text search and CLIP smart search into a single result set, something Immich's native UI doesn't offer
 - Search by recognized person/face
 - Filter chips: camera, lens, location, people
+- **Compose filters** — person, chip, and text/smart search intersect server-side (e.g. "Ruby + Anacortes + 'beach'" returns only photos matching all three)
 - Select mode with shift-click range selection
 
 ### Albums
@@ -43,6 +44,12 @@ A self-hosted darkroom printing log and analog photo library, built for Immich i
 - Description overlay, fullscreen (`⤢`), auto-hide controls with mousemove keep-alive
 - Swipe down to close; swipe left/right to navigate
 
+### Performance
+- **Fast library open** — photo metadata is folded into the initial `/api/immich/recent` response instead of fetched one-asset-at-a-time, so filter chips and search are ready immediately (~1s over a phone connection vs the ~60s an N+1 pattern would cost)
+- **Right-sized thumbnails** — grid uses Immich's small thumbnail (~50 KB); detail view uses the 1440 px preview (retina-sharp); full original loads only when you tap to fullscreen
+- **Progressive upgrade in detail view** — preview paints instantly, original quietly swaps in after a 400 ms dwell, and rapid navigation cancels the pending upgrade so swiping through photos doesn't waterfall megabytes of originals
+- Service-worker-cached thumbnails survive app shell updates (`darkroom-thumbs-v1` cache, FIFO-bounded to 500 entries for iOS Safari quota)
+
 ### Mobile & PWA
 - Fully responsive — designed and tested on iPhone
 - Install to home screen via Safari → **Add to Home Screen** for a native app-like experience
@@ -57,7 +64,7 @@ A self-hosted darkroom printing log and analog photo library, built for Immich i
 
 ### Public Album
 - Public album page (`/album/:slug`) — no login required, opens directly to slideshow
-- **Branded header** — "Jacob Lakatua Photography" with lakatua.me link and inline slideshow button
+- **Configurable branded header** — brand name + site link (set via env vars) with inline slideshow button
 - **Grid view** — click any photo to open it in a paused single-image view with Ken Burns zoom
 - Rich link cards on Substack, iMessage, and social — OG meta tags injected server-side
 - Embed in Squarespace, Substack, Webflow, or any iframe (`?embed` hides header)
@@ -88,12 +95,16 @@ docker compose up -d
 
 ## Configuration
 
-| Variable | Description |
-|---|---|
-| `APP_PASSWORD` | Login password |
-| `SESSION_SECRET` | Random secret for session signing |
-| `IMMICH_URL` | Immich API URL e.g. `http://192.168.0.10:2283/api` |
-| `IMMICH_KEY` | Immich API key |
+| Variable | Required | Description |
+|---|---|---|
+| `APP_PASSWORD` | yes | Login password |
+| `SESSION_SECRET` | yes | Random secret for session signing |
+| `IMMICH_URL` | yes | Immich API URL e.g. `http://192.168.0.10:2283/api` |
+| `IMMICH_KEY` | yes | Immich API key |
+| `BRAND_NAME` | no | Public album header brand name (e.g. `Your Name Photography`). Leave blank to hide the brand block. |
+| `BRAND_URL` | no | Public album header link destination (e.g. `https://yourdomain.com`) |
+| `BRAND_SITE_LABEL` | no | Text shown next to the brand name (e.g. `yourdomain.com ↗`) |
+| `CSP_FRAME_ANCESTORS` | no | Space-separated origins allowed to embed `/album/:slug` beyond `'self'`. Example: `https://*.squarespace.com https://*.substack.com` |
 
 ## Volumes
 
