@@ -9,6 +9,7 @@ let state = {
   selectedImmich: null,
   technique: 'single',
   editingSessionId: null,
+  sessionPrintId: null,
   immichSearchTimeout: null,
   sort: 'recent',
   activeTag: null,
@@ -153,6 +154,9 @@ async function fetchFilterOptions() {
 }
 
 async function loadMoreRecent() {
+  const btn = document.getElementById('load-more-btn');
+  if (btn) btn.blur();
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
   state.recentPage++;
   await fetchRecentPage();
 }
@@ -174,6 +178,32 @@ function absorbAssetMeta(items) {
 }
 
 async function fetchRecentPage() {
+  // On Load More (page > 1) we want to keep the user's visual position. Three layers:
+  //   1. Snapshot scrollTop on every plausible scroll container — Android Chrome may scroll
+  //      the document while desktop scrolls #recent-view; we restore whichever moved.
+  //   2. Anchor on the topmost-visible item (id + offset from viewport top) so we can
+  //      correct any residual delta after layout settles, even if the wrong element got
+  //      restored above.
+  //   3. Multi-frame restoration: now + 2× rAF — survives address bar collapse/expand,
+  //      lazy-image decoding, and font-swap reflow.
+  // First-page loads and sort changes still scroll to top via the natural innerHTML replace.
+  const isLoadMore = state.recentPage > 1;
+  const recentView = document.getElementById('recent-view');
+  const beforeRecentY = recentView ? recentView.scrollTop : 0;
+  const beforeDocY = window.pageYOffset || document.documentElement.scrollTop || 0;
+  let anchor = null;
+  if (isLoadMore) {
+    const grid = document.getElementById('recent-grid');
+    if (grid) {
+      for (const child of grid.children) {
+        const rect = child.getBoundingClientRect();
+        if (rect.bottom > 0 && child.dataset.id) {
+          anchor = { id: child.dataset.id, offset: rect.top };
+          break;
+        }
+      }
+    }
+  }
   const size = 250;
   const r = await fetch(`/api/immich/recent?page=${state.recentPage}&size=${size}&sort=${state.librarySort}&dir=${state.librarySortDir}`);
   const data = await r.json();
@@ -181,6 +211,41 @@ async function fetchRecentPage() {
   absorbAssetMeta(items);
   state.recentItems = [...state.recentItems, ...items];
   applyRecentFilters();
+  if (isLoadMore) {
+    // Defense in depth: with no client-side sort, the append-only fast path in
+    // renderRecentGrid should fire and the DOM above the fold won't change. But if
+    // for any reason a full rebuild happens, restore scroll on whichever element
+    // actually scrolls, then anchor-correct so the topmost-visible item lands back
+    // at its prior viewport offset.
+    const pinScroll = () => {
+      if (recentView && recentView.scrollTop !== beforeRecentY) recentView.scrollTop = beforeRecentY;
+      const curDocY = window.pageYOffset || document.documentElement.scrollTop || 0;
+      if (curDocY !== beforeDocY) window.scrollTo(0, beforeDocY);
+    };
+    const fineCorrect = () => {
+      if (!anchor) return;
+      const el = document.getElementById('sel-' + anchor.id);
+      if (!el) return;
+      const delta = el.getBoundingClientRect().top - anchor.offset;
+      if (Math.abs(delta) < 1) return;
+      let node = el.parentElement;
+      while (node && node !== document.body) {
+        const cs = getComputedStyle(node);
+        if ((cs.overflowY === 'auto' || cs.overflowY === 'scroll') && node.scrollHeight > node.clientHeight) {
+          node.scrollTop += delta;
+          return;
+        }
+        node = node.parentElement;
+      }
+      window.scrollBy(0, delta);
+    };
+    pinScroll();
+    requestAnimationFrame(() => {
+      pinScroll();
+      fineCorrect();
+      requestAnimationFrame(() => { pinScroll(); fineCorrect(); });
+    });
+  }
   document.getElementById('load-more-btn').style.display = (items.length === size && !document.getElementById('recent-search').value) ? 'block' : 'none';
   document.getElementById('load-more-btn').onclick = loadMoreRecent;
 }
@@ -383,14 +448,13 @@ function applyRecentFilters() {
       return matchesQ && matchesChips;
     });
   }
-  // Apply sort
-  const sort = state.librarySort || 'upload';
-  const dir = state.librarySortDir === 'asc' ? 1 : -1;
-  if (sort === 'upload') {
-    items = [...items].sort((a, b) => dir * (new Date(a.createdAt) - new Date(b.createdAt)));
-  } else if (sort === 'taken') {
-    items = [...items].sort((a, b) => dir * (new Date(a.localDateTime || a.fileCreatedAt || a.createdAt) - new Date(b.localDateTime || b.fileCreatedAt || b.createdAt)));
-  }
+  // No client-side sort. The server already sorts by `sort` and `dir` query params,
+  // and `setLibrarySort` / `toggleLibrarySortDir` both reset state and re-fetch.
+  // A redundant client sort was rearranging items at page boundaries when timestamps
+  // weren't strictly monotonic across pages (e.g. minute-resolution `createdAt`
+  // where page-1's tail items overlap page-2's head items) — every Load More then
+  // invalidated the page-1 prefix in the grid, forcing a full innerHTML rebuild and
+  // breaking the append-only fast path.
   renderRecentGrid(items);
 }
 
@@ -575,14 +639,31 @@ function renderRecentGrid(items) {
   state.displayedItems = items; // track what's currently shown for navigation
   const grid = document.getElementById('recent-grid');
   if (!items.length) { grid.innerHTML = '<div class="loading">No recent uploads.</div>'; return; }
-  grid.innerHTML = items.map(a => `
+  const renderItem = a => `
     <div class="gallery-item ${state.selectMode ? 'selectable' : ''} ${state.selectedAssets && state.selectedAssets.has(a.id) ? 'selected' : ''}"
          id="sel-${a.id}"
          data-action="recentItemClick" data-id="${a.id}">
       <img src="/api/immich/thumb/${a.id}" alt="${a.originalFileName}" loading="lazy" onerror="this.style.background='#1a1a1a'">
       ${state.selectMode ? `<div class="select-check ${state.selectedAssets && state.selectedAssets.has(a.id) ? 'checked' : ''}">✓</div>` : ''}
     </div>
-  `).join('');
+  `;
+  // Append-only fast path: if the existing grid's children are a strict prefix of `items`
+  // (i.e. Load More just appended new tiles to a stable head), insert the new tiles at the
+  // end instead of rewriting innerHTML. The DOM nodes the user is looking at don't move at
+  // all, scroll position is preserved naturally, and already-decoded <img>s aren't torn down
+  // and re-fetched. Falls back to full rebuild for sort changes / filter changes / etc.
+  const existing = grid.children;
+  let canAppend = existing.length > 0 && items.length > existing.length;
+  if (canAppend) {
+    for (let i = 0; i < existing.length; i++) {
+      if (!items[i] || existing[i].dataset.id !== items[i].id) { canAppend = false; break; }
+    }
+  }
+  if (canAppend) {
+    grid.insertAdjacentHTML('beforeend', items.slice(existing.length).map(renderItem).join(''));
+  } else {
+    grid.innerHTML = items.map(renderItem).join('');
+  }
 }
 
 function goBackFromDetail() {
@@ -638,6 +719,17 @@ async function renderRecentDetail(assetId) {
 
   let meta = {};
   try { const r = await fetch(`/api/immich/photo/${assetId}`); meta = await r.json(); } catch(e) {}
+
+  // Lazy-load Darkroom albums so the "In albums" row works even when the
+  // user opened Recent first and never visited the Albums tab.
+  if (!Array.isArray(state.albums)) {
+    try {
+      const r = await fetch('/api/albums');
+      const data = await r.json();
+      if (Array.isArray(data)) state.albums = data;
+    } catch (e) { /* leave for other loaders */ }
+  }
+  const assetAlbums = (state.albums || []).filter(a => (a.assets || []).includes(assetId));
 
   const idx = state.currentRecentIndex;
   const displayedItems = state.displayedItems || state.recentItems;
@@ -727,6 +819,16 @@ async function renderRecentDetail(assetId) {
               <div class="exif-row-value">
                 <a href="https://www.openstreetmap.org/?mlat=${meta.latitude}&mlon=${meta.longitude}&zoom=15" target="_blank" style="color:var(--safe);text-decoration:none" id="gps-link">${meta.latitude.toFixed(4)}, ${meta.longitude.toFixed(4)}</a>
                 <div class="exif-row-sub">${immichLocation}</div>
+              </div>
+            </div>` : ''}
+            ${assetAlbums.length ? `
+            <div class="exif-row-item">
+              <div class="exif-row-icon">📁</div>
+              <div class="exif-row-label">Albums</div>
+              <div class="exif-row-value">
+                <div class="print-albums-row" style="margin-top:0">
+                  ${assetAlbums.map(a => `<button class="album-chip" data-action="openAlbum" data-id="${a.id}" title="Open album">${a.title}</button>`).join('')}
+                </div>
               </div>
             </div>` : ''}
           </div>
@@ -864,18 +966,38 @@ async function navigateRecent(dir) {
   await renderRecentDetail(state.currentRecentId);
 }
 
+// Fullscreen pinch-zoom state (the overlay opened by tapping the print/library detail image)
+let _fsZoom = { scale: 1, tx: 0, ty: 0 };
+function _fsIsZoomed() { return _fsZoom.scale > 1.001; }
+function _fsApplyZoom() {
+  const img = document.getElementById('fullscreen-img');
+  if (!img) return;
+  if (_fsIsZoomed()) {
+    img.style.transform = `translate(${_fsZoom.tx}px,${_fsZoom.ty}px) scale(${_fsZoom.scale})`;
+  } else {
+    img.style.transform = '';
+  }
+}
+function _fsResetZoom() {
+  _fsZoom = { scale: 1, tx: 0, ty: 0 };
+  _fsApplyZoom();
+}
+
 function openFullscreen(src) {
+  _fsResetZoom();
   document.getElementById('fullscreen-img').src = src;
   document.getElementById('fullscreen-overlay').classList.add('active');
   state.fullscreenOpen = true;
 }
 
 function closeFullscreen() {
+  _fsResetZoom();
   document.getElementById('fullscreen-overlay').classList.remove('active');
   state.fullscreenOpen = false;
 }
 
 function fullscreenNavigate(dir) {
+  _fsResetZoom();
   if (document.getElementById('detail-view').classList.contains('active')) {
     navigatePrint(dir);
   } else {
@@ -887,6 +1009,10 @@ function fullscreenNavigate(dir) {
 
 // Keyboard navigation
 document.addEventListener('keydown', e => {
+  // When any modal is open, don't run the page-level nav handlers (otherwise
+  // arrow keys leak through to navigatePrint/navigateRecent and silently
+  // change state.currentPrintId while the user is filling in a session form).
+  if (document.querySelector('.modal-overlay.active')) return;
   const ssOverlay = document.getElementById('slideshow-overlay');
   if (ssOverlay && ssOverlay.classList.contains('active')) {
     if (e.key === 'ArrowLeft') slideshowPrev();
@@ -1219,15 +1345,26 @@ function switchAlbumModalTab(tab) {
   if (tab === 'immich') renderImmichAlbumPickList();
 }
 
-function renderDarkroomAlbumPickList() {
+async function renderDarkroomAlbumPickList() {
   const list = document.getElementById('album-pick-list');
-  if (!state.albums.length) {
-    list.innerHTML = '<div style="color:var(--text-dim);font-family:IBM Plex Mono,monospace;font-size:11px;margin-bottom:0.5rem">No albums yet</div>';
-  } else {
-    list.innerHTML = state.albums.map(a => `
-      <button class="btn btn-ghost btn-sm" style="width:100%;text-align:left;margin-bottom:0.4rem" data-action="addToAlbum" data-id="${a.id}">${a.title} (${a.assets.length})</button>
-    `).join('');
+  // Lazy-load on demand — the boot-time fetch is fire-and-forget, so a fast
+  // "+ Album" tap can hit this before state.albums is populated and falsely
+  // render "No albums yet".
+  if (!Array.isArray(state.albums)) {
+    list.innerHTML = '<div style="color:var(--text-dim);font-family:IBM Plex Mono,monospace;font-size:11px;margin-bottom:0.5rem">Loading albums…</div>';
+    try {
+      const r = await fetch('/api/albums');
+      const data = await r.json();
+      if (Array.isArray(data)) state.albums = data;
+    } catch (e) { /* fall through to empty render */ }
   }
+  if (!Array.isArray(state.albums) || !state.albums.length) {
+    list.innerHTML = '<div style="color:var(--text-dim);font-family:IBM Plex Mono,monospace;font-size:11px;margin-bottom:0.5rem">No albums yet</div>';
+    return;
+  }
+  list.innerHTML = state.albums.map(a => `
+    <button class="btn btn-ghost btn-sm" style="width:100%;text-align:left;margin-bottom:0.4rem" data-action="addToAlbum" data-id="${a.id}">${a.title} (${a.assets.length})</button>
+  `).join('');
 }
 
 async function renderImmichAlbumPickList() {
@@ -1943,6 +2080,22 @@ async function showDetail(printId) {
   try { const r = await fetch(`/api/immich/photo/${print.immichId}`); meta = await r.json(); } catch(e) {}
 
   const sessions = (print.sessions || []).slice().sort((a, b) => Number(b.id) - Number(a.id));
+  // Lazy-load Darkroom albums if the user opened a print detail before ever
+  // visiting the Albums tab — without this, state.albums is undefined here
+  // and the "In albums" row stays empty even for prints that ARE in albums.
+  // IMPORTANT: do NOT set state.albums = [] on failure. That trampled a
+  // load-in-progress on a separate code path (the Recent view's "+ Album"
+  // modal) and made it render "No albums yet" forever.
+  if (!Array.isArray(state.albums)) {
+    try {
+      const r = await fetch('/api/albums');
+      const data = await r.json();
+      if (Array.isArray(data)) state.albums = data;
+    } catch (e) { /* leave state.albums to other loaders */ }
+  }
+  // Albums this print belongs to — looked up by Immich asset ID against the
+  // already-loaded state.albums.
+  const printAlbums = (state.albums || []).filter(a => (a.assets || []).includes(print.immichId));
   content.innerHTML = `
     <div class="detail-layout">
       <div class="detail-left">
@@ -1976,6 +2129,12 @@ async function showDetail(printId) {
         <button class="btn-icon" data-action="showTagInput" style="font-size:11px;color:var(--safe)">+ tag</button>
         <input class="tag-add-input" id="tag-add-input" type="text" placeholder="tag name">
       </div>
+      ${printAlbums.length ? `
+        <div class="print-albums-row">
+          <div class="print-albums-label">In albums</div>
+          ${printAlbums.map(a => `<button class="album-chip" data-action="openAlbum" data-id="${a.id}" title="Open album">${a.title}</button>`).join('')}
+        </div>
+      ` : ''}
     </div>
     <div class="sessions-header">
       <div class="sessions-label">Print Sessions (${sessions.length})</div>
@@ -2082,6 +2241,10 @@ function openAddPrintModal() {
 
 function openAddSessionModal() {
   state.editingSessionId = null;
+  // Capture the print id at modal-open time so saveSession() targets the
+  // right print even if anything else mutates state.currentPrintId in the
+  // meantime (defense in depth on top of the keyboard-nav guard).
+  state.sessionPrintId = state.currentPrintId;
   document.getElementById('session-modal-title').textContent = 'Log Print Session';
   clearSessionForm();
   const now = new Date(); const localDate = now.getFullYear() + '-' + String(now.getMonth()+1).padStart(2,'0') + '-' + String(now.getDate()).padStart(2,'0'); document.getElementById('s-date').value = localDate;
@@ -2093,6 +2256,7 @@ function editSession(sessionId) {
   const s = print.sessions.find(s => s.id === sessionId);
   if (!s) return;
   state.editingSessionId = sessionId;
+  state.sessionPrintId = state.currentPrintId;
   document.getElementById('session-modal-title').textContent = 'Edit Session';
   clearSessionForm();
   document.getElementById('s-date').value = s.date || '';
@@ -2261,20 +2425,26 @@ async function saveSession() {
     notes: document.getElementById('s-notes').value
   };
 
+  // Always target the print captured at modal-open time, not whatever
+  // state.currentPrintId happens to be now (it can drift if anything
+  // navigates while the modal is open).
+  const targetPrintId = state.sessionPrintId ?? state.currentPrintId;
+
   if (state.editingSessionId) {
-    const print = state.prints.find(p => p.id === state.currentPrintId);
+    const print = state.prints.find(p => p.id === targetPrintId);
     const idx = print.sessions.findIndex(s => s.id === state.editingSessionId);
     if (idx !== -1) {
       print.sessions[idx] = { ...print.sessions[idx], ...session };
-      await fetch(`/api/prints/${state.currentPrintId}`, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ sessions: print.sessions }) });
+      await fetch(`/api/prints/${targetPrintId}`, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ sessions: print.sessions }) });
     }
   } else {
-    await fetch(`/api/prints/${state.currentPrintId}/sessions`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(session) });
+    await fetch(`/api/prints/${targetPrintId}/sessions`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(session) });
   }
 
+  state.sessionPrintId = null;
   closeModal('add-session-modal');
   await loadGallery();
-  showDetail(state.currentPrintId);
+  showDetail(targetPrintId);
 }
 
 async function deletePrint() {
@@ -2766,6 +2936,17 @@ function wireListeners() {
   w('btn-show-gallery', 'click', () => showGallery());
   w('add-print-btn', 'click', () => openAddPrintModal());
   w('btn-logout', 'click', () => logout());
+  // Tap header (away from buttons/links) → scroll active view to top.
+  // iOS Safari does this on the status bar natively; Android has no equivalent, so we wire
+  // the same behavior here for both platforms. Whichever .view is .active is the scroller.
+  const _hdr = document.querySelector('.header');
+  if (_hdr) {
+    _hdr.addEventListener('click', (e) => {
+      if (e.target.closest('button, a, input, select, [role="button"]')) return;
+      const v = document.querySelector('.view.active');
+      if (v) v.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+  }
 
   // Tabs
   w('tab-prints', 'click', () => switchTab('prints'));
@@ -2847,35 +3028,95 @@ function wireListeners() {
   w('btn-close-add-album', 'click', () => closeModal('add-to-album-modal'));
   w('btn-quick-create-add', 'click', () => quickCreateAndAdd());
   w('btn-quick-create-immich', 'click', () => quickCreateAndAddImmich());
-  // Fullscreen tap zones: left 25% prev, right 25% next, center close; swipe left/right navigates
+  // Fullscreen: tap zones (left 25% prev / right 25% next / center close) + swipe-nav when not zoomed,
+  // 2-finger pinch-zoom (1×–5×), 1-finger pan when zoomed, double-tap to toggle 1×/2.5×.
   let _fsSwipeX = null, _fsSwipeY = null, _fsDidSwipe = false;
+  let _fsPinch = null, _fsPan = null, _fsLastTap = 0;
   const _fsEl = document.getElementById('fullscreen-overlay');
+  const _fsDist = (t1, t2) => Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
   _fsEl.addEventListener('touchstart', e => {
-    _fsSwipeX = e.touches[0].clientX;
-    _fsSwipeY = e.touches[0].clientY;
     _fsDidSwipe = false;
+    if (e.touches.length >= 2) {
+      _fsPinch = { d: _fsDist(e.touches[0], e.touches[1]), s: _fsZoom.scale, tx: _fsZoom.tx, ty: _fsZoom.ty };
+      _fsSwipeX = _fsSwipeY = null;
+      _fsPan = null;
+    } else if (e.touches.length === 1) {
+      if (_fsIsZoomed()) {
+        _fsPan = { x: e.touches[0].clientX, y: e.touches[0].clientY, tx: _fsZoom.tx, ty: _fsZoom.ty };
+        _fsSwipeX = _fsSwipeY = null;
+      } else {
+        _fsSwipeX = e.touches[0].clientX;
+        _fsSwipeY = e.touches[0].clientY;
+      }
+    }
   }, {passive: true});
+  _fsEl.addEventListener('touchmove', e => {
+    if (_fsPinch && e.touches.length >= 2) {
+      const d = _fsDist(e.touches[0], e.touches[1]);
+      let s = _fsPinch.s * (d / _fsPinch.d);
+      s = Math.max(1, Math.min(5, s));
+      _fsZoom.scale = s;
+      if (s <= 1.001) { _fsZoom.tx = 0; _fsZoom.ty = 0; }
+      _fsApplyZoom();
+      e.preventDefault();
+    } else if (_fsPan && e.touches.length === 1 && _fsIsZoomed()) {
+      _fsZoom.tx = _fsPan.tx + (e.touches[0].clientX - _fsPan.x);
+      _fsZoom.ty = _fsPan.ty + (e.touches[0].clientY - _fsPan.y);
+      _fsApplyZoom();
+      e.preventDefault();
+    }
+  }, {passive: false});
   _fsEl.addEventListener('touchend', e => {
-    if (_fsSwipeX === null) return;
-    const dx = e.changedTouches[0].clientX - _fsSwipeX;
-    const dy = e.changedTouches[0].clientY - _fsSwipeY;
-    _fsSwipeX = null;
-    if (Math.abs(dx) > 40 && Math.abs(dy) < 60) {
-      _fsDidSwipe = true;
-      dx < 0 ? fullscreenNavigate(1) : fullscreenNavigate(-1);
-    } else if (dy > 60 && Math.abs(dy) > Math.abs(dx) * 1.5) {
-      _fsDidSwipe = true;
-      closeFullscreen();
+    if (_fsPinch && e.touches.length < 2) {
+      _fsPinch = null;
+      if (_fsZoom.scale <= 1.001) _fsResetZoom();
+      _fsDidSwipe = true; // suppress the synthetic click after pinch
+    }
+    if (_fsPan && e.touches.length === 0) { _fsPan = null; _fsDidSwipe = true; }
+    // 1-finger swipe nav / close — only when not zoomed and we tracked a swipe start
+    if (_fsSwipeX !== null && !_fsIsZoomed()) {
+      const dx = e.changedTouches[0].clientX - _fsSwipeX;
+      const dy = e.changedTouches[0].clientY - _fsSwipeY;
+      if (Math.abs(dx) > 40 && Math.abs(dy) < 60) {
+        _fsDidSwipe = true;
+        dx < 0 ? fullscreenNavigate(1) : fullscreenNavigate(-1);
+      } else if (dy > 60 && Math.abs(dy) > Math.abs(dx) * 1.5) {
+        _fsDidSwipe = true;
+        closeFullscreen();
+      }
+    }
+    _fsSwipeX = _fsSwipeY = null;
+    // Double-tap toggle (only on a clean single-touch end, no pinch/pan in flight)
+    if (e.changedTouches.length === 1 && e.touches.length === 0 && !_fsPinch && !_fsPan) {
+      const now = Date.now();
+      if (now - _fsLastTap < 320) {
+        if (_fsIsZoomed()) _fsResetZoom();
+        else { _fsZoom = { scale: 2.5, tx: 0, ty: 0 }; _fsApplyZoom(); }
+        _fsDidSwipe = true; // suppress click that would otherwise navigate/close
+        _fsLastTap = 0;
+      } else {
+        _fsLastTap = now;
+      }
     }
   }, {passive: true});
   w('fullscreen-overlay', 'click', e => {
     if (_fsDidSwipe) { _fsDidSwipe = false; return; }
+    if (_fsIsZoomed()) return; // taps while zoomed do nothing — avoid surprise close/navigate
     const xPos = e.clientX;
     const vw = window.innerWidth;
     if (xPos < vw * 0.25) { fullscreenNavigate(-1); }
     else if (xPos > vw * 0.75) { fullscreenNavigate(1); }
     else { closeFullscreen(); }
   });
+  // Desktop: ctrl/cmd + wheel to zoom (matches browser image-zoom convention)
+  _fsEl.addEventListener('wheel', e => {
+    if (!e.ctrlKey && !e.metaKey) return;
+    e.preventDefault();
+    const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+    _fsZoom.scale = Math.max(1, Math.min(5, _fsZoom.scale * factor));
+    if (_fsZoom.scale <= 1.001) _fsResetZoom();
+    else _fsApplyZoom();
+  }, { passive: false });
   w('btn-close-add-print', 'click', () => closeModal('add-print-modal'));
   w('immich-search', 'input', (e) => searchImmich(e.target.value));
   w('btn-create-print', 'click', () => createPrint());

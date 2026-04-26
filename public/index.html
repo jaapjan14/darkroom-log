@@ -124,6 +124,11 @@
   .print-tag { font-family: 'IBM Plex Mono', monospace; font-size: 10px; padding: 0.2rem 0.5rem; background: var(--surface2); border: 1px solid var(--border); color: var(--text-dim); }
   .tag-add-input { font-family: 'IBM Plex Mono', monospace; font-size: 10px; padding: 0.2rem 0.5rem; width: 120px; display: none; }
   .tag-add-input.visible { display: inline-block; }
+  /* "In albums" chips on the print detail page */
+  .print-albums-row { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.6rem; align-items: center; }
+  .print-albums-label { font-family: 'IBM Plex Mono', monospace; font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-dim); margin-right: 0.25rem; }
+  .album-chip { font-family: 'IBM Plex Mono', monospace; font-size: 10px; padding: 0.2rem 0.5rem; background: transparent; border: 1px solid var(--safe); color: var(--safe); cursor: pointer; transition: background 0.12s ease; }
+  .album-chip:hover { background: var(--safe-glow); }
   /* SELECTION MODE */
   .gallery-item.selectable { cursor: pointer; }
   .gallery-item.selected img { opacity: 0.6; }
@@ -195,7 +200,7 @@
   /* FULLSCREEN */
   .fullscreen-overlay { display: none; position: fixed; inset: 0; background: #000; z-index: 300; cursor: zoom-out; }
   .fullscreen-overlay.active { display: flex; align-items: center; justify-content: center; }
-  .fullscreen-overlay img { max-width: 100%; max-height: 100%; object-fit: contain; }
+  .fullscreen-overlay img { max-width: 100%; max-height: 100%; object-fit: contain; touch-action: none; transform-origin: center center; will-change: transform; -webkit-user-select: none; user-select: none; -webkit-user-drag: none; }
   /* MAP */
   .exif-map { display: none; }
   /* LARGER PHOTO ON DESKTOP */
@@ -649,7 +654,7 @@
   </div>
 </div>
 
-<script src="/app.js?v=30" defer></script>
+<script src="/app.js?v=41" defer></script>
 <script>
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.getRegistrations().then(regs => regs.forEach(r => r.unregister()));

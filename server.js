@@ -18,18 +18,11 @@ const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const PASSWORD_HASH = process.env.PASSWORD_HASH || bcrypt.hashSync(process.env.APP_PASSWORD || 'darkroom', 10);
-const IMMICH_URL = process.env.IMMICH_URL || 'http://192.168.0.10:2283/api';
+const IMMICH_URL = process.env.IMMICH_URL || 'http://192.168.0.199:2283/api';
 const IMMICH_KEY = process.env.IMMICH_KEY || '';
 const DATA_FILE = '/data/prints.json';
 const ALBUMS_FILE = '/data/albums.json';
 const SETTINGS_FILE = '/data/settings.json';
-
-// Public-album branding — set via env so the repo stays generic. Leave blank to hide the brand block.
-const BRAND_NAME = process.env.BRAND_NAME || '';
-const BRAND_URL = process.env.BRAND_URL || '';
-const BRAND_SITE_LABEL = process.env.BRAND_SITE_LABEL || '';
-// Space-separated list of origins allowed to embed the public album (beyond 'self').
-const CSP_FRAME_ANCESTORS = process.env.CSP_FRAME_ANCESTORS || '';
 
 // Ensure data files exist
 if (!fs.existsSync(DATA_FILE)) fs.writeFileSync(DATA_FILE, JSON.stringify([]));
@@ -83,7 +76,7 @@ app.use((req, res, next) => {
     "media-src 'self' blob:; " +
     "connect-src 'self'; " +
     "object-src 'none'; " +
-    "frame-ancestors 'self'" + (CSP_FRAME_ANCESTORS ? ' ' + CSP_FRAME_ANCESTORS : '') + ";"
+    "frame-ancestors 'self' https://*.squarespace.com https://lakatua.me https://*.lakatua.me https://lakatua.com https://*.lakatua.com https://substack.com https://*.substack.com;"
   );
   next();
 });
@@ -762,42 +755,85 @@ app.get('/api/public/photo/:id', async (req, res) => {
       headers: { 'x-api-key': IMMICH_KEY }
     });
     const data = await r.json();
-    res.json({ description: data.exifInfo?.description || '' });
+    const exif = data.exifInfo || {};
+    res.json({
+      description: exif.description || '',
+      make: exif.make || '',
+      model: exif.model || '',
+      lens: exif.lensModel || '',
+      fNumber: exif.fNumber || '',
+      shutterSpeed: exif.exposureTime || '',
+      iso: exif.iso || '',
+      focalLength: exif.focalLength || '',
+      takenAt: data.localDateTime || data.fileCreatedAt || '',
+      city: exif.city || '',
+      state: exif.state || '',
+      country: exif.country || ''
+    });
   } catch(e) { res.json({ description: '' }); }
 });
 
 // Serve public album page
-function renderAlbumHtml(rawHtml) {
-  // Swap brand placeholders or strip the brand block entirely when unconfigured.
-  if (BRAND_NAME || BRAND_URL || BRAND_SITE_LABEL) {
-    return rawHtml
-      .replace(/<!--BRAND_START-->[\s\S]*?<!--BRAND_END-->/g, match =>
-        match
-          .replace(/{{BRAND_NAME}}/g, BRAND_NAME)
-          .replace(/{{BRAND_URL}}/g, BRAND_URL)
-          .replace(/{{BRAND_SITE_LABEL}}/g, BRAND_SITE_LABEL)
-      );
-  }
-  return rawHtml.replace(/<!--BRAND_START-->[\s\S]*?<!--BRAND_END-->/g, '');
-}
-
-app.get('/album/:slug', (req, res) => {
+app.get('/album/:slug', async (req, res) => {
   const albums = loadAlbums();
   const album = albums.find(a => a.slug === req.params.slug);
-  const html = renderAlbumHtml(fs.readFileSync(path.join(__dirname, 'public', 'album.html'), 'utf8'));
+  const html = fs.readFileSync(path.join(__dirname, 'public', 'album.html'), 'utf8');
   if (!album) return res.send(html);
   const base = `https://${req.get('host')}`;
   const coverId = album.cover || album.assets[0];
-  const imgTag = coverId ? `<meta property="og:image" content="${base}/api/public/thumb/${coverId}">` : '';
+
+  const imgTags = [];
+  if (coverId) {
+    const url = `${base}/api/public/thumb/${coverId}`;
+    imgTags.push(`<meta property="og:image" content="${url}">`);
+    imgTags.push(`<meta property="og:image:secure_url" content="${url}">`);
+    imgTags.push(`<meta property="og:image:type" content="image/jpeg">`);
+    try {
+      const r = await fetch(`${IMMICH_URL}/assets/${coverId}`, {
+        headers: { 'x-api-key': IMMICH_KEY },
+        signal: AbortSignal.timeout(2000)
+      });
+      const data = await r.json();
+      const w = data.exifInfo?.exifImageWidth;
+      const h = data.exifInfo?.exifImageHeight;
+      if (w && h) {
+        imgTags.push(`<meta property="og:image:width" content="${w}">`);
+        imgTags.push(`<meta property="og:image:height" content="${h}">`);
+        imgTags.push(`<meta property="og:image:alt" content="${album.title}">`);
+      }
+    } catch(e) {}
+  }
+
   const tags = [
     `<meta property="og:type" content="website">`,
     `<meta property="og:url" content="${base}/album/${album.slug}">`,
     `<meta property="og:title" content="${album.title}">`,
     `<meta property="og:description" content="View the full album on Darkroom Log">`,
-    imgTag,
+    ...imgTags,
     `<meta name="twitter:card" content="summary_large_image">`,
   ].filter(Boolean).join('\n');
   res.send(html.replace('</head>', `${tags}\n</head>`));
+});
+
+// Sitemap for search engines
+app.get('/sitemap.xml', (req, res) => {
+  const base = `https://${req.get('host')}`;
+  const albums = loadAlbums();
+  let lastmod;
+  try { lastmod = fs.statSync(ALBUMS_FILE).mtime.toISOString().slice(0, 10); } catch(e) {}
+  const urls = [
+    { loc: `${base}/`, priority: '1.0' },
+    ...albums.map(a => ({ loc: `${base}/album/${a.slug}`, priority: '0.8' }))
+  ];
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+${urls.map(u => `  <url>
+    <loc>${u.loc}</loc>${lastmod ? `\n    <lastmod>${lastmod}</lastmod>` : ''}
+    <priority>${u.priority}</priority>
+  </url>`).join('\n')}
+</urlset>`;
+  res.set('Content-Type', 'application/xml');
+  res.send(xml);
 });
 
 

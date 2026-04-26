@@ -33,7 +33,7 @@
   .ss-slide{position:absolute;inset:0;overflow:hidden;opacity:0;transition:opacity 1.5s ease-in-out;will-change:opacity}
   .ss-slide.ss-visible{opacity:1}
   .ss-slide .ss-bg{position:absolute;inset:-20px;background-size:cover;background-position:center;filter:blur(20px) brightness(0.35);transform:scale(1.1)}
-  .ss-slide .ss-img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;transform-origin:center center;will-change:transform}
+  .ss-slide .ss-img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;transform-origin:center center;will-change:transform;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-user-drag:none}
   /* animation applied via inline style in JS so it persists through fade-out */
   @keyframes kenburns{0%{transform:var(--kb-start)}100%{transform:var(--kb-end)}}
   .ss-counter{position:fixed;top:1rem;right:1rem;font-family:'IBM Plex Mono',monospace;font-size:11px;color:rgba(255,255,255,.5);z-index:401;transition:opacity .5s}
@@ -50,17 +50,53 @@
   .embed-hero-play{width:56px;height:56px;border:1.5px solid rgba(255,255,255,0.7);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:20px;color:#fff;padding-left:4px;transition:all 0.2s}
   .embed-hero:hover .embed-hero-play{border-color:#c8611a;color:#c8611a;transform:scale(1.05)}
   .ss-btn:hover{border-color:var(--safe);color:var(--safe)}
+  /* Detail view (tap a thumbnail) — library-style two-column on desktop, stacked on mobile.
+     Image is clickable to enter the pure-fullscreen viewer below it in the layer stack. */
+  .album-detail-view{display:none;position:fixed;inset:0;background:var(--bg);z-index:200;flex-direction:column;overflow:hidden}
+  .album-detail-view.active{display:flex}
+  .album-detail-header{height:52px;flex-shrink:0;border-bottom:1px solid var(--border);background:var(--surface);display:flex;align-items:center;padding:0 1rem;gap:.75rem}
+  .album-detail-back{background:transparent;border:1px solid var(--border);color:var(--text-dim);font-family:'IBM Plex Mono',monospace;font-size:14px;cursor:pointer;width:36px;height:32px;display:flex;align-items:center;justify-content:center;padding:0;line-height:1}
+  .album-detail-back:hover{border-color:var(--safe);color:var(--safe)}
+  .album-detail-counter{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text-dim);flex:1;text-align:center}
+  .album-detail-nav{display:flex;gap:.4rem}
+  .album-detail-prev,.album-detail-next{background:transparent;border:1px solid var(--border);color:var(--text-dim);font-family:'IBM Plex Mono',monospace;font-size:14px;cursor:pointer;width:32px;height:32px;display:flex;align-items:center;justify-content:center;padding:0;line-height:1}
+  .album-detail-prev:hover,.album-detail-next:hover{border-color:var(--safe);color:var(--safe)}
+  .album-detail-layout{flex:1;display:flex;flex-direction:column;overflow-y:auto;-webkit-overflow-scrolling:touch;min-height:0}
+  .album-detail-left{flex-shrink:0;background:#000;display:flex;align-items:center;justify-content:center;cursor:zoom-in;position:relative}
+  .album-detail-image{width:100%;height:auto;max-height:70vh;object-fit:contain;display:block;-webkit-user-select:none;user-select:none;-webkit-user-drag:none}
+  .album-detail-fs-hint{position:absolute;top:.75rem;right:.75rem;width:32px;height:32px;background:rgba(0,0,0,.55);border:1px solid #333;color:rgba(255,255,255,.75);font-size:14px;display:flex;align-items:center;justify-content:center;pointer-events:none}
+  .album-detail-right{flex-shrink:0;padding:1rem 1.25rem 2.5rem;background:var(--bg)}
+  .album-detail-desc{font-family:'IBM Plex Sans',sans-serif;font-size:15px;font-style:italic;color:var(--text);line-height:1.5;margin-bottom:1rem}
+  .album-detail-desc:empty{display:none}
+  .album-exif-table{margin-top:.75rem}
+  .album-exif-row{display:flex;align-items:flex-start;padding:.5rem 0;border-bottom:1px solid var(--border);gap:1rem}
+  .album-exif-row:last-child{border-bottom:none}
+  .album-exif-icon{color:var(--text-dim);font-size:14px;width:20px;flex-shrink:0;padding-top:2px}
+  .album-exif-label{font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim);width:90px;flex-shrink:0;padding-top:2px}
+  .album-exif-value{font-family:'IBM Plex Mono',monospace;font-size:14px;color:var(--text);flex:1;line-height:1.4}
+  .album-exif-sub{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text-dim);margin-top:3px}
+  @media(min-width:768px){
+    .album-detail-layout{flex-direction:row;overflow:hidden}
+    .album-detail-left{flex:3;height:100%;overflow:hidden;min-width:0}
+    .album-detail-image{max-width:100%;max-height:100%;width:auto;height:auto}
+    .album-detail-right{flex:2;overflow-y:auto;border-left:1px solid var(--border);max-width:480px;padding-bottom:2rem}
+  }
+  /* Pure fullscreen viewer — opened by tapping the photo in detail view. No metadata,
+     no counter, just the image with pinch-zoom. */
+  .album-fs-overlay{display:none;position:fixed;inset:0;background:#000;z-index:350;align-items:center;justify-content:center}
+  .album-fs-overlay.active{display:flex}
+  .album-fs-overlay img{max-width:100%;max-height:100%;object-fit:contain;touch-action:none;transform-origin:center center;will-change:transform;-webkit-user-select:none;user-select:none;-webkit-user-drag:none}
+  .album-fs-close{position:fixed;top:1rem;right:1rem;width:40px;height:40px;background:rgba(0,0,0,.55);border:1px solid #333;color:#fff;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:401}
+  .album-fs-close:hover{border-color:var(--safe);color:var(--safe)}
 </style>
 </head>
 <body>
 <div class="header">
   <div class="header-left">
-    <!--BRAND_START-->
-    <a class="header-brand" href="{{BRAND_URL}}" target="_blank" rel="noopener">
-      <span class="header-brand-name">{{BRAND_NAME}}</span>
-      <span class="header-brand-url">{{BRAND_SITE_LABEL}}</span>
+    <a class="header-brand" href="https://lakatua.me" target="_blank" rel="noopener">
+      <span class="header-brand-name">Jacob Lakatua Photography</span>
+      <span class="header-brand-url">lakatua.me ↗</span>
     </a>
-    <!--BRAND_END-->
     <div class="header-nav">
       <button class="header-nav-btn" id="btn-slideshow">▶ Slideshow</button>
     </div>
@@ -98,6 +134,30 @@
   </div>
 </div>
 
-<script src="/album.js?v=27"></script>
+<div class="album-detail-view" id="album-detail-view">
+  <div class="album-detail-header">
+    <button class="album-detail-back" id="album-detail-back" title="Back to grid">‹</button>
+    <div class="album-detail-counter" id="album-detail-counter"></div>
+    <div class="album-detail-nav">
+      <button class="album-detail-prev" id="album-detail-prev" title="Previous">‹</button>
+      <button class="album-detail-next" id="album-detail-next" title="Next">›</button>
+    </div>
+  </div>
+  <div class="album-detail-layout">
+    <div class="album-detail-left" id="album-detail-left">
+      <img class="album-detail-image" id="album-detail-image" src="" alt="">
+      <div class="album-detail-fs-hint">⤢</div>
+    </div>
+    <div class="album-detail-right">
+      <div class="album-detail-desc" id="album-detail-desc"></div>
+      <div class="album-exif-table" id="album-exif-table"></div>
+    </div>
+  </div>
+</div>
+<div class="album-fs-overlay" id="album-fs-overlay">
+  <img id="album-fs-img" src="" alt="">
+  <button class="album-fs-close" id="album-fs-close" title="Close">✕</button>
+</div>
+<script src="/album.js?v=32"></script>
 </body>
 </html>

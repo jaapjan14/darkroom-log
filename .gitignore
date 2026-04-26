@@ -2,7 +2,15 @@ DOCKERHUB.md
 node_modules/
 data/prints.json
 data/filter-cache.json
+data/albums.json
+data/auth.json
 *.bak-*
 *.env
 .DS_Store
-
+# Misfired shell-glob artefact — unexpanded `{public,data}` directory
+{public,data}/
+# NAS-side pre-rename working copies, not part of the shipped app
+public/darkroom-*
+# Pre-`public/` reorg leftovers — present on NAS root but never served
+/app.js
+/index.html

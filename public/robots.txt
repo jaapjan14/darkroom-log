@@ -1,0 +1,46 @@
+# Sitemap
+Sitemap: https://darkroom.jjlnas.com/sitemap.xml
+
+# Content preferences (contentsignals.org / draft-romm-aipref-contentsignals)
+Content-Signal: ai-train=no, search=yes, ai-input=no
+
+# Social / link-preview crawlers — allow so OG cards render
+User-agent: facebookexternalhit
+Allow: /
+
+User-agent: Facebot
+Allow: /
+
+User-agent: meta-externalagent
+Allow: /
+
+User-agent: meta-externalfetcher
+Allow: /
+
+User-agent: Twitterbot
+Allow: /
+
+User-agent: LinkedInBot
+Allow: /
+
+User-agent: Slackbot
+Allow: /
+
+User-agent: Slackbot-LinkExpanding
+Allow: /
+
+User-agent: Discordbot
+Allow: /
+
+User-agent: TelegramBot
+Allow: /
+
+User-agent: WhatsApp
+Allow: /
+
+User-agent: Applebot
+Allow: /
+
+# Block everything else (search crawlers default-on for / would be fine, but keeping prior behavior)
+User-agent: *
+Disallow: /
