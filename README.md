@@ -2,9 +2,18 @@
 
 A self-hosted darkroom printing log and analog photo library, built for Immich integration.
 
-![Darkroom Log Screenshot](screenshot.png)
+![Prints tab — searchable, tag-filtered grid of every print](screenshots/01-prints-grid.png)
 
-![Library View](screenshot2.png)
+Each print page records full exposure data (shutter / aperture / ISO / lens), tags, every print
+session you've made of it (paper, enlarger, lens, exposure, dodge/burn notes), and chips for any
+album the print belongs to so you can jump straight to that album from the print itself.
+
+![Print detail with In Albums chip](screenshots/02-print-detail.png)
+
+Albums double as **public, shareable galleries** — each gets its own URL with a custom branded
+header, optional slideshow, and pinch-zoom on every photo. No login required for viewers.
+
+![Public album with branded header](screenshots/03-public-album.png)
 
 ## Features
 
