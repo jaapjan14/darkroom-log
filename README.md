@@ -15,6 +15,18 @@ header, optional slideshow, and pinch-zoom on every photo. No login required for
 
 ![Public album with branded header](screenshots/03-public-album.png)
 
+## What's new in v1.5.43
+
+- **Server-side sized share** — the Share button now goes through `sharp` + mozjpeg on the server with JPEG quality iterated to a byte target. Sizes: **S** (≤500 KB / 1200 px) for SMS, **M** (≤1.5 MB / 2400 px) for messaging, **L** (≤2.7 MB / 4200 px — hard-capped for forum uploads), **XL** (full original Q100). Encoded outputs are disk-cached keyed by Immich `updatedAt` so a Lightroom republish auto-invalidates.
+- **Two-step share modal** — Safari iOS revoked `navigator.share()` activation when the fetch took too long; the share button now opens a "Preparing image…" modal first and flips to "Tap to share" once the blob is ready. Desktop falls back to a Blob-URL save-to-disk with the same spinner.
+- **Tiered progressive image loading** — detail and fullscreen views load thumbnail → small → preview → original on mobile (preview → original on desktop). Each tier swaps in as the next preloads; stale upgrades are dropped on navigation.
+- **Race-free navigation** — nav-generation counter drops async results from superseded navigations; 400 ms cooldown prevents accidental double-skip from a stray click + swipe.
+- **Phone-landscape detail view** — image full-width on top, metadata below, tab bar hidden, header pinned to the bottom of the viewport so Back is always reachable.
+- **iOS double-tap fix** — synthetic clicks fired ~300 ms after a touch double-tap no longer leak into the fullscreen viewer's prev/next/close logic.
+- **Force Refresh button (🔄)** in the detail view — one-tap SW cache flush + reload escape hatch.
+- **Public album viewer parity** — public `/album/<slug>` fullscreen now uses the same `zoom.js` controller as the main app (pinch / wheel / drag-pan / double-tap-toggle to 2.5×) plus 2-stage progressive load. Hi-res originals actually decode now (CSS `will-change` trap fixed).
+- **Library shift-click range select**, archive/delete-disappear-from-grid fixes, "share already in progress" alert suppressed, archived/trashed photos no longer reappear after a refetch.
+
 ## What's new in v1.5
 
 - **In-Albums chips on every print and Recent photo** — see at a glance which Darkroom albums each image is in; click to jump straight to the album.
