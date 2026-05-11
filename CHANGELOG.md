@@ -1,5 +1,304 @@
 # Changelog
 
+## v1.5.42 (2026-05-01)
+
+### CSP — allow Astro portfolio iframe embed
+- Added `https://lakatua-me.pages.dev` and `https://*.lakatua-me.pages.dev`
+  to the `frame-ancestors` directive in server.js, so the Astro portfolio's
+  `<DarkroomBanner album={slug} />` component can iframe
+  `https://darkroom.jjlnas.com/album/<slug>?embed`. (Already documented in
+  the project's reference docs; this entry exists so the CHANGELOG matches
+  the deployed CSP.)
+
+### Two-step share UX — fixes Safari iOS NotAllowedError on slow connections
+- Previously the Share button called `navigator.share()` directly with the
+  fetched blob. On slow connections — or with the larger images coming
+  from the new server-side encoder (v1.5.43) — the fetch could take long
+  enough that iOS Safari revoked the transient user-activation granted by
+  the original tap, surfacing as `NotAllowedError`. The share itself
+  hadn't started; the OS just refused to show the share sheet.
+- Phase 1: tap the Share size button → modal opens with a spinner
+  ("Preparing image…"). The fetch runs while the modal is up.
+- Phase 2: when the blob is ready, the modal flips to a green "Tap to
+  share" button. The user's *fresh* tap on that button is the gesture
+  that's passed into `navigator.share()` — well within Safari's
+  transient-activation window. AbortError (cancel) and InvalidStateError
+  (double-tap re-entry) are still suppressed.
+- Desktop fallback unchanged: the Mac share sheet has no Save-to-Disk
+  option, so desktop bypasses share() entirely and triggers a Blob-URL
+  download instead. Visual feedback: same spinner during the fetch so the
+  user knows something is happening on slow connections.
+
+### Phone-landscape detail view
+- Phones in landscape (width > 600px from regular media query but
+  `max-height: 500px`) used to render the detail layout's two-pane grid,
+  squeezing the photo into the left pane and the metadata into a narrow
+  right column.
+- Now landscape on phones drops back to a stacked layout: photo
+  full-width at the top (max 92vh, object-fit:contain), metadata below
+  in its natural reading order.
+- Tab bar is hidden in this orientation — rotate to portrait to switch
+  tabs. Header is pinned to the **bottom** of the viewport so Back / Out
+  are still reachable while the image gets the full top of the screen.
+- iPad landscape (height ~768px+) is excluded by the `max-height: 500px`
+  ceiling and continues to use the grid layout.
+
+### iOS double-tap → synthetic click suppression in the fullscreen viewer
+- iOS Safari fires a synthetic click event ~300ms after the second
+  touchend of a double-tap. zoom.js handles the touch-double-tap
+  immediately to toggle zoom, so by the time the synthetic click arrives
+  the "bail if zoomed" guard in the click handler doesn't fire (zoom has
+  already toggled back off, or the touch state has settled). Result: a
+  double-tap to zoom would also trigger the click handler's
+  prev/next/close action a fraction of a second later.
+- Stamp `_fsLastDoubleTapAt = Date.now()` from zoom.js's onDoubleTap
+  callback, and drop any click on the fullscreen image that lands within
+  600ms of it.
+
+### Force Refresh button in the print/photo detail view
+- New `🔄 Refresh` button (data-action="forceRefresh") next to the existing
+  detail-view header buttons. Clears the service-worker cache and reloads.
+- Escape hatch for when a stale SW cache is suspected — saves the user
+  from having to know about DevTools / Application / unregister.
+
+### Race-free navigation across all photo views
+- A monotonically increasing nav-generation counter is bumped on every
+  navigation (Library detail, Album detail, Print detail, fullscreen
+  prev/next, swipe). Async work (fetches, image decodes, etc.) captures
+  the gen value at start and bails when it returns if a newer nav has
+  happened in the meantime.
+- Fixes: on slow connections, tapping past the cooldown to skip several
+  photos would render whichever stale fetch landed last — frequently the
+  wrong image for the current URL. Now stale results are dropped silently.
+- A 400ms cooldown on the nav handlers prevents a stray double-click or a
+  queued click-plus-swipe from skipping an image when the user only
+  intended to advance once.
+- Applied to: `renderRecentDetail`, `showDetail`, `_fsLoadProgressive`,
+  and the prev/next/close paths in the fullscreen and detail overlays.
+
+### Progressive image loading on detail / fullscreen
+- Detail and fullscreen views now load through a tiered progressive chain
+  instead of going straight to the full preview.
+- **Mobile** (multi-signal: UA, touch points, viewport, pointer:coarse):
+  thumbnail → small → preview → original. Mobile's slower data and the
+  detail view's smaller layout don't need the full original up-front;
+  showing the thumbnail in <100ms and upgrading in the background feels
+  instant.
+- **Desktop**: preview → original. Skip the lower tiers because desktop
+  is typically fast and the larger viewport asks for detail sooner.
+- Implementation is generic: on `img.onload`, look at `data-next`,
+  preload that source in a detached `Image`, then swap `img.src` on
+  preload-complete. The browser fires onload again, the function runs
+  again, and if `data-next` is set anew the chain advances. Stale-tier
+  guard (`img.dataset.next !== next`) drops upgrades after the user has
+  navigated away.
+
+---
+
+## v1.5.43 (2026-05-05)
+
+### Server-side sized download — replaces v1.5.33's client-side canvas downscale
+- The S/M/L/XL share menu (added v1.5.33) previously downloaded the full
+  Immich preview JPEG and downscaled it client-side via canvas. That
+  worked but: (a) hit the device's memory hard for large originals on
+  iOS, (b) couldn't guarantee a byte ceiling, (c) burned bandwidth even
+  on the smallest tier, (d) JPEG re-encode from canvas is consistently
+  worse than mozjpeg.
+- New `/api/immich/download/:id?size=<small|medium|large|xlarge>` does the
+  resize + JPEG encode on the server using `sharp` + mozjpeg.
+- **Size targets** (max longest edge / max byte ceiling):
+  - `small`  — 1200px / 500 KB.  iMessage / SMS-friendly.
+  - `medium` — 2400px / 1.5 MB. General messaging (Signal, WhatsApp).
+  - `large`  — 4200px / **2.7 MB hard ceiling**. Sized specifically for
+                **the Leica forum's 2.7 MB upload limit** — the encoder
+                iterates JPEG quality down (start q=95, step -5, floor
+                q=50) until the output lands under the ceiling.
+  - `xlarge` — full original, Q100, streamed through unchanged.
+- New dependency: `sharp` (added to package.json — verify it's in the
+  Dockerfile's runtime stage).
+- Removed client-side canvas downscale from `shareRecent`.
+
+### Disk cache for the new sized download endpoint
+- Encoded outputs are written to `/data/share-cache/<assetId>-<size>-<tag>.jpg`,
+  where `<tag>` is the asset's Immich `updatedAt` (stripped of dashes /
+  colons / dots / TZ markers).
+- Cache hit returns the file directly with `X-Cache: HIT`. Cache miss
+  re-encodes and writes via an atomic temp+rename so concurrent
+  generations don't clobber.
+- `updatedAt`-based key means an Immich republish from Lightroom
+  auto-invalidates without needing a manual flush — old entries become
+  orphans that can be pruned later.
+- Same disk-cache pattern was retrofitted onto the existing thumbnail
+  endpoint for a new `?size=small` tier (1800px / q80, also disk-cached)
+  used by the progressive chain's mid-tier on mobile.
+
+### `visibility: 'timeline'` on /api/immich/recent
+- v1.5.40 fix moved over from `/api/immich/recent` to ensure
+  `/search/metadata` calls pass `visibility: 'timeline'` on both the
+  `taken`-sort branch and the upload-sort branch. (This may have already
+  been live as part of the v1.5.40 deploy; included here for
+  completeness — verify against `git show` before tagging.)
+
+### Cache bumps
+- `app.js?v=50` → `v=73` across the changes above
+- SW shell `darkroom-v69` → `darkroom-v95`
+
+---
+
+## v1.5.41 (2026-04-29)
+
+### Delete button — align with v1.5.39 archive pattern
+- Companion fix to v1.5.40. Server side was already correct: Immich's `/search/metadata` excludes trashed items by default (verified empirically — 0 trashed assets in a 1000-asset default response), and v1.5.40's `visibility: 'timeline'` excludes archived too. But the *client* delete handler (`deleteImmichAsset`) wasn't following the v1.5.39 archive pattern, so a deleted photo could persist in the grid until the next full refetch.
+- Specifically, the old delete code only filtered `state.displayedItems` and `state.recentItems`. It missed `state.recentSmartResults` (the "Smart Search" cache) and never called `applyRecentFilters()` (the canonical re-render path). So if you deleted from a smart-search result set, or stayed on the same view long enough, the deleted tile could still be sitting in the rendered DOM.
+- Fix: filter all three source lists (`recentItems`, `displayedItems`, `recentSmartResults`), drop `recentMeta[id]`, then call `applyRecentFilters()` — same shape as the archive handler.
+- Bumped `app.js?v=51` → `v=52` and SW shell cache `darkroom-v68` → `darkroom-v69`.
+
+---
+
+
+## v1.5.40 (2026-04-29)
+
+### Archived (and trashed) photos no longer reappear in the Library grid
+- After v1.5.39, archive succeeded server-side and the photo correctly disappeared from the grid client-side — but on any subsequent fetch (scroll, tab switch, reload) archived photos came right back. Same for a deleted baby photo.
+- Root cause: `/api/immich/recent` was calling Immich's `/search/metadata` with `{ size, page }` and no visibility filter. Immich's metadata search returns *all* assets by default (timeline + archive), so every poll re-populated `state.recentItems` with the just-archived assets, undoing the v1.5.39 client-side filter.
+- Fix: pass `visibility: 'timeline'` on both POST bodies in `/api/immich/recent` (the `taken`-sort branch and the upload-sort branch). Matches the pattern already used by `/api/immich/archived` (which passes `visibility: 'archive'`). Server change only — no client/cache bump needed.
+
+---
+
+
+## v1.5.39 (2026-04-29)
+
+### Archive button — actually removes the photo from the Library grid
+- v1.5.38 fixed the server-side 204-parse bug, so archive no longer surfaces the spurious "Archive failed" alert. But the photo wasn't disappearing from the Library grid afterwards, even though the archive succeeded server-side.
+- Root cause: v1.5.32's UI-refresh code called `renderRecentGrid()` with no arguments. That function expects an `items` array, sets `state.displayedItems = items`, and renders. With `items === undefined`, it was setting `state.displayedItems` to `undefined` and then iterating nothing — silent no-op. The archived photo stayed in the DOM because the grid was never re-rendered with the filtered list.
+- Fix: drop the archived ids from every list that feeds the Library grid (`state.recentItems`, `state.displayedItems`, `state.recentSmartResults`) and then call `applyRecentFilters()` — the canonical path that picks the right source list, runs the active filter chips / search query, and re-renders. Same path the rest of the app uses.
+
+### Cache
+- Bumped `app.js?v=50` → `v=51` and SW shell cache `darkroom-v67` → `darkroom-v68`.
+
+---
+
+
+## v1.5.38 (2026-04-28)
+
+### Archive button — actual root cause fixed (server-side)
+- v1.5.32 hardened the *client* against an undefined-state crash in `archiveImmichAssets`, but Jacob kept seeing "Archive failed" even though the photo was actually disappearing from the library. The real bug was on the server: `/api/immich/assets/archive` and `/api/immich/assets/restore` were doing `await r.json()` on Immich's response, but Immich's bulk-update endpoint returns **HTTP 204 No Content with an empty body**. Calling `.json()` on an empty body throws `Unexpected end of JSON input` → falls into the catch → returns HTTP 500 → client's `r.ok` is false → "Archive failed" alert. The archive itself succeeded on the Immich side every time; only the proxy was lying.
+- Fixed both endpoints by returning `res.status(204).end()` instead of trying to parse a body that isn't there. v1.5.32's defensive client-side guards stay (good belt-and-suspenders) but they're no longer the active fix.
+- Requires a container restart so server.js change takes effect (no client cache change).
+
+### Cache
+- No client-side bumps. server.js change only.
+
+---
+
+
+## v1.5.37 (2026-04-28)
+
+### Public album fullscreen viewer — actually decodes the hi-res original now
+- v1.5.36 wired up the makeZoomer + 2-stage progressive load, but zooming still showed soft pixels even on a known hi-res photo. Root cause: `album.html`'s `.album-fs-overlay img` CSS rule had a baked-in `will-change: transform`. zoom.js dynamically toggles `style.willChange = 'transform'` during gestures and clears it (`= ''`) 220 ms after the last interaction so Safari can re-rasterize from the source bitmap — but with the CSS rule asserting `will-change: transform` permanently, clearing the inline style fell back to CSS and Safari stayed in "composited at layout size" mode, ignoring the high-res decode.
+- The main app's `index.html` already had the explicit comment about this trap (lines 203–205) and intentionally omitted both `will-change` and `transform-origin` from its `.fullscreen-overlay img` rule. The album page never inherited that lesson. Fixed by deleting `will-change:transform` and `transform-origin:center center` from the album rule and copying the same warning comment over.
+- Net effect: zoom in on a public-album photo now actually shows real detail from the originally-uploaded hi-res file (after the brief preview→original swap finishes).
+
+### Cache
+- Bumped SW shell cache `darkroom-v66` → `darkroom-v67`. No JS changes; CSS-only fix in `album.html`.
+
+---
+
+
+## v1.5.36 (2026-04-28)
+
+### Public album fullscreen viewer — full Library-tab zoom parity
+Same `makeZoomer` controller the main app's fullscreen viewer uses (from the existing `/zoom.js` — **not modified**, just included now on the public page) and the same 2-stage progressive load.
+
+- **`zoom.js` is now loaded on the public album page** via a new `<script src="/zoom.js?v=2">` tag in `album.html`, before `album.js`. Zero edits to `zoom.js` itself (it remains `v=2`, see `feedback-zoom-js-frozen.md`).
+- **`album.js` — replaced the custom album-fs zoom with `makeZoomer`.** Out: the inline `albFs.scale/tx/ty` state, the touch pinch / pan / double-tap detection, the ctrl+wheel zoom handler, and the desktop dblclick toggle that v1.5.35 had added. In: a single `_albFsZoomer` reference, attached on `albumFsOpen` (after the image's first stage loads, since `clamp()` reads clientWidth/Height), reset on `albumFsNavigate` (the `<img>` element survives, so the zoomer carries through), destroyed on `albumFsClose`. Pinch / wheel / ctrl+wheel / drag-pan / native dblclick / mobile double-tap are all owned by zoom.js now — variable scale up to 8×, mouse-anchored zoom-toward-cursor, pan-when-zoomed.
+- **2-stage progressive image load (`_albFsLoadProgressive`).** Mirrors the main app's `_fsLoadProgressive`: set `img.src` to `/api/public/thumb/:id` first (Immich preview ≈1440px, decodes fast), preload `/api/public/original/:id` in a detached `<Image>`, then re-set `img.src` to the original on preload complete. The `src=` re-assignment forces Safari to re-decode the bitmap at the natural resolution — without it, Safari caches the initial-decode bitmap at layout size and zoomed views look soft no matter how high-res the source. This is the actual fix for the "zoom lacks detail" symptom after yesterday's hi-res re-upload.
+- **Wire-up cleanup.** `wireAlbumFs` is now just the swipe-to-nav-or-close handler (when not zoomed) plus the click handler. The click handler keeps the v1.5.35 bounce guard (drop click-2 within 500 ms of opening) and the 280 ms deferred prev/next/close — zoom.js's `onDoubleTap` callback (registered in `_albFsAttachZoomer`) cancels the deferred close on both desktop dblclick and mobile double-tap.
+- **Slideshow (`ss-overlay`) is unchanged** from v1.5.35 — kenburns still runs against the custom `ssZoom` path, plus the desktop dblclick zoom toggle from v1.5.35. No `makeZoomer` there because zoom.js's transform would fight kenburns (this was the v1.5.35 zoom.js incident).
+
+### Cache
+- Bumped `album.js?v=33` → `v=34` and SW shell cache `darkroom-v65` → `darkroom-v66`. `zoom.js` is unchanged at `v=2`. `app.js` is unchanged at `v=50`.
+
+---
+
+
+## v1.5.35 (2026-04-28)
+
+### Public album (`/album/<slug>`) — desktop double-click zoom + bounce-fix
+Three small additions to `album.js` only. `app.js`, `zoom.js`, and the main app are not touched.
+
+- **Album fullscreen viewer (`album-fs-overlay`) — bounce guard.** Double-clicking the photo in the album detail view was opening the pure-fullscreen viewer on click 1, then closing it on click 2 because click 2 landed on the overlay's center 50% which was wired to `albumFsClose`. `albumFsOpen` now stamps `_albFsJustOpenedAt = Date.now()` and the overlay's click handler drops any click that arrives within 500 ms of it. Click 2 of the bouncing dblclick is therefore a no-op and fullscreen stays open.
+- **Album fullscreen viewer — desktop double-click toggles zoom.** Previously desktop only had ctrl/cmd+wheel zoom in this viewer; touch had double-tap. New `dblclick` listener on `album-fs-img` mirrors the touch double-tap: cancels any pending single-click action and toggles between 1× and 2.5× (same scale numbers as the existing touch path). Single-click prev/next/close is now deferred 280 ms so the dblclick can cancel it before it fires (matches the main app's fullscreen-overlay click pattern).
+- **Slideshow (`ss-overlay`) — desktop double-click toggles zoom.** New `dblclick` listener on each of `ss-img-a` / `ss-img-b` toggles `ssZoom` between 1× and 2.5×, calling the existing `applyZoomTransform()`. Touch double-tap was already in place; this brings desktop to parity. No bounce guard needed here since the slideshow doesn't open from a click on a photo, so click-2 of a dblclick can't hit a "just-opened" close path.
+
+### Cache
+- Bumped `album.js?v=32` → `v=33` and SW shell cache `darkroom-v64` → `darkroom-v65`.
+
+---
+
+
+## v1.5.34 (2026-04-28)
+
+### Share button — silence the spurious "share() is already in progress" alert
+- The macOS / iOS native share sheet was opening fine on first tap, but a duplicate click (mobile WebKit can dispatch a click twice; or the user just double-tapped) reentered `shareRecent` while the first `navigator.share()` was still pending. Web Share rejects the second call with `InvalidStateError: share() is already in progress` — the share itself succeeded, but the user saw a "Share failed" alert behind the share sheet anyway.
+- Added an `_shareInFlight` module-level guard so re-entries while a share is pending are dropped on the floor. Also extended the catch-block whitelist to swallow `InvalidStateError` alongside the existing `AbortError` (user-cancel) suppression — both are routine, not real failures.
+
+### Cache
+- Bumped `app.js?v=49` → `v=50` and SW shell cache `darkroom-v63` → `darkroom-v64`.
+
+---
+
+
+## v1.5.33 (2026-04-28)
+
+### Share button — pick S / M / L / XL
+- Detail view's single `↑ Share` is now a 4-button group: `↑ S`, `↑ M`, `↑ L`, `↑ XL`. Tooltips spell out the trade-off (size on disk vs. resolution).
+- Sizes:
+  - **Small** — ~600px long edge, ~150 KB. Best for SMS / very low-bandwidth chat.
+  - **Medium** — ~1080px long edge, ~500 KB. Sane default for messaging apps (iMessage, WhatsApp, Signal).
+  - **Large** — ~1440px long edge, ~1 MB. Immich's preview tier straight through, no client downscale.
+  - **X-Large** — full original. Multi-MB for high-res JPEGs / RAW / HEIC; for printing, archival, or detail review.
+- Implementation: Small/Medium pull the same `/api/immich/preview/:id` JPEG that Large does, then downscale client-side via canvas (`_downscaleBlob`). XL hits `/api/immich/original/:id` unchanged. Saves a server-side resize pipeline and keeps everything in-browser.
+- All four sizes still go through the existing iOS-share-friendly path: `.jpg` extension forced, `navigator.canShare` guarded, `AbortError` swallowed, otherwise a clear error alert.
+
+### Cache
+- Bumped `app.js?v=48` → `v=49` and SW shell cache `darkroom-v62` → `darkroom-v63`.
+
+---
+
+
+## v1.5.32 (2026-04-28)
+
+### Share button — use preview-size JPEG instead of full original
+- Hi-res additions to the library (multi-MB JPEGs, plus the occasional RAW/HEIC/TIFF) were tripping `navigator.canShare` on iOS Safari, surfacing as "Share failed" alerts. The Recent detail view's `↑ Share` button now fetches a new endpoint, `/api/immich/preview/:id`, which proxies Immich's `?size=preview` thumbnail (~1440px long edge, typically <1 MB JPEG). That fits comfortably under the Web Share API's per-file limits and is high enough quality for messaging / social.
+- `shareRecent` rewrites the filename to `.jpg` regardless of the original extension, since the preview is always JPEG. Hardened the `navigator.share` / `canShare` guards so an unsupported browser shows a clear "Try Download instead" message instead of the old generic failure.
+
+### Archive button — UI refresh no longer masquerades as a server failure
+- The detail-view Archive button was showing "Archive failed." even when the underlying Immich PUT actually succeeded (HTTP 204). Cause: `archiveImmichAssets` ran `state.currentImmichAlbumAssets.filter(...)` after the PUT, but that field is undefined when the detail view is opened from the Recent feed or search results — the throw landed in the same `catch` block as the network failure, indistinguishable to the user.
+- Split the function so the alert only fires on a non-OK response. Local-state mutation now wraps each step in array guards (`Array.isArray`), also patches `state.recentItems` if present (so the photo disappears from the Recent grid right away), and a defensive `console.warn` swallows any post-success UI hiccup. Restore got the same treatment.
+- New `/api/immich/preview/:id` server endpoint optionally takes `?size=thumbnail` if anything else later wants the small variant.
+
+### Cache
+- Bumped `app.js?v=47` → `v=48` and SW shell cache `darkroom-v61` → `darkroom-v62`.
+
+---
+
+
+## v1.5.31 (2026-04-28)
+
+### Library — shift-click range select
+- Library multi-select previously only supported one-by-one tap toggle; the Album editor and Immich tab already had shift-click range select via `toggleAlbumPhotoSelect` / `toggleImmichAsset`. Brought Library to parity:
+  - Click dispatcher (`recentItemClick`) now passes the click event through.
+  - `toggleAssetSelect` accepts `(assetId, e)` and tracks `lastRecentSelectedIdx`. Shift-click extends the range from the last single-tap anchor to the current tile (using `state.displayedItems` for index lookup, so the range respects whatever filter / smart-search subset is on screen).
+  - `enterSelectMode` / `exitSelectMode` reset the anchor so a fresh select session doesn't inherit a stale range start.
+- Side fix: tap selection now re-renders the grid via `renderRecentGrid`, so the inner `.select-check` circle correctly fills green on toggle. Before, only the gallery-item's `.selected` class was being patched element-side, so the outline + dim appeared but the green checkmark stayed gray — selections were tracked correctly internally, just visually understated.
+
+### Cache
+- Bumped `app.js?v=46` → `v=47` and SW shell cache `darkroom-v60` → `darkroom-v61`.
+
+---
+
+
 ## v1.5.30 (2026-04-26)
 
 ### Print detail — show albums the print is in

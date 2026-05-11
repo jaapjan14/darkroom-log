@@ -4,19 +4,6 @@ let ssActiveSlot='a',ssIndex=0,ssPausedState=false,ssTimer=null,ssHideTimer=null
 let ssAudio=null,ssAudioFade=null,ssDescVisible=true,ssCleanupTimers=[];
 let ssZoom={scale:1,tx:0,ty:0}; // pinch-zoom inside the slideshow overlay
 
-// Cross-tab music coordination — stop music in any other darkroom tab when this one takes over
-const _bc = (() => { try { return new BroadcastChannel('darkroom-music'); } catch(e) { return null; } })();
-if (_bc) _bc.addEventListener('message', e => { if (e.data === 'stop') stopMusic(); });
-
-const KB=[
-  {s:'scale(1.08) translate(-3%,-3%)',e:'scale(1.25) translate(2%,2%)'},
-  {s:'scale(1.25) translate(3%,2%)',e:'scale(1.08) translate(-2%,-2%)'},
-  {s:'scale(1.08) translate(4%,-4%)',e:'scale(1.3) translate(-3%,3%)'},
-  {s:'scale(1.3) translate(-4%,3%)',e:'scale(1.08) translate(3%,-2%)'},
-  {s:'scale(1.08) translate(0%,-5%)',e:'scale(1.25) translate(0%,3%)'},
-  {s:'scale(1.25) translate(0%,4%)',e:'scale(1.08) translate(0%,-3%)'},
-];
-
 function isZoomed(){return ssZoom.scale>1.001;}
 function applyZoomTransform(){
   const img=document.getElementById('ss-img-'+ssActiveSlot);
@@ -33,6 +20,20 @@ function resetZoom(){
   // clear leftover transforms on both slot images
   ['a','b'].forEach(s=>{const im=document.getElementById('ss-img-'+s);if(im)im.style.transform='';});
 }
+
+// Cross-tab music coordination — stop music in any other darkroom tab when this one takes over
+const _bc = (() => { try { return new BroadcastChannel('darkroom-music'); } catch(e) { return null; } })();
+if (_bc) _bc.addEventListener('message', e => { if (e.data === 'stop') stopMusic(); });
+
+const KB=[
+  {s:'scale(1.08) translate(-3%,-3%)',e:'scale(1.25) translate(2%,2%)'},
+  {s:'scale(1.25) translate(3%,2%)',e:'scale(1.08) translate(-2%,-2%)'},
+  {s:'scale(1.08) translate(4%,-4%)',e:'scale(1.3) translate(-3%,3%)'},
+  {s:'scale(1.3) translate(-4%,3%)',e:'scale(1.08) translate(3%,-2%)'},
+  {s:'scale(1.08) translate(0%,-5%)',e:'scale(1.25) translate(0%,3%)'},
+  {s:'scale(1.25) translate(0%,4%)',e:'scale(1.08) translate(0%,-3%)'},
+];
+
 async function init(){
   const r=await fetch('/api/public/album/'+slug);
   if(!r.ok){document.getElementById('photo-grid').innerHTML='<div class="loading" style="grid-column:1/-1">Album not found.</div>';return;}
@@ -420,6 +421,21 @@ document.addEventListener('click', (e) => {
   if (action === 'startSlideshow') startSlideshow();
 });
 
+// Desktop dblclick → toggle zoom on whichever slideshow slot is currently
+// active. Touch double-tap is already handled inside the slideshow's touchend
+// handler above. Listener is attached once per slot's <img>; ssActiveSlot
+// determines which one is interactive at any moment.
+['a','b'].forEach(s => {
+  const im = document.getElementById('ss-img-' + s);
+  if (!im) return;
+  im.addEventListener('dblclick', e => {
+    if (!document.getElementById('ss-overlay').classList.contains('active')) return;
+    e.preventDefault();
+    if (isZoomed()) resetZoom();
+    else { ssZoom = { scale: 2.5, tx: 0, ty: 0 }; applyZoomTransform(); }
+  });
+});
+
 // ── ALBUM DETAIL VIEW + FULLSCREEN VIEWER ────────────────────────────────────
 // Two layers, mirroring the main app's library experience:
 //   1. Detail view (#album-detail-view): two-column on desktop / stacked on mobile.
@@ -429,34 +445,84 @@ document.addEventListener('click', (e) => {
 //      toggle, tap-zone nav, swipe down/center-tap to close. No metadata, no counter —
 //      a clean view of the image. Closing returns to the detail view underneath.
 // Slideshow path (cross-fade Ken Burns ▶ button) is independent and unchanged.
-let albFs = { idx: 0, scale: 1, tx: 0, ty: 0 };
-function _albFsIsZoomed(){ return albFs.scale > 1.001; }
-function _albFsApplyZoom(){
+let albFs = { idx: 0 };
+// Bounce-guard + deferred-click timer for the album fullscreen viewer.
+//   _albFsJustOpenedAt: stamped when albumFsOpen activates the overlay; the
+//     overlay click handler ignores clicks within ALB_FS_GUARD_MS of it (those
+//     are the trailing click-2 of a double-click on the underlying detail
+//     image, which previously fired the center-tap-to-close path).
+//   _albFsClickTimer: defers single-click prev/next/close by 280 ms so a desktop
+//     dblclick on the image can cancel it (zoom toggle wins) before it fires.
+//   _albFsZoomer: the `makeZoomer` instance (from /zoom.js — the same controller
+//     the main app's fullscreen viewer uses). Owns pinch / wheel / drag-pan /
+//     dblclick / mobile double-tap entirely. We attach on open, reset on
+//     navigate (the <img> element survives), destroy on close.
+const ALB_FS_GUARD_MS = 500;
+let _albFsJustOpenedAt = 0;
+let _albFsClickTimer = null;
+let _albFsZoomer = null;
+function _albFsCancelPendingClick(){ if (_albFsClickTimer) { clearTimeout(_albFsClickTimer); _albFsClickTimer = null; } }
+function _albFsIsZoomed(){ return _albFsZoomer ? _albFsZoomer.isZoomed() : false; }
+function _albFsResetZoom(){ if (_albFsZoomer) _albFsZoomer.reset(); }
+// Two-stage progressive image load. Without this, Safari caches the
+// initial-decode bitmap at layout size and zoomed views look soft no matter
+// how high-res the source. Setting src twice (preview, then original) forces
+// Safari to re-decode at the natural resolution.
+function _albFsLoadProgressive(id){
   const img = document.getElementById('album-fs-img');
   if (!img) return;
-  if (_albFsIsZoomed()) img.style.transform = `translate(${albFs.tx}px,${albFs.ty}px) scale(${albFs.scale})`;
-  else img.style.transform = '';
+  const previewUrl = '/api/public/thumb/' + id;     // ~1440px, fast-decoding JPEG
+  const originalUrl = '/api/public/original/' + id; // full-res
+  img.src = previewUrl;
+  const preloader = new Image();
+  const swap = () => {
+    if (img && document.getElementById('album-fs-overlay')?.classList.contains('active')) {
+      img.src = originalUrl;
+    }
+  };
+  preloader.onload = swap;
+  preloader.onerror = swap;
+  preloader.src = originalUrl;
 }
-function _albFsResetZoom(){
-  albFs.scale = 1; albFs.tx = 0; albFs.ty = 0;
-  _albFsApplyZoom();
+function _albFsAttachZoomer(){
+  if (_albFsZoomer || typeof window.makeZoomer !== 'function') return;
+  const img = document.getElementById('album-fs-img');
+  if (!img) return;
+  _albFsZoomer = window.makeZoomer(img, {
+    // Touch double-tap detected inside zoom.js — cancel any pending
+    // single-click (close/nav) so the zoom toggle wins on mobile too.
+    onDoubleTap: () => _albFsCancelPendingClick()
+  });
 }
 function albumFsOpen(idx){
   if (!album || !album.assets) return;
+  // Tear down any leftover zoomer before swapping src so transform state from
+  // the previous image doesn't survive on the element.
+  if (_albFsZoomer) { _albFsZoomer.destroy(); _albFsZoomer = null; }
   albFs.idx = idx;
-  _albFsResetZoom();
-  document.getElementById('album-fs-img').src = '/api/public/original/' + album.assets[idx];
+  const img = document.getElementById('album-fs-img');
+  _albFsLoadProgressive(album.assets[idx]);
   document.getElementById('album-fs-overlay').classList.add('active');
+  _albFsJustOpenedAt = Date.now();
+  // Attach the zoomer once the image has real dimensions — clamp() inside
+  // zoom.js reads clientWidth/Height which are stale until the new src loads.
+  // Stage-1 (preview) load fires this first; the stage-2 (original) src swap
+  // keeps the same <img> element so the zoomer survives the upgrade.
+  if (img.complete && img.naturalWidth > 0) _albFsAttachZoomer();
+  else img.addEventListener('load', _albFsAttachZoomer, { once: true });
 }
 function albumFsClose(){
-  _albFsResetZoom();
+  if (_albFsZoomer) { _albFsZoomer.destroy(); _albFsZoomer = null; }
   document.getElementById('album-fs-overlay').classList.remove('active');
 }
 function albumFsNavigate(dir){
   if (!album || !album.assets || !album.assets.length) return;
+  // Reset zoom before src swap so the new image starts centered at 1×. The
+  // zoomer survives navigate (same <img> element) — cheaper than destroy +
+  // reattach on every prev/next.
+  if (_albFsZoomer) _albFsZoomer.reset();
   albFs.idx = (albFs.idx + dir + album.assets.length) % album.assets.length;
-  _albFsResetZoom();
-  document.getElementById('album-fs-img').src = '/api/public/original/' + album.assets[albFs.idx];
+  _albFsLoadProgressive(album.assets[albFs.idx]);
   // Keep the detail view in sync so closing fullscreen lands on the right photo.
   _albDetailRender(albFs.idx);
 }
@@ -548,47 +614,22 @@ function _albFsActive(){ return document.getElementById('album-fs-overlay')?.cla
 (function wireAlbumFs(){
   const el = document.getElementById('album-fs-overlay');
   if (!el) return;
+  // Swipe-only touch handler. Pinch / pan / double-tap / wheel / dblclick are
+  // all owned by zoom.js (`makeZoomer`), attached on albumFsOpen and torn
+  // down on close. Only thing left for this overlay to do is route a 1-finger
+  // swipe (when not zoomed) into nav/close. didSwipe suppresses the synthetic
+  // click that follows a swipe so the click handler below doesn't also fire.
   let swipeX = null, swipeY = null, didSwipe = false;
-  let pinch = null, pan = null, lastTap = 0;
-  const dist = (t1, t2) => Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
   el.addEventListener('touchstart', e => {
     didSwipe = false;
-    if (e.touches.length >= 2) {
-      pinch = { d: dist(e.touches[0], e.touches[1]), s: albFs.scale, tx: albFs.tx, ty: albFs.ty };
-      swipeX = swipeY = null; pan = null;
-    } else if (e.touches.length === 1) {
-      if (_albFsIsZoomed()) {
-        pan = { x: e.touches[0].clientX, y: e.touches[0].clientY, tx: albFs.tx, ty: albFs.ty };
-        swipeX = swipeY = null;
-      } else {
-        swipeX = e.touches[0].clientX;
-        swipeY = e.touches[0].clientY;
-      }
+    if (e.touches.length === 1 && !_albFsIsZoomed()) {
+      swipeX = e.touches[0].clientX;
+      swipeY = e.touches[0].clientY;
+    } else {
+      swipeX = swipeY = null;
     }
   }, { passive: true });
-  el.addEventListener('touchmove', e => {
-    if (pinch && e.touches.length >= 2) {
-      const d = dist(e.touches[0], e.touches[1]);
-      let s = pinch.s * (d / pinch.d);
-      s = Math.max(1, Math.min(5, s));
-      albFs.scale = s;
-      if (s <= 1.001) { albFs.tx = 0; albFs.ty = 0; }
-      _albFsApplyZoom();
-      e.preventDefault();
-    } else if (pan && e.touches.length === 1 && _albFsIsZoomed()) {
-      albFs.tx = pan.tx + (e.touches[0].clientX - pan.x);
-      albFs.ty = pan.ty + (e.touches[0].clientY - pan.y);
-      _albFsApplyZoom();
-      e.preventDefault();
-    }
-  }, { passive: false });
   el.addEventListener('touchend', e => {
-    if (pinch && e.touches.length < 2) {
-      pinch = null;
-      if (albFs.scale <= 1.001) _albFsResetZoom();
-      didSwipe = true;
-    }
-    if (pan && e.touches.length === 0) { pan = null; didSwipe = true; }
     if (swipeX !== null && !_albFsIsZoomed()) {
       const dx = e.changedTouches[0].clientX - swipeX;
       const dy = e.changedTouches[0].clientY - swipeY;
@@ -601,36 +642,30 @@ function _albFsActive(){ return document.getElementById('album-fs-overlay')?.cla
       }
     }
     swipeX = swipeY = null;
-    if (e.changedTouches.length === 1 && e.touches.length === 0 && !pinch && !pan) {
-      const now = Date.now();
-      if (now - lastTap < 320) {
-        if (_albFsIsZoomed()) _albFsResetZoom();
-        else { albFs.scale = 2.5; albFs.tx = 0; albFs.ty = 0; _albFsApplyZoom(); }
-        didSwipe = true;
-        lastTap = 0;
-      } else {
-        lastTap = now;
-      }
-    }
   }, { passive: true });
   el.addEventListener('click', e => {
     if (didSwipe) { didSwipe = false; return; }
     if (e.target.closest('#album-fs-close')) return;
-    if (_albFsIsZoomed()) return;
+    if (_albFsIsZoomed()) return; // taps while zoomed do nothing — zoom.js owns the image
+    // Bounce guard: drop click-2 of a double-click that JUST opened fullscreen
+    // from the underlying detail image (click 1 = albumFsOpen on detail-left,
+    // click 2 lands on this overlay and would otherwise trigger albumFsClose).
+    if (Date.now() - _albFsJustOpenedAt < ALB_FS_GUARD_MS) return;
+    // Defer single-click action so a desktop dblclick can win the race for a
+    // zoom toggle. zoom.js's `onDoubleTap` callback (registered in
+    // _albFsAttachZoomer) calls _albFsCancelPendingClick → clears this timer
+    // before close fires. Touch double-taps cancel the same way via the same
+    // callback (zoom.js's manual time+distance detection).
     const xPos = e.clientX;
     const vw = window.innerWidth;
-    if (xPos < vw * 0.25) albumFsNavigate(-1);
-    else if (xPos > vw * 0.75) albumFsNavigate(1);
-    else albumFsClose();
+    _albFsCancelPendingClick();
+    _albFsClickTimer = setTimeout(() => {
+      _albFsClickTimer = null;
+      if (xPos < vw * 0.25) albumFsNavigate(-1);
+      else if (xPos > vw * 0.75) albumFsNavigate(1);
+      else albumFsClose();
+    }, 280);
   });
-  el.addEventListener('wheel', e => {
-    if (!e.ctrlKey && !e.metaKey) return;
-    e.preventDefault();
-    const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
-    albFs.scale = Math.max(1, Math.min(5, albFs.scale * factor));
-    if (albFs.scale <= 1.001) _albFsResetZoom();
-    else _albFsApplyZoom();
-  }, { passive: false });
   document.getElementById('album-fs-close')?.addEventListener('click', e => {
     e.stopPropagation();
     albumFsClose();

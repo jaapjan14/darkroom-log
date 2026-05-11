@@ -22,7 +22,7 @@ let state = {
   fullscreenOpen: false,
   recentMeta: {},
   filterOptions: null,
-  librarySort: 'upload',
+  librarySort: 'taken',
   librarySortDir: 'desc',
   displayedItems: [],
   previousView: 'recent-view',
@@ -643,7 +643,7 @@ function renderRecentGrid(items) {
     <div class="gallery-item ${state.selectMode ? 'selectable' : ''} ${state.selectedAssets && state.selectedAssets.has(a.id) ? 'selected' : ''}"
          id="sel-${a.id}"
          data-action="recentItemClick" data-id="${a.id}">
-      <img src="/api/immich/thumb/${a.id}" alt="${a.originalFileName}" loading="lazy" onerror="this.style.background='#1a1a1a'">
+      <img src="/api/immich/thumb/${a.id}" alt="${a.originalFileName}" loading="lazy" decoding="async" fetchpriority="low" width="300" height="300" onerror="this.style.background='#1a1a1a'">
       ${state.selectMode ? `<div class="select-check ${state.selectedAssets && state.selectedAssets.has(a.id) ? 'checked' : ''}">✓</div>` : ''}
     </div>
   `;
@@ -713,21 +713,55 @@ async function showRecentDetail(assetId) {
   await renderRecentDetail(assetId);
 }
 
-async function renderRecentDetail(assetId) {
+async function renderRecentDetail(assetId, navGen) {
+  const myGen = navGen != null ? navGen : _navGen;
   const content = document.getElementById('recent-detail-content');
-  content.innerHTML = '<div class="loading">Loading...</div>';
 
+  // Loading state: if there's already a detail-image in place (we're navigating
+  // between photos), dim it instead of replacing with "Loading…" text. Keeps
+  // the user oriented during slow fetches and reassures them something is
+  // happening (so they don't keep tapping past the cooldown).
+  const existingImg = content.querySelector('.detail-image');
+  if (existingImg) {
+    existingImg.style.transition = 'opacity 0.15s';
+    existingImg.style.opacity = '0.35';
+  } else {
+    content.innerHTML = '<div class="loading">Loading...</div>';
+  }
+
+  // Meta fetch with 10s timeout — a stalled connection used to zombie the nav.
   let meta = {};
-  try { const r = await fetch(`/api/immich/photo/${assetId}`); meta = await r.json(); } catch(e) {}
+  let metaFailed = false;
+  try {
+    const ac = new AbortController();
+    const tid = setTimeout(() => ac.abort(), 10000);
+    const r = await fetch(`/api/immich/photo/${assetId}`, { signal: ac.signal });
+    clearTimeout(tid);
+    meta = await r.json();
+  } catch(e) {
+    metaFailed = true;
+  }
+
+  // Stale-result guard: a newer nav has already happened, drop this result.
+  if (myGen !== _navGen) return;
+
+  if (metaFailed) {
+    content.innerHTML = '<div class="loading">Failed to load photo. Check connection and try again.</div>';
+    return;
+  }
 
   // Lazy-load Darkroom albums so the "In albums" row works even when the
   // user opened Recent first and never visited the Albums tab.
   if (!Array.isArray(state.albums)) {
     try {
-      const r = await fetch('/api/albums');
+      const ac = new AbortController();
+      const tid = setTimeout(() => ac.abort(), 10000);
+      const r = await fetch('/api/albums', { signal: ac.signal });
+      clearTimeout(tid);
       const data = await r.json();
       if (Array.isArray(data)) state.albums = data;
     } catch (e) { /* leave for other loaders */ }
+    if (myGen !== _navGen) return; // stale-result guard
   }
   const assetAlbums = (state.albums || []).filter(a => (a.assets || []).includes(assetId));
 
@@ -746,17 +780,27 @@ async function renderRecentDetail(assetId) {
   const mapUrl = hasGPS ? `https://www.openstreetmap.org/export/embed.html?bbox=${meta.longitude-0.01},${meta.latitude-0.01},${meta.longitude+0.01},${meta.latitude+0.01}&layer=mapnik&marker=${meta.latitude},${meta.longitude}` : '';
   const immichLocation = [meta.city, meta.state].filter(Boolean).join(', ');
 
+  // Attach load/error handlers AFTER innerHTML write — CSP (script-src 'self')
+  // blocks inline `onload=""` / `onerror=""` attributes silently.
+  const _attachDetailImgHandlers = () => {
+    const dimg = content.querySelector('.detail-image');
+    if (!dimg) return;
+    dimg.addEventListener('error', () => { dimg.style.opacity = '0.2'; dimg.alt = 'Image unavailable'; });
+    const onLoad = () => scheduleDetailUpgrade(dimg);
+    if (dimg.complete && dimg.naturalWidth > 0) onLoad();
+    else dimg.addEventListener('load', onLoad);
+  };
+
   content.innerHTML = `
     <div class="detail-layout">
       <div class="detail-left">
         <div style="position:relative;width:100%;height:100%;display:flex;align-items:flex-start;justify-content:center">
           <img class="detail-image"
-               src="/api/immich/thumb/${assetId}?size=preview"
-               data-full="/api/immich/original/${assetId}"
+               src="/api/immich/thumb/${assetId}?size=${_isMobileUA() ? 'thumbnail' : 'preview'}"
+               ${_isMobileUA() ? `data-next="/api/immich/thumb/${assetId}?size=preview"` : ''}
                alt="${meta.filename || ''}"
                data-action="openFullscreen" data-url="/api/immich/original/${assetId}"
-               style="cursor:zoom-in"
-               onload="scheduleDetailUpgrade(this)">
+               style="cursor:zoom-in;background:#1a1a1a;min-height:200px">
           <div data-action="navPrev" style="position:absolute;left:0;top:0;width:25%;height:100%;cursor:pointer;z-index:10"></div>
           <div data-action="navNext" style="position:absolute;right:0;top:0;width:25%;height:100%;cursor:pointer;z-index:10"></div>
         </div>
@@ -777,7 +821,12 @@ async function renderRecentDetail(assetId) {
               <button class="btn btn-ghost btn-sm" data-action="restoreFromTrashDetail" data-id="${assetId}">Restore</button>
               <button class="btn btn-danger btn-sm" data-action="permanentDeleteDetail" data-id="${assetId}" data-filename="${meta.filename}">🗑 Delete Forever</button>
             ` : `
-              <button class="btn btn-ghost btn-sm" data-action="shareRecent" data-id="${assetId}" data-filename="${meta.filename}" data-desc="${(meta.description||'').replace(/'/g, '&apos;')}">↑ Share</button>
+              <span class="share-size-group" style="display:inline-flex;gap:0.25rem">
+                <button class="btn btn-ghost btn-sm" data-action="shareRecent" data-size="small" data-id="${assetId}" data-filename="${meta.filename}" data-desc="${(meta.description||'').replace(/'/g, '&apos;')}" title="Share small (300–500 KB)">↑ S</button>
+                <button class="btn btn-ghost btn-sm" data-action="shareRecent" data-size="medium" data-id="${assetId}" data-filename="${meta.filename}" data-desc="${(meta.description||'').replace(/'/g, '&apos;')}" title="Share medium (1.0–1.5 MB, SMS friendly)">↑ M</button>
+                <button class="btn btn-ghost btn-sm" data-action="shareRecent" data-size="large" data-id="${assetId}" data-filename="${meta.filename}" data-desc="${(meta.description||'').replace(/'/g, '&apos;')}" title="Share large (2.0–2.7 MB, Leica forum)">↑ L</button>
+                <button class="btn btn-ghost btn-sm" data-action="shareRecent" data-size="xlarge" data-id="${assetId}" data-filename="${meta.filename}" data-desc="${(meta.description||'').replace(/'/g, '&apos;')}" title="Share x-large (full Q100 original ~9.7 MB)">↑ XL</button>
+              </span>
               <button class="${meta.isArchived ? 'btn btn-ghost btn-sm' : 'btn btn-danger btn-sm'}" data-action="${meta.isArchived ? 'restoreFromDetail' : 'archiveFromDetail'}" data-id="${assetId}">${meta.isArchived ? 'Restore' : 'Archive'}</button>
               <button class="btn btn-danger btn-sm" data-action="deleteImmichAsset" data-id="${assetId}" data-filename="${meta.filename}">🗑</button>
             `}
@@ -836,24 +885,154 @@ async function renderRecentDetail(assetId) {
       </div>
     </div>
   `;
+  _attachDetailImgHandlers();
 }
 
-async function shareRecent(assetId, filename, description) {
+// Downscale a JPEG/PNG blob via canvas, returning a JPEG blob with longest edge ≤ maxPx.
+// Used for the Small / Medium share sizes — gives us message-app-friendly file sizes
+// without round-tripping through the server.
+async function _downscaleBlob(blob, maxPx, quality = 0.85) {
+  const url = URL.createObjectURL(blob);
   try {
-    const imgRes = await fetch('/api/immich/original/' + assetId);
+    const img = await new Promise((resolve, reject) => {
+      const i = new Image();
+      i.onload = () => resolve(i);
+      i.onerror = () => reject(new Error('image decode failed'));
+      i.src = url;
+    });
+    const ratio = Math.min(1, maxPx / Math.max(img.naturalWidth, img.naturalHeight));
+    if (ratio === 1) return blob;
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(img.naturalWidth * ratio);
+    canvas.height = Math.round(img.naturalHeight * ratio);
+    canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+    return await new Promise((resolve, reject) => {
+      canvas.toBlob(b => b ? resolve(b) : reject(new Error('canvas toBlob null')), 'image/jpeg', quality);
+    });
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+// Share preset table — see the ↑ S / M / L / XL buttons in the detail view.
+// Server-side endpoint /api/immich/download/:id?size=... returns a sharp-encoded
+// JPEG sized to a target byte range. XL bypasses the resize and streams the full
+// Q100 original. Targets: S=300-500KB, M=1.0-1.5MB, L=2.0-2.7MB (hard ceiling for
+// the Leica forum's 2.7MB upload limit).
+const SHARE_PRESETS = {
+  small:  { url: 'download', size: 'small'  },
+  medium: { url: 'download', size: 'medium' },
+  large:  { url: 'download', size: 'large'  },
+  xlarge: { url: 'original' },
+};
+
+// In-flight guard for the Web Share API — if the user double-taps a size button (or
+// the click fires twice in mobile WebKit), navigator.share rejects the second call
+// with "InvalidStateError: share() is already in progress". Without this, the share
+// sheet still opens fine for the first call but the user sees a misleading alert.
+let _shareInFlight = false;
+let _shareReady = null;
+
+// Two-step share UX: phase 1 fetches the image and stashes the prepared shareData,
+// phase 2 (a fresh user tap on the modal's "Tap to share" button) calls
+// navigator.share(). Required because Safari iOS revokes transient activation if
+// share() is awaited too long after the original button tap (e.g., during a
+// multi-MB fetch on a slow connection), which surfaces as NotAllowedError.
+async function shareRecent(assetId, filename, description, size) {
+  if (_shareInFlight) return;
+  _shareInFlight = true;
+  const preset = SHARE_PRESETS[size] || SHARE_PRESETS.medium;
+
+  // Desktop: Mac share sheet has no Save-to-Disk option, so we fetch the file
+  // ourselves (with a spinner for visual feedback during the ~1-30s sharp pass)
+  // and trigger a Blob-URL download. Browser saves to Downloads natively.
+  const isMobile = /iPad|iPhone|iPod|Android/i.test(navigator.userAgent);
+  if (!isMobile || !navigator.share) {
+    document.getElementById('share-prep-overlay').classList.add('active');
+    document.getElementById('share-prep-state-loading').style.display = '';
+    document.getElementById('share-prep-state-ready').style.display = 'none';
+    document.getElementById('share-prep-status').textContent = 'Preparing ' + String(size || 'medium').toUpperCase() + '…';
+    // Force a paint frame before the fetch — without this Safari can batch the
+    // class addition with the network microtask and the spinner never visibly appears.
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+    try {
+      const url = preset.url === 'original'
+        ? '/api/immich/original/' + assetId
+        : '/api/immich/download/' + assetId + '?size=' + preset.size;
+      const baseName = (filename || assetId).replace(/\.[^.]+$/, '');
+      const r = await fetch(url);
+      if (!r.ok) throw new Error('download fetch ' + r.status);
+      const blob = await r.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = baseName + '.jpg';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(function() { URL.revokeObjectURL(blobUrl); }, 1000);
+      closeShareModal();
+    } catch (e) {
+      alert('Download failed: ' + e.message);
+      closeShareModal();
+    } finally {
+      _shareInFlight = false;
+    }
+    return;
+  }
+
+  document.getElementById('share-prep-overlay').classList.add('active');
+  document.getElementById('share-prep-state-loading').style.display = '';
+  document.getElementById('share-prep-state-ready').style.display = 'none';
+  document.getElementById('share-prep-status').textContent = 'Preparing ' + String(size || 'medium').toUpperCase() + '…';
+
+  try {
+    if (!navigator.share) { alert('Sharing not supported in this browser'); closeShareModal(); return; }
+    const url = preset.url === 'original'
+      ? '/api/immich/original/' + assetId
+      : '/api/immich/download/' + assetId + '?size=' + preset.size;
+    const imgRes = await fetch(url);
+    if (!imgRes.ok) throw new Error('share fetch ' + imgRes.status);
     const blob = await imgRes.blob();
-    const fname = filename || assetId + '.jpg';
-    const file = new File([blob], fname, { type: 'image/jpeg' });
+    const baseName = (filename || assetId).replace(/\.[^.]+$/, '');
+    const file = new File([blob], baseName + '.jpg', { type: blob.type || 'image/jpeg' });
     const shareData = { files: [file] };
     if (description) shareData.text = description;
-    if (navigator.share && navigator.canShare(shareData)) {
-      await navigator.share(shareData);
-    } else {
-      alert('Sharing not supported in this browser');
+    if (!navigator.canShare || !navigator.canShare(shareData)) {
+      alert('This browser cannot share this image. Try the Download button instead.');
+      closeShareModal();
+      return;
     }
+
+    // Stash and flip modal to "ready" — user taps the button to invoke share().
+    _shareReady = shareData;
+    document.getElementById('share-prep-state-loading').style.display = 'none';
+    document.getElementById('share-prep-state-ready').style.display = '';
   } catch(e) {
-    if (e.name !== 'AbortError') alert('Share failed: ' + e.message);
+    alert('Share failed: ' + e.message);
+    closeShareModal();
+  } finally {
+    _shareInFlight = false;
   }
+}
+
+async function executeShare() {
+  if (!_shareReady) return;
+  const data = _shareReady;
+  _shareReady = null;
+  closeShareModal();
+  try {
+    await navigator.share(data);
+  } catch(e) {
+    if (e.name !== 'AbortError' && e.name !== 'InvalidStateError') {
+      alert('Share failed: ' + e.message);
+    }
+  }
+}
+
+function closeShareModal() {
+  document.getElementById('share-prep-overlay').classList.remove('active');
+  _shareReady = null;
 }
 
 async function downloadSelectedAssets() {
@@ -887,11 +1066,14 @@ async function deleteImmichAsset(assetId, filename) {
   if (!confirm(`Move "${label}" to trash?\n\nImmich keeps items in trash for 30 days before permanent removal.`)) return;
   const r = await fetch('/api/immich/assets/' + assetId, { method: 'DELETE' });
   if (!r.ok) { alert('Delete failed. Please try again.'); return; }
-  // Remove from local state and navigate back or to next photo
-  if (state.displayedItems) state.displayedItems = state.displayedItems.filter(a => a.id !== assetId);
-  if (state.recentItems) state.recentItems = state.recentItems.filter(a => a.id !== assetId);
-  delete state.recentMeta[assetId];
-  if (state.displayedItems && state.displayedItems.length > 0) {
+  try {
+    if (Array.isArray(state.recentItems)) state.recentItems = state.recentItems.filter(a => a.id !== assetId);
+    if (Array.isArray(state.displayedItems)) state.displayedItems = state.displayedItems.filter(a => a.id !== assetId);
+    if (Array.isArray(state.recentSmartResults)) state.recentSmartResults = state.recentSmartResults.filter(a => a.id !== assetId);
+    delete state.recentMeta[assetId];
+    if (typeof applyRecentFilters === 'function') applyRecentFilters();
+  } catch(e) { console.warn('Delete UI refresh hit a snag (server DELETE was OK):', e); }
+  if (Array.isArray(state.displayedItems) && state.displayedItems.length > 0) {
     const nextIdx = Math.min(state.currentRecentIndex, state.displayedItems.length - 1);
     await showRecentDetail(state.displayedItems[nextIdx].id);
   } else {
@@ -924,80 +1106,173 @@ function disablePinchZoom() {
 
 let _detailUpgradeTimer = null;
 let _detailUpgradeLoader = null;
+// Multi-signal mobile detection: ANY of these means treat as mobile and use
+// the thumbnail→preview progressive chain instead of loading preview directly.
+function _isMobileUA() {
+  if (/iPad|iPhone|iPod|Android/i.test(navigator.userAgent)) return true;
+  if (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) return true;
+  if (window.innerWidth < 900) return true;
+  return false;
+}
+
 function scheduleDetailUpgrade(img) {
+  // Generic progressive-upgrade: when img loads, schedule preload of the
+  // higher-tier source from data-next; on successful load, swap img.src to
+  // it. The browser then fires onload again, this function runs again, and
+  // if data-next is set anew, the next upgrade fires — chains naturally.
   if (_detailUpgradeTimer) { clearTimeout(_detailUpgradeTimer); _detailUpgradeTimer = null; }
   if (_detailUpgradeLoader) { _detailUpgradeLoader.onload = null; _detailUpgradeLoader.src = ''; _detailUpgradeLoader = null; }
-  const full = img.dataset.full;
-  if (!full) return;
+  const next = img.dataset.next;
+  if (!next) return;
   _detailUpgradeTimer = setTimeout(() => {
     _detailUpgradeLoader = new Image();
     _detailUpgradeLoader.onload = () => {
       if (!document.body.contains(img)) return;
-      if (img.dataset.full !== full) return; // user navigated; stale upgrade
-      img.src = full;
-      delete img.dataset.full;
+      if (img.dataset.next !== next) return; // user navigated; stale upgrade
+      img.src = next;
+      delete img.dataset.next;
       _detailUpgradeLoader = null;
     };
-    _detailUpgradeLoader.src = full;
+    _detailUpgradeLoader.src = next;
   }, 400);
 }
 
+// Nav generation counter. Each nav bumps it; async work captures the value
+// at start and bails if a newer nav has happened (prevents stale-result races
+// when fetches return out of order on slow connections).
+let _navGen = 0;
+let _navPrintLastAt = 0;
 function navigatePrint(dir) {
+  // Throttle: drop calls within 400ms of the previous one.
+  const now = Date.now();
+  if (now - _navPrintLastAt < 400) return;
+  _navPrintLastAt = now;
   const prints = state.displayedPrints || state.prints;
   const idx = prints.findIndex(p => p.id === state.currentPrintId);
   if (idx === -1) return;
   const next = prints[idx + dir];
   if (!next) return;
+  const myGen = ++_navGen;
   if (state.fullscreenOpen) {
-    document.getElementById('fullscreen-img').src = '/api/immich/original/' + next.immichId;
+    if (_fsZoomer) _fsZoomer.reset();
+    _fsLoadProgressive('/api/immich/original/' + next.immichId, myGen);
   }
-  showDetail(next.id);
+  showDetail(next.id, myGen);
 }
 
+let _navRecentLastAt = 0;
 async function navigateRecent(dir) {
+  // Throttle: drop calls within 400ms of the previous one.
+  const now = Date.now();
+  if (now - _navRecentLastAt < 400) return;
+  _navRecentLastAt = now;
   const displayedItems = state.displayedItems || state.recentItems;
   const newIdx = state.currentRecentIndex + dir;
   if (newIdx < 0 || newIdx >= displayedItems.length) return;
   state.currentRecentIndex = newIdx;
   state.currentRecentId = displayedItems[newIdx].id;
+  const myGen = ++_navGen;
   if (state.fullscreenOpen) {
-    document.getElementById('fullscreen-img').src = '/api/immich/original/' + state.currentRecentId;
+    if (_fsZoomer) _fsZoomer.reset();
+    _fsLoadProgressive('/api/immich/original/' + state.currentRecentId, myGen);
   }
-  await renderRecentDetail(state.currentRecentId);
+  await renderRecentDetail(state.currentRecentId, myGen);
 }
 
-// Fullscreen pinch-zoom state (the overlay opened by tapping the print/library detail image)
-let _fsZoom = { scale: 1, tx: 0, ty: 0 };
-function _fsIsZoomed() { return _fsZoom.scale > 1.001; }
-function _fsApplyZoom() {
+// Fullscreen zoom controller — owned by zoom.js (see public/zoom.js, ported
+// from ContactSheet's src/lib/zoom.ts on 2026-04-27). Wraps pinch / pan /
+// dblclick / ctrl+wheel / drag on the <img>; the overlay still owns the
+// 1-finger swipe-to-page / swipe-to-close / tap-zone gestures and gates them
+// on _fsIsZoomed() so a pan doesn't get re-interpreted.
+let _fsZoomer = null;
+function _fsIsZoomed() { return _fsZoomer ? _fsZoomer.isZoomed() : false; }
+
+// Two-stage progressive image load. Without this, Safari caches the
+// initial-decode bitmap at layout size and zoomed views look soft no matter
+// how high-res the source. Setting src twice (once for the preview, once
+// for the original) forces Safari to re-decode at the natural resolution,
+// matching ContactSheet's behavior. Also adds a visible "sharpening" cue
+// as the high-res tier swaps in.
+function _fsLoadProgressive(originalUrl, navGen) {
+  // Gen guard: if a newer nav has happened by the time stage-2 finishes, don't
+  // swap in the now-stale original — would render the wrong image after a
+  // slow connection's preload finally lands.
+  const myGen = navGen != null ? navGen : _navGen;
   const img = document.getElementById('fullscreen-img');
-  if (!img) return;
-  if (_fsIsZoomed()) {
-    img.style.transform = `translate(${_fsZoom.tx}px,${_fsZoom.ty}px) scale(${_fsZoom.scale})`;
-  } else {
-    img.style.transform = '';
-  }
-}
-function _fsResetZoom() {
-  _fsZoom = { scale: 1, tx: 0, ty: 0 };
-  _fsApplyZoom();
+  const m = originalUrl.match(/\/immich\/original\/([0-9a-f-]+)/i);
+  if (!m) { img.src = originalUrl; return; }
+  const previewUrl = '/api/immich/thumb/' + m[1] + '?size=preview';
+  // Stage 1: lightweight preview (~2K) renders almost instantly
+  img.src = previewUrl;
+  // Stage 2: preload the full original; once cached, re-set img.src to
+  // trigger a fresh decode at the natural resolution
+  const preloader = new Image();
+  preloader.onload = () => {
+    if (myGen !== _navGen) return;
+    if (img && document.getElementById('fullscreen-overlay').classList.contains('active')) {
+      img.src = originalUrl;
+    }
+  };
+  preloader.onerror = () => {
+    if (myGen !== _navGen) return;
+    if (img && document.getElementById('fullscreen-overlay').classList.contains('active')) {
+      img.src = originalUrl;
+    }
+  };
+  preloader.src = originalUrl;
 }
 
 function openFullscreen(src) {
-  _fsResetZoom();
-  document.getElementById('fullscreen-img').src = src;
+  // Tear down any leftover zoomer before swapping src so transform state from
+  // the previous image doesn't survive on the element.
+  if (_fsZoomer) { _fsZoomer.destroy(); _fsZoomer = null; }
+  const img = document.getElementById('fullscreen-img');
+  _fsLoadProgressive(src);
   document.getElementById('fullscreen-overlay').classList.add('active');
   state.fullscreenOpen = true;
+  // Wait until the image has real dimensions before attaching — clamp() reads
+  // clientWidth/Height, which are stale until the new src loads. Attach on
+  // the FIRST stage's load so zoom is responsive even before the original
+  // tier swaps in. The zoomer survives the stage-2 src swap (same element).
+  const attach = () => {
+    if (_fsZoomer) return;
+    _fsZoomer = window.makeZoomer(img, {
+      onDoubleTap: () => {
+        if (typeof window._fsCancelPendingClick === 'function') window._fsCancelPendingClick();
+        // iOS fires synthetic click events ~300ms AFTER touchend. zoom.js
+        // detects the double-tap touch-side and toggles zoom first, so by
+        // the time the click arrives _fsIsZoomed() is already false and the
+        // click handler's "bail if zoomed" guard doesn't catch it. Suppress
+        // any clicks that land within 600ms of the double-tap.
+        window._fsIgnoreClicksUntil = Date.now() + 600;
+      }
+    });
+  };
+  if (img.complete && img.naturalWidth > 0) {
+    attach();
+  } else {
+    img.addEventListener('load', attach, { once: true });
+  }
 }
 
 function closeFullscreen() {
-  _fsResetZoom();
+  if (_fsZoomer) { _fsZoomer.destroy(); _fsZoomer = null; }
   document.getElementById('fullscreen-overlay').classList.remove('active');
   state.fullscreenOpen = false;
 }
 
+let _fsLastNavAt = 0;
 function fullscreenNavigate(dir) {
-  _fsResetZoom();
+  // Cooldown: drop any nav that lands within 400ms of the previous one.
+  // Prevents a stray click + swipe (or two queued clicks) from skipping
+  // an image when the user only meant to advance once.
+  const now = Date.now();
+  if (now - _fsLastNavAt < 400) return;
+  _fsLastNavAt = now;
+  // Reset before src change so the new image starts at 1× / centered. The
+  // zoomer survives across navigate (same <img> element), which is cheaper
+  // than destroy + reattach on every prev/next.
+  if (_fsZoomer) _fsZoomer.reset();
   if (document.getElementById('detail-view').classList.contains('active')) {
     navigatePrint(dir);
   } else {
@@ -1080,11 +1355,11 @@ document.addEventListener('touchend', e => {
   const dy = e.changedTouches[0].clientY - touchStartY;
   if (inPrintDetail && dy > 60 && Math.abs(dy) > Math.abs(dx) * 1.5) {
     closePrintDetail();
-  } else if (inPrintDetail && Math.abs(dx) > 50 && Math.abs(dy) < 50) {
+  } else if (inPrintDetail && Math.abs(dx) > 70 && Math.abs(dy) < 50) {
     dx < 0 ? navigatePrint(1) : navigatePrint(-1);
   } else if (inRecent && dy > 60 && Math.abs(dy) > Math.abs(dx) * 1.5) {
     goBackFromDetail();
-  } else if (inRecent && Math.abs(dx) > 50 && Math.abs(dy) < 50) {
+  } else if (inRecent && Math.abs(dx) > 70 && Math.abs(dy) < 50) {
     dx < 0 ? navigateRecent(1) : navigateRecent(-1);
   }
   touchStartX = null;
@@ -1436,39 +1711,77 @@ async function archiveImmichAssets(assetIds) {
   const ids = Array.isArray(assetIds) ? assetIds : [assetIds];
   const count = ids.length;
   if (!confirm(`Archive ${count} photo${count !== 1 ? 's' : ''}?\n\nThey will be hidden from the main Immich library. You can restore them later.`)) return;
+  let serverOk = false;
   try {
     const r = await fetch('/api/immich/assets/archive', {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ids })
     });
     if (!r.ok) throw new Error('Failed');
-    state.currentImmichAlbumAssets = state.currentImmichAlbumAssets.filter(a => !ids.includes(a.id));
-    applyImmichFiltersAndSort();
+    serverOk = true;
+  } catch(e) {
+    alert('Archive failed.');
+    return;
+  }
+  // PUT succeeded — UI updates from here on must NOT bubble back as "Archive failed".
+  // The detail view is reachable from contexts (search, recent feed) where
+  // currentImmichAlbumAssets isn't populated, so guard each step.
+  try {
+    if (Array.isArray(state.currentImmichAlbumAssets)) {
+      state.currentImmichAlbumAssets = state.currentImmichAlbumAssets.filter(a => !ids.includes(a.id));
+      applyImmichFiltersAndSort();
+    }
+    // Library tab: drop archived assets from every list that feeds the grid,
+    // then re-run the canonical filter pipeline so the grid actually re-renders.
+    // (v1.5.32 had `renderRecentGrid()` with no args — rendered `undefined` and
+    // silently no-op'd, which is why the photo stayed on screen.)
+    if (Array.isArray(state.recentItems)) {
+      state.recentItems = state.recentItems.filter(a => !ids.includes(a.id));
+    }
+    if (Array.isArray(state.displayedItems)) {
+      state.displayedItems = state.displayedItems.filter(a => !ids.includes(a.id));
+    }
+    if (Array.isArray(state.recentSmartResults)) {
+      state.recentSmartResults = state.recentSmartResults.filter(a => !ids.includes(a.id));
+    }
+    if (typeof applyRecentFilters === 'function') applyRecentFilters();
     if (state.immichSelectMode) exitImmichSelectMode();
-    if (document.getElementById('recent-detail-view').classList.contains('active')) goBackFromDetail();
-  } catch(e) { alert('Archive failed.'); }
+    if (document.getElementById('recent-detail-view')?.classList.contains('active')) goBackFromDetail();
+  } catch(e) {
+    console.warn('Archive UI refresh hit a snag (server PUT was OK):', e);
+  }
 }
 
 async function restoreImmichAssets(assetIds) {
   const ids = Array.isArray(assetIds) ? assetIds : [assetIds];
   const count = ids.length;
   if (!confirm(`Restore ${count} photo${count !== 1 ? 's' : ''} from archive?\n\nThey will reappear in the main Immich library.`)) return;
+  let serverOk = false;
   try {
     const r = await fetch('/api/immich/assets/restore', {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ids })
     });
     if (!r.ok) throw new Error('Failed');
-    // Update isArchived flag in local state rather than removing from view
-    state.currentImmichAlbumAssets = state.currentImmichAlbumAssets.map(a =>
-      ids.includes(a.id) ? { ...a, isArchived: false } : a
-    );
-    applyImmichFiltersAndSort();
+    serverOk = true;
+  } catch(e) {
+    alert('Restore failed.');
+    return;
+  }
+  try {
+    if (Array.isArray(state.currentImmichAlbumAssets)) {
+      state.currentImmichAlbumAssets = state.currentImmichAlbumAssets.map(a =>
+        ids.includes(a.id) ? { ...a, isArchived: false } : a
+      );
+      applyImmichFiltersAndSort();
+    }
     if (state.immichSelectMode) exitImmichSelectMode();
-    if (document.getElementById('recent-detail-view').classList.contains('active')) {
+    if (document.getElementById('recent-detail-view')?.classList.contains('active')) {
       await renderRecentDetail(state.currentRecentId);
     }
-  } catch(e) { alert('Restore failed.'); }
+  } catch(e) {
+    console.warn('Restore UI refresh hit a snag (server PUT was OK):', e);
+  }
 }
 
 function updateImmichArchiveBtn() {
@@ -1934,6 +2247,7 @@ function toggleSelectMode() {
 function enterSelectMode() {
   state.selectMode = true;
   state.selectedAssets = new Set();
+  lastRecentSelectedIdx = -1;
   document.getElementById('select-mode-btn').style.display = 'none';
   document.getElementById('select-actions').style.display = 'flex';
   const items = state.recentSmartResults && state.recentSmartResults.length ? state.recentSmartResults : state.recentItems;
@@ -1943,22 +2257,29 @@ function enterSelectMode() {
 function exitSelectMode() {
   state.selectMode = false;
   state.selectedAssets = new Set();
+  lastRecentSelectedIdx = -1;
   document.getElementById('select-mode-btn').style.display = 'inline-block';
   document.getElementById('select-actions').style.display = 'none';
   const items = state.recentSmartResults && state.recentSmartResults.length ? state.recentSmartResults : state.recentItems;
   renderRecentGrid(items);
 }
 
-function toggleAssetSelect(assetId) {
-  if (state.selectedAssets.has(assetId)) {
-    state.selectedAssets.delete(assetId);
+let lastRecentSelectedIdx = -1;
+
+function toggleAssetSelect(assetId, e) {
+  const items = state.displayedItems || [];
+  const idx = items.findIndex(a => a.id === assetId);
+  if (e && e.shiftKey && lastRecentSelectedIdx >= 0 && idx >= 0) {
+    const from = Math.min(lastRecentSelectedIdx, idx);
+    const to = Math.max(lastRecentSelectedIdx, idx);
+    for (let i = from; i <= to; i++) state.selectedAssets.add(items[i].id);
   } else {
-    state.selectedAssets.add(assetId);
+    if (state.selectedAssets.has(assetId)) state.selectedAssets.delete(assetId);
+    else state.selectedAssets.add(assetId);
+    if (idx >= 0) lastRecentSelectedIdx = idx;
   }
   document.getElementById('select-count').textContent = state.selectedAssets.size + ' selected';
-  // Update checkmark on thumbnail
-  const el = document.getElementById('sel-' + assetId);
-  if (el) el.classList.toggle('selected', state.selectedAssets.has(assetId));
+  renderRecentGrid(items);
 }
 
 function addSelectionToAlbum() {
@@ -2061,7 +2382,8 @@ function renderGallery(prints) {
   `).join('');
 }
 
-async function showDetail(printId) {
+async function showDetail(printId, navGen) {
+  const myGen = navGen != null ? navGen : ++_navGen;
   const print = state.prints.find(p => p.id === printId);
   if (!print) return;
   const displayedPrints = state.displayedPrints || state.prints;
@@ -2074,24 +2396,49 @@ async function showDetail(printId) {
   document.getElementById('header-title').textContent = print.title;
 
   const content = document.getElementById('detail-content');
-  content.innerHTML = '<div class="loading">Loading...</div>';
+  // Dim the existing image instead of "Loading…" wipe when navigating between
+  // prints — preserves visual context on slow connections.
+  const existingImg = content.querySelector('.detail-image');
+  if (existingImg) {
+    existingImg.style.transition = 'opacity 0.15s';
+    existingImg.style.opacity = '0.35';
+  } else {
+    content.innerHTML = '<div class="loading">Loading...</div>';
+  }
 
   let meta = {};
-  try { const r = await fetch(`/api/immich/photo/${print.immichId}`); meta = await r.json(); } catch(e) {}
+  let metaFailed = false;
+  try {
+    const ac = new AbortController();
+    const tid = setTimeout(() => ac.abort(), 10000);
+    const r = await fetch(`/api/immich/photo/${print.immichId}`, { signal: ac.signal });
+    clearTimeout(tid);
+    meta = await r.json();
+  } catch(e) {
+    metaFailed = true;
+  }
+
+  // Stale-result guard: a newer nav has happened, drop this result.
+  if (myGen !== _navGen) return;
+
+  if (metaFailed) {
+    content.innerHTML = '<div class="loading">Failed to load print. Check connection and try again.</div>';
+    return;
+  }
 
   const sessions = (print.sessions || []).slice().sort((a, b) => Number(b.id) - Number(a.id));
   // Lazy-load Darkroom albums if the user opened a print detail before ever
-  // visiting the Albums tab — without this, state.albums is undefined here
-  // and the "In albums" row stays empty even for prints that ARE in albums.
-  // IMPORTANT: do NOT set state.albums = [] on failure. That trampled a
-  // load-in-progress on a separate code path (the Recent view's "+ Album"
-  // modal) and made it render "No albums yet" forever.
+  // visiting the Albums tab. Same NO-empty-array-on-failure rule as elsewhere.
   if (!Array.isArray(state.albums)) {
     try {
-      const r = await fetch('/api/albums');
+      const ac = new AbortController();
+      const tid = setTimeout(() => ac.abort(), 10000);
+      const r = await fetch('/api/albums', { signal: ac.signal });
+      clearTimeout(tid);
       const data = await r.json();
       if (Array.isArray(data)) state.albums = data;
     } catch (e) { /* leave state.albums to other loaders */ }
+    if (myGen !== _navGen) return; // stale-result guard
   }
   // Albums this print belongs to — looked up by Immich asset ID against the
   // already-loaded state.albums.
@@ -2100,7 +2447,7 @@ async function showDetail(printId) {
     <div class="detail-layout">
       <div class="detail-left">
         <div style="position:relative;width:100%;height:100%;display:flex;align-items:flex-start;justify-content:center">
-          <img class="detail-image" src="/api/immich/original/${print.immichId}" alt="${print.title}" data-action="openFullscreen" data-url="/api/immich/original/${print.immichId}" style="cursor:zoom-in;touch-action:manipulation">
+          <img class="detail-image" src="/api/immich/thumb/${print.immichId}?size=${_isMobileUA() ? 'thumbnail' : 'preview'}" ${_isMobileUA() ? `data-next="/api/immich/thumb/${print.immichId}?size=preview"` : ''} alt="${print.title}" data-action="openFullscreen" data-url="/api/immich/original/${print.immichId}" style="cursor:zoom-in;touch-action:manipulation;background:#1a1a1a;min-height:200px">
           <div data-action="printNavPrev" style="position:absolute;left:0;top:0;width:25%;height:100%;cursor:pointer;z-index:10;touch-action:manipulation"></div>
           <div data-action="printNavNext" style="position:absolute;right:0;top:0;width:25%;height:100%;cursor:pointer;z-index:10;touch-action:manipulation"></div>
         </div>
@@ -2182,6 +2529,14 @@ async function showDetail(printId) {
       </div>
     </div>
   `;
+  // CSP-safe: attach load/error to .detail-image after innerHTML write.
+  const _pdimg = content.querySelector('.detail-image');
+  if (_pdimg) {
+    _pdimg.addEventListener('error', () => { _pdimg.style.opacity = '0.2'; _pdimg.alt = 'Image unavailable'; });
+    const _pOnLoad = () => scheduleDetailUpgrade(_pdimg);
+    if (_pdimg.complete && _pdimg.naturalWidth > 0) _pOnLoad();
+    else _pdimg.addEventListener('load', _pOnLoad);
+  }
 }
 
 function closePrintDetail() {
@@ -2877,6 +3232,23 @@ async function downloadImmichSelected() {
 
 // ── IMMICH SETTINGS MODAL ─────────────────────────────────────────────────────
 
+async function forceRefresh() {
+  if (!confirm('Clear cache and reload? Login is preserved.')) return;
+  try {
+    if ('caches' in self) {
+      const keys = await caches.keys();
+      await Promise.all(keys.map(k => caches.delete(k)));
+    }
+    if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map(r => r.unregister()));
+    }
+  } catch (e) {
+    console.error('forceRefresh: cache clear failed', e);
+  }
+  location.reload();
+}
+
 async function openImmichSettings() {
   const modal = document.getElementById('immich-settings-modal');
   const list = document.getElementById('immich-settings-list');
@@ -3028,95 +3400,77 @@ function wireListeners() {
   w('btn-close-add-album', 'click', () => closeModal('add-to-album-modal'));
   w('btn-quick-create-add', 'click', () => quickCreateAndAdd());
   w('btn-quick-create-immich', 'click', () => quickCreateAndAddImmich());
-  // Fullscreen: tap zones (left 25% prev / right 25% next / center close) + swipe-nav when not zoomed,
-  // 2-finger pinch-zoom (1×–5×), 1-finger pan when zoomed, double-tap to toggle 1×/2.5×.
+  // Fullscreen overlay-level gestures. Pinch / pan / dblclick / ctrl+wheel
+  // are owned by zoom.js attached to <img id="fullscreen-img">. Here we only
+  // track 1-finger swipes for prev/next/close + tap-zones, and gate every
+  // branch on _fsIsZoomed() so a pan-while-zoomed isn't reinterpreted.
   let _fsSwipeX = null, _fsSwipeY = null, _fsDidSwipe = false;
-  let _fsPinch = null, _fsPan = null, _fsLastTap = 0;
   const _fsEl = document.getElementById('fullscreen-overlay');
-  const _fsDist = (t1, t2) => Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
   _fsEl.addEventListener('touchstart', e => {
     _fsDidSwipe = false;
-    if (e.touches.length >= 2) {
-      _fsPinch = { d: _fsDist(e.touches[0], e.touches[1]), s: _fsZoom.scale, tx: _fsZoom.tx, ty: _fsZoom.ty };
+    if (e.touches.length === 1 && !_fsIsZoomed()) {
+      _fsSwipeX = e.touches[0].clientX;
+      _fsSwipeY = e.touches[0].clientY;
+    } else {
       _fsSwipeX = _fsSwipeY = null;
-      _fsPan = null;
-    } else if (e.touches.length === 1) {
-      if (_fsIsZoomed()) {
-        _fsPan = { x: e.touches[0].clientX, y: e.touches[0].clientY, tx: _fsZoom.tx, ty: _fsZoom.ty };
-        _fsSwipeX = _fsSwipeY = null;
-      } else {
-        _fsSwipeX = e.touches[0].clientX;
-        _fsSwipeY = e.touches[0].clientY;
-      }
     }
   }, {passive: true});
-  _fsEl.addEventListener('touchmove', e => {
-    if (_fsPinch && e.touches.length >= 2) {
-      const d = _fsDist(e.touches[0], e.touches[1]);
-      let s = _fsPinch.s * (d / _fsPinch.d);
-      s = Math.max(1, Math.min(5, s));
-      _fsZoom.scale = s;
-      if (s <= 1.001) { _fsZoom.tx = 0; _fsZoom.ty = 0; }
-      _fsApplyZoom();
-      e.preventDefault();
-    } else if (_fsPan && e.touches.length === 1 && _fsIsZoomed()) {
-      _fsZoom.tx = _fsPan.tx + (e.touches[0].clientX - _fsPan.x);
-      _fsZoom.ty = _fsPan.ty + (e.touches[0].clientY - _fsPan.y);
-      _fsApplyZoom();
-      e.preventDefault();
-    }
-  }, {passive: false});
   _fsEl.addEventListener('touchend', e => {
-    if (_fsPinch && e.touches.length < 2) {
-      _fsPinch = null;
-      if (_fsZoom.scale <= 1.001) _fsResetZoom();
-      _fsDidSwipe = true; // suppress the synthetic click after pinch
-    }
-    if (_fsPan && e.touches.length === 0) { _fsPan = null; _fsDidSwipe = true; }
-    // 1-finger swipe nav / close — only when not zoomed and we tracked a swipe start
     if (_fsSwipeX !== null && !_fsIsZoomed()) {
       const dx = e.changedTouches[0].clientX - _fsSwipeX;
       const dy = e.changedTouches[0].clientY - _fsSwipeY;
-      if (Math.abs(dx) > 40 && Math.abs(dy) < 60) {
+      if (Math.abs(dx) > 70 && Math.abs(dy) < 60) {
         _fsDidSwipe = true;
         dx < 0 ? fullscreenNavigate(1) : fullscreenNavigate(-1);
-      } else if (dy > 60 && Math.abs(dy) > Math.abs(dx) * 1.5) {
+      } else if (dy > 70 && Math.abs(dy) > Math.abs(dx) * 1.5) {
         _fsDidSwipe = true;
         closeFullscreen();
       }
     }
     _fsSwipeX = _fsSwipeY = null;
-    // Double-tap toggle (only on a clean single-touch end, no pinch/pan in flight)
-    if (e.changedTouches.length === 1 && e.touches.length === 0 && !_fsPinch && !_fsPan) {
-      const now = Date.now();
-      if (now - _fsLastTap < 320) {
-        if (_fsIsZoomed()) _fsResetZoom();
-        else { _fsZoom = { scale: 2.5, tx: 0, ty: 0 }; _fsApplyZoom(); }
-        _fsDidSwipe = true; // suppress click that would otherwise navigate/close
-        _fsLastTap = 0;
-      } else {
-        _fsLastTap = now;
-      }
-    }
   }, {passive: true});
+  // Click handler defers its action by 280 ms so a double-tap can cancel it.
+  // Without this, a double-tap-to-zoom races with the tap-zone nav and the
+  // user toggles back-and-forth between fullscreen and the detail view.
+  // Cancellation paths: (a) native dblclick on the <img> (mouse) and (b) the
+  // manual touch double-tap detected inside zoom.js, which fires the
+  // `onDoubleTap` callback we register at attach time (see openFullscreen).
+  // Center-of-image is no longer a close zone — closes happen on background
+  // clicks (black bars around the image), Esc, or swipe-down.
+  let _fsClickTimer = null;
+  function _fsCancelPendingClick() {
+    if (_fsClickTimer) { clearTimeout(_fsClickTimer); _fsClickTimer = null; }
+  }
+  window._fsCancelPendingClick = _fsCancelPendingClick; // exposed for zoom.js callback
   w('fullscreen-overlay', 'click', e => {
     if (_fsDidSwipe) { _fsDidSwipe = false; return; }
-    if (_fsIsZoomed()) return; // taps while zoomed do nothing — avoid surprise close/navigate
+    if (_fsIsZoomed()) return; // taps while zoomed do nothing — zoom.js owns the image
+    if (Date.now() < (window._fsIgnoreClicksUntil || 0)) return; // post-double-tap suppression
+    const onImage = e.target && e.target.id === 'fullscreen-img';
     const xPos = e.clientX;
     const vw = window.innerWidth;
-    if (xPos < vw * 0.25) { fullscreenNavigate(-1); }
-    else if (xPos > vw * 0.75) { fullscreenNavigate(1); }
-    else { closeFullscreen(); }
+    _fsCancelPendingClick();
+    _fsClickTimer = setTimeout(() => {
+      _fsClickTimer = null;
+      if (onImage) {
+        // Image tap-zones: left 25% prev, right 25% next, center close. The
+        // close path is safe here despite the historical double-tap-bounce bug
+        // because a double-tap cancels this timer via onDoubleTap (touch) or
+        // dblclick (mouse) before it ever fires. The second click of a
+        // double-tap also bails on the _fsIsZoomed() check at the top of this
+        // handler since zoom.js has already toggled scale by then.
+        if (xPos < vw * 0.25) { fullscreenNavigate(-1); }
+        else if (xPos > vw * 0.75) { fullscreenNavigate(1); }
+        else { closeFullscreen(); }
+      } else {
+        // Background click (outside the image bounds) also closes.
+        closeFullscreen();
+      }
+    }, 280);
   });
-  // Desktop: ctrl/cmd + wheel to zoom (matches browser image-zoom convention)
-  _fsEl.addEventListener('wheel', e => {
-    if (!e.ctrlKey && !e.metaKey) return;
-    e.preventDefault();
-    const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
-    _fsZoom.scale = Math.max(1, Math.min(5, _fsZoom.scale * factor));
-    if (_fsZoom.scale <= 1.001) _fsResetZoom();
-    else _fsApplyZoom();
-  }, { passive: false });
+  // Native dblclick (desktop mouse) cancels the deferred click action so the
+  // double-click-to-zoom doesn't bounce out of fullscreen first.
+  document.getElementById('fullscreen-img').addEventListener('dblclick', _fsCancelPendingClick);
   w('btn-close-add-print', 'click', () => closeModal('add-print-modal'));
   w('immich-search', 'input', (e) => searchImmich(e.target.value));
   w('btn-create-print', 'click', () => createPrint());
@@ -3156,7 +3510,7 @@ document.addEventListener('click', (e) => {
 
     // Library
     case 'recentItemClick':
-      if (state.selectMode) toggleAssetSelect(id);
+      if (state.selectMode) toggleAssetSelect(id, e);
       else showRecentDetail(id);
       break;
     case 'openFullscreen': openFullscreen(el.dataset.url); break;
@@ -3172,7 +3526,9 @@ document.addEventListener('click', (e) => {
     case 'restoreFromDetail': restoreImmichAssets(id); break;
 case 'downloadRecent': downloadRecent(id, el.dataset.filename); break;
     case 'deleteImmichAsset': deleteImmichAsset(id, el.dataset.filename); break;
-    case 'shareRecent': shareRecent(id, el.dataset.filename, el.dataset.desc); break;
+    case 'shareRecent': shareRecent(id, el.dataset.filename, el.dataset.desc, el.dataset.size); break;
+    case 'executeShare': executeShare(); break;
+    case 'closeShareModal': closeShareModal(); break;
 
     // Albums
     case 'openAlbum': openAlbum(id); break;
@@ -3208,6 +3564,7 @@ case 'downloadRecent': downloadRecent(id, el.dataset.filename); break;
     case 'permanentDeleteImmichSelected': permanentDeleteImmichSelected(); break;
     case 'restoreFromTrashDetail': restoreFromTrashAssets(id); break;
     case 'permanentDeleteDetail': permanentDeleteAssets(id); break;
+    case 'forceRefresh': forceRefresh(); break;
     case 'openImmichSettings': openImmichSettings(); break;
     case 'closeImmichSettings': closeImmichSettings(); break;
     case 'saveImmichSettings': saveImmichSettings(); break;

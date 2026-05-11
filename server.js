@@ -14,6 +14,7 @@ const bcrypt = require('bcryptjs');
 const fetch = require('node-fetch');
 const fs = require('fs');
 const path = require('path');
+const sharp = require('sharp');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -76,7 +77,7 @@ app.use((req, res, next) => {
     "media-src 'self' blob:; " +
     "connect-src 'self'; " +
     "object-src 'none'; " +
-    "frame-ancestors 'self' https://*.squarespace.com https://lakatua.me https://*.lakatua.me https://lakatua.com https://*.lakatua.com https://substack.com https://*.substack.com;"
+    "frame-ancestors 'self' https://*.squarespace.com https://lakatua.me https://*.lakatua.me https://lakatua.com https://*.lakatua.com https://substack.com https://*.substack.com https://lakatua-me.pages.dev https://*.lakatua-me.pages.dev;"
   );
   next();
 });
@@ -247,7 +248,7 @@ app.get('/api/immich/recent', requireAuth, async (req, res) => {
       const r = await fetch(`${IMMICH_URL}/search/metadata`, {
         method: 'POST',
         headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ size, page, order })
+        body: JSON.stringify({ size, page, order, visibility: 'timeline' })
       });
       const data = await r.json();
       allItems = (data.assets && data.assets.items) || [];
@@ -257,7 +258,7 @@ app.get('/api/immich/recent', requireAuth, async (req, res) => {
     const r = await fetch(`${IMMICH_URL}/search/metadata`, {
       method: 'POST',
       headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ size, page })
+      body: JSON.stringify({ size, page, visibility: 'timeline' })
     });
     const data = await r.json();
     allItems = (data.assets && data.assets.items) || [];
@@ -272,6 +273,54 @@ app.get('/api/immich/recent', requireAuth, async (req, res) => {
 
 // Immich proxy - thumbnail
 app.get('/api/immich/thumb/:id', requireAuth, async (req, res) => {
+  // Mid-size: server-resized 1200px / q80 (~150-300 KB), disk-cached.
+  // Used as the second tier of the detail-view progressive chain.
+  if (req.query.size === 'small') {
+    const tag = await _shareCacheTagFor(req.params.id);
+    const cachePath = tag
+      ? path.join(THUMB_CACHE_DIR, `${req.params.id}-small-${tag}.jpg`)
+      : null;
+    if (cachePath && fs.existsSync(cachePath)) {
+      res.set('Content-Type', 'image/jpeg');
+      res.set('Cache-Control', 'private, max-age=86400');
+      res.set('X-Cache', 'HIT');
+      return res.sendFile(cachePath);
+    }
+    try {
+      const upstream = await fetch(`${IMMICH_URL}/assets/${req.params.id}/thumbnail?size=preview`, {
+        headers: { 'x-api-key': IMMICH_KEY }
+      });
+      if (!upstream.ok) {
+        return res.status(upstream.status).send('upstream ' + upstream.status);
+      }
+      const buf = Buffer.from(await upstream.arrayBuffer());
+      const out = await sharp(buf, { failOn: 'none' })
+        .resize({ width: 1800, height: 1800, fit: 'inside', withoutEnlargement: true })
+        .jpeg({ quality: 80, mozjpeg: true })
+        .toBuffer();
+      // Atomic write: tmp + rename — survives concurrent generations.
+      if (cachePath) {
+        try {
+          const tmp = cachePath + '.tmp';
+          fs.writeFileSync(tmp, out);
+          fs.renameSync(tmp, cachePath);
+        } catch (e) {
+          console.warn('thumb-small cache write failed:', e.message);
+        }
+      }
+      res.set('Content-Type', 'image/jpeg');
+      res.set('Content-Length', out.length);
+      res.set('Cache-Control', 'private, max-age=86400');
+      res.set('X-Cache', 'MISS');
+      res.send(out);
+    } catch (e) {
+      console.error('thumb-small resize error:', e);
+      res.status(500).json({ error: e.message });
+    }
+    return;
+  }
+
+  // Default: pass through Immich's native thumbnail / preview.
   try {
     const size = req.query.size === 'preview' ? 'preview' : 'thumbnail';
     const response = await fetch(`${IMMICH_URL}/assets/${req.params.id}/thumbnail?size=${size}`, {
@@ -294,6 +343,132 @@ app.get('/api/immich/original/:id', requireAuth, async (req, res) => {
     res.set('Content-Type', response.headers.get('content-type'));
     response.body.pipe(res);
   } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Immich proxy - preview-size JPEG (~1440px long edge, <1 MB).
+// Used for the Web Share button so we don't try to share a multi-MB hi-res original
+// (which iOS Safari rejects under navigator.canShare).
+app.get('/api/immich/preview/:id', requireAuth, async (req, res) => {
+  try {
+    const size = req.query.size === 'thumbnail' ? 'thumbnail' : 'preview';
+    const response = await fetch(`${IMMICH_URL}/assets/${req.params.id}/thumbnail?size=${size}`, {
+      headers: { 'x-api-key': IMMICH_KEY }
+    });
+    res.set('Content-Type', response.headers.get('content-type') || 'image/jpeg');
+    response.body.pipe(res);
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Immich proxy — sized download / share. Fetches the original from Immich on
+// the local network (fast), then sharp-resizes + iterates JPEG quality to land
+// in a target byte range per size preset. The Leica forum has a 2.7 MB upload
+// limit, so 'large' is treated as a hard ceiling: the encoder retries with
+// lower quality until output <= ceiling.
+const SHARE_CACHE_DIR = '/data/share-cache';
+const THUMB_CACHE_DIR = '/data/thumb-cache';
+try { fs.mkdirSync(SHARE_CACHE_DIR, { recursive: true }); } catch(e) {}
+try { fs.mkdirSync(THUMB_CACHE_DIR, { recursive: true }); } catch(e) {}
+
+// Returns the asset's updatedAt as a compact filename-safe string (or null on error).
+async function _shareCacheTagFor(assetId) {
+  try {
+    const r = await fetch(`${IMMICH_URL}/assets/${assetId}`, {
+      headers: { 'x-api-key': IMMICH_KEY }
+    });
+    if (!r.ok) return null;
+    const a = await r.json();
+    if (!a || !a.updatedAt) return null;
+    return String(a.updatedAt).replace(/[-:.TZ]/g, '');
+  } catch (e) {
+    return null;
+  }
+}
+
+const SHARE_TARGETS = {
+  small:  { maxBytes:   500000, maxDim: 1200 },
+  medium: { maxBytes:  1500000, maxDim: 2400 },
+  large:  { maxBytes:  2700000, maxDim: 4200 },
+};
+
+app.get('/api/immich/download/:id', requireAuth, async (req, res) => {
+  const target = SHARE_TARGETS[req.query.size];
+  if (!target) {
+    // unknown size or 'xlarge' — stream the full original. (not cached)
+    try {
+      const r = await fetch(`${IMMICH_URL}/assets/${req.params.id}/original`, {
+        headers: { 'x-api-key': IMMICH_KEY }
+      });
+      res.set('Content-Type', r.headers.get('content-type') || 'image/jpeg');
+      r.body.pipe(res);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+    return;
+  }
+
+  // Cache lookup. Cache key includes the asset's updatedAt so byte-changes in
+  // Immich (LR republishes etc.) auto-invalidate. Old entries become orphans.
+  const tag = await _shareCacheTagFor(req.params.id);
+  const cachePath = tag
+    ? path.join(SHARE_CACHE_DIR, `${req.params.id}-${req.query.size}-${tag}.jpg`)
+    : null;
+
+  if (cachePath && fs.existsSync(cachePath)) {
+    res.set('Content-Type', 'image/jpeg');
+    res.set('X-Cache', 'HIT');
+    return res.sendFile(cachePath);
+  }
+
+  try {
+    const upstream = await fetch(`${IMMICH_URL}/assets/${req.params.id}/original`, {
+      headers: { 'x-api-key': IMMICH_KEY }
+    });
+    if (!upstream.ok) {
+      return res.status(upstream.status).send('upstream ' + upstream.status);
+    }
+    const buf = Buffer.from(await upstream.arrayBuffer());
+
+    const base = sharp(buf, { failOn: 'none' }).resize({
+      width: target.maxDim,
+      height: target.maxDim,
+      fit: 'inside',
+      withoutEnlargement: true,
+    });
+
+    // Quality-first encode: start at q=95 (highest sane quality with mozjpeg) and
+    // only drop if the result exceeds the ceiling. No artificial lower bound — if a
+    // smooth image lands well under target, that's the correct answer for that image.
+    let q = 95, attempts = 0, out;
+    while (attempts++ < 6) {
+      out = await base.clone().jpeg({ quality: q, mozjpeg: true }).toBuffer();
+      if (out.length <= target.maxBytes) break;
+      if (q <= 50) break;
+      q = Math.max(50, q - 5);
+    }
+
+    // Atomic write to cache (write tmp, rename) — survives concurrent generations.
+    if (cachePath) {
+      try {
+        const tmp = cachePath + '.tmp';
+        fs.writeFileSync(tmp, out);
+        fs.renameSync(tmp, cachePath);
+      } catch (e) {
+        console.warn('share cache write failed:', e.message);
+      }
+    }
+
+    res.set('Content-Type', 'image/jpeg');
+    res.set('Content-Length', out.length);
+    res.set('X-Encode-Quality', String(q));
+    res.set('X-Encode-Attempts', String(attempts));
+    res.set('X-Cache', 'MISS');
+    res.send(out);
+  } catch (e) {
+    console.error('share resize error:', e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -996,7 +1171,12 @@ app.delete('/api/immich/immich-albums/:id/assets', requireAuth, async (req, res)
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Archive assets — hides them from the main library (isArchived: true)
+// Archive assets — hides them from the main library (isArchived: true).
+// Immich's bulk-update endpoint returns 204 No Content with an empty body, so
+// calling r.json() on it throws "Unexpected end of JSON input" — that was
+// landing us in the catch → 500, which the client surfaced as "Archive failed"
+// even though the archive on the Immich side actually succeeded. End the
+// response with 204 instead of trying to parse a body that isn't there.
 app.put('/api/immich/assets/archive', requireAuth, async (req, res) => {
   try {
     const { ids = [] } = req.body;
@@ -1006,12 +1186,12 @@ app.put('/api/immich/assets/archive', requireAuth, async (req, res) => {
       body: JSON.stringify({ ids, isArchived: true })
     });
     if (!r.ok) return res.status(r.status).json({ error: 'Immich archive failed' });
-    const data = await r.json();
-    res.json(data);
+    res.status(204).end();
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Restore assets from archive (isArchived: false)
+// Restore assets from archive (isArchived: false). Same 204-no-body shape as
+// archive above — don't try to parse the response.
 app.put('/api/immich/assets/restore', requireAuth, async (req, res) => {
   try {
     const { ids = [] } = req.body;
@@ -1021,8 +1201,7 @@ app.put('/api/immich/assets/restore', requireAuth, async (req, res) => {
       body: JSON.stringify({ ids, isArchived: false })
     });
     if (!r.ok) return res.status(r.status).json({ error: 'Immich restore failed' });
-    const data = await r.json();
-    res.json(data);
+    res.status(204).end();
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

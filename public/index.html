@@ -96,6 +96,8 @@
   .modal-title { font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.15em; text-transform: uppercase; color: var(--safe); }
   .modal-close { background: none; border: none; color: var(--text-dim); font-size: 20px; cursor: pointer; padding: 0; line-height: 1; }
   .modal-body { padding: 1rem; }
+  .share-prep-spinner { width: 32px; height: 32px; border: 3px solid var(--border); border-top-color: var(--text, #fff); border-radius: 50%; animation: share-prep-spin 0.8s linear infinite; margin: 0 auto; }
+  @keyframes share-prep-spin { to { transform: rotate(360deg); } }
   .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
   .section-divider { font-family: 'IBM Plex Mono', monospace; font-size: 9px; letter-spacing: 0.2em; text-transform: uppercase; color: var(--safe-dim); border-top: 1px solid var(--border); padding-top: 1rem; margin-top: 0.5rem; margin-bottom: 1rem; }
   .search-results { background: var(--surface2); border: 1px solid var(--border); max-height: 250px; overflow-y: auto; }
@@ -200,7 +202,11 @@
   /* FULLSCREEN */
   .fullscreen-overlay { display: none; position: fixed; inset: 0; background: #000; z-index: 300; cursor: zoom-out; }
   .fullscreen-overlay.active { display: flex; align-items: center; justify-content: center; }
-  .fullscreen-overlay img { max-width: 100%; max-height: 100%; object-fit: contain; touch-action: none; transform-origin: center center; will-change: transform; -webkit-user-select: none; user-select: none; -webkit-user-drag: none; }
+  /* will-change/transform-origin intentionally NOT in CSS — zoom.js manages
+     them inline so Safari can re-rasterize from the original bitmap when
+     idle; a static will-change:transform locked composition at layout size
+     and made zoomed views look blurry. */
+  .fullscreen-overlay img { max-width: 100%; max-height: 100%; object-fit: contain; touch-action: none; -webkit-user-select: none; user-select: none; -webkit-user-drag: none; }
   /* MAP */
   .exif-map { display: none; }
   /* LARGER PHOTO ON DESKTOP */
@@ -214,6 +220,29 @@
     .detail-image { max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; display: block; }
     .detail-right { overflow-y: auto; border-left: 1px solid var(--border); }
     #recent-detail-view.active { overflow-y: hidden; }
+  }
+  /* Phone landscape: phone-width is >600px so the 600px rule above kicks in,
+     but the screen is too short for a sticky left pane. Drop back to stacked
+     so the info appears below the image as it does in portrait. iPad landscape
+     (height ~768px+) is excluded by max-height:500px and keeps the grid view. */
+  @media (orientation: landscape) and (max-height: 500px) {
+    .detail-layout { display: block; }
+    .detail-left { position: static; height: auto; display: block; background: transparent; overflow: visible; }
+    .detail-image { max-width: 100%; max-height: 92vh; width: auto; height: auto; object-fit: contain; display: block; margin: 0 auto; }
+    .detail-right { border-left: none; overflow-y: visible; }
+    #recent-detail-view.active { overflow-y: auto; }
+    /* In phone landscape, drop the tab bar and pull all views directly under
+       the 52px header. Tab-bar hidden across all views in this orientation —
+       rotate to portrait to switch tabs. Specificity bumped via #app prefix
+       so these win against #recent-detail-view{top:92px} which appears later
+       in source order outside the @media block. */
+    #app .tab-bar { display: none !important; }
+    /* Pin the header to the BOTTOM in landscape — Back/Out still reachable but
+       the image gets the full top of the viewport. Swipe-down already dismisses. */
+    #app .header { position: fixed !important; top: auto !important; bottom: 0 !important; left: 0; right: 0; border-bottom: none; border-top: 1px solid var(--border); }
+    #app .view.active { top: 0 !important; bottom: 52px !important; }
+    #app #recent-detail-view { top: 0 !important; bottom: 52px !important; }
+    #app #recent-detail-view.active { top: 0 !important; bottom: 52px !important; }
   }
   /* recent-detail-view is a fixed overlay — underlying grid scroll is never disturbed */
   #recent-detail-view { position: fixed; top: 92px; left: 0; right: 0; bottom: 0; z-index: 50; overflow-y: auto; -webkit-overflow-scrolling: touch; background: var(--bg); transition: opacity 0.22s ease; }
@@ -293,8 +322,8 @@
     </div>
     <div style="max-width:1200px;margin:0 auto;padding:0.4rem 1rem;display:flex;gap:0.4rem;align-items:center;border-bottom:1px solid var(--border)">
       <span class="sort-label">Sort</span>
-      <button class="sort-btn active" id="lib-sort-upload" >Upload Date</button>
-      <button class="sort-btn" id="lib-sort-taken" >Date Taken</button>
+      <button class="sort-btn" id="lib-sort-upload" >Upload Date</button>
+      <button class="sort-btn active" id="lib-sort-taken" >Date Taken</button>
 
       <button class="sort-btn" id="lib-sort-dir"  style="margin-left:0.5rem">↓ Newest</button>
     </div>
@@ -375,6 +404,7 @@
       <div style="display:flex;gap:0.4rem">
         <button class="btn btn-ghost btn-sm" data-action="openArchivedView">🗄 Archived</button>
         <button class="btn btn-ghost btn-sm" data-action="openTrashView">🗑 Trash</button>
+        <button class="btn btn-ghost btn-sm" data-action="forceRefresh" title="Clear cache and reload">🔄 Refresh</button>
         <button class="btn btn-ghost btn-sm" data-action="openImmichSettings">⚙ Configure</button>
       </div>
     </div>
@@ -654,11 +684,28 @@
   </div>
 </div>
 
-<script src="/app.js?v=41" defer></script>
+<script src="/zoom.js?v=2" defer></script>
+<script src="/app.js?v=73" defer></script>
 <script>
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.getRegistrations().then(regs => regs.forEach(r => r.unregister()));
 }
 </script>
+  <!-- Share preparation modal (two-step UX for Safari gesture-context fix) -->
+  <div class="modal-overlay" id="share-prep-overlay">
+    <div class="modal" style="max-width:320px;margin-top:8rem;text-align:center">
+      <div class="modal-body" style="padding:2rem 1.25rem">
+        <div id="share-prep-state-loading">
+          <div class="share-prep-spinner"></div>
+          <div id="share-prep-status" style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text-dim);margin-top:1rem;letter-spacing:0.05em">Preparing image…</div>
+        </div>
+        <div id="share-prep-state-ready" style="display:none">
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text-dim);margin-bottom:1rem;letter-spacing:0.05em">Image ready</div>
+          <button class="btn btn-primary" data-action="executeShare" style="width:100%;padding:0.75rem">Tap to share</button>
+        </div>
+        <button class="btn btn-ghost btn-sm" data-action="closeShareModal" style="margin-top:1rem">Cancel</button>
+      </div>
+    </div>
+  </div>
 </body>
 </html>

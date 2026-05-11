@@ -1,6 +1,6 @@
 {
   "name": "darkroom-log",
-  "version": "1.4.3",
+  "version": "1.5.43",
   "description": "Darkroom print log with Immich integration",
   "main": "server.js",
   "scripts": {
@@ -11,6 +11,7 @@
     "express": "^4.18.2",
     "express-session": "^1.17.3",
     "multer": "^2.1.1",
-    "node-fetch": "^2.7.0"
+    "node-fetch": "^2.7.0",
+    "sharp": "^0.33.5"
   }
 }
