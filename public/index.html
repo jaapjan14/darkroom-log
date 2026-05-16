@@ -326,6 +326,7 @@
       <button class="sort-btn active" id="lib-sort-taken" >Date Taken</button>
 
       <button class="sort-btn" id="lib-sort-dir"  style="margin-left:0.5rem">↓ Newest</button>
+      <button class="sort-btn" id="lib-sort-mode" style="margin-left:0.25rem;display:none" title="Switch between fast last-7-days and full sweep">Last 7d · Full sweep →</button>
     </div>
     <div style="max-width:1200px;margin:0 auto;padding:0.25rem 1rem;display:flex;gap:0.5rem;align-items:center;position:relative">
       <button class="sort-btn" id="filters-btn"  style="font-size:10px">⊞ Filters</button>
@@ -381,6 +382,7 @@
     <div id="slideshow-slide-a" class="slideshow-slide"></div>
     <div id="slideshow-slide-b" class="slideshow-slide"></div>
     <div class="slideshow-counter" id="slideshow-counter"></div>
+    <div id="slideshow-photo-title" style="display:none;opacity:0;position:fixed;bottom:6rem;left:50%;transform:translateX(-50%);font-family:'IBM Plex Mono',monospace;font-size:16px;letter-spacing:0.05em;color:rgba(255,255,255,0.92);text-align:center;max-width:80vw;padding:0 2rem;z-index:401;transition:opacity 2.5s ease-in-out;pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></div>
     <div id="slideshow-description" style="position:fixed;bottom:4rem;left:50%;transform:translateX(-50%);font-family:'IBM Plex Mono',monospace;font-size:12px;color:rgba(255,255,255,0.7);text-align:center;max-width:80vw;padding:0 2rem;z-index:401;transition:opacity 0.5s;pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></div>
     <div class="slideshow-controls">
       <button class="nav-arrow" id="btn-ss-prev">‹</button>
@@ -494,6 +496,15 @@
           <div class="ss-toggle-box" id="ss-show-count"></div>
           <span class="ss-toggle-label">Show photo count</span>
         </div>
+      </div>
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--text-dim);margin-bottom:0.75rem;margin-top:0.5rem">Per-photo Overlay</div>
+      <div class="ss-toggle" id="toggle-show-photo-title">
+        <div class="ss-toggle-box" id="ss-show-photo-title"></div>
+        <span class="ss-toggle-label">Show title (IPTC)</span>
+      </div>
+      <div class="ss-toggle" id="toggle-show-photo-description">
+        <div class="ss-toggle-box" id="ss-show-photo-description"></div>
+        <span class="ss-toggle-label">Show description (caption)</span>
       </div>
       <div style="font-family:'IBM Plex Mono',monospace;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--text-dim);margin-bottom:0.75rem;margin-top:0.5rem">Music</div>
       <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--text-dim);margin-bottom:0.4rem">Drop MP3s into /data/music on the NAS to add tracks</div>
@@ -685,7 +696,7 @@
 </div>
 
 <script src="/zoom.js?v=2" defer></script>
-<script src="/app.js?v=73" defer></script>
+<script src="/app.js?v=79" defer></script>
 <script>
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.getRegistrations().then(regs => regs.forEach(r => r.unregister()));

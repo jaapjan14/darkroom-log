@@ -24,6 +24,8 @@ let state = {
   filterOptions: null,
   librarySort: 'taken',
   librarySortDir: 'desc',
+  recentMode: 'window', // upload-sort: 'window' (last N days) | 'full' (sweep+cache)
+  recentWindowDays: 7,
   displayedItems: [],
   previousView: 'recent-view',
   recentActivePerson: null,
@@ -117,6 +119,7 @@ function setLibrarySort(sort) {
   document.getElementById('lib-sort-' + sort).classList.add('active');
   state.recentPage = 1;
   state.recentItems = [];
+  if (typeof updateRecentModeButton === 'function') updateRecentModeButton();
   fetchRecentPage();
 }
 
@@ -127,6 +130,28 @@ function toggleLibrarySortDir() {
   state.recentPage = 1;
   state.recentItems = [];
   fetchRecentPage();
+}
+
+function toggleRecentMode() {
+  state.recentMode = state.recentMode === 'window' ? 'full' : 'window';
+  updateRecentModeButton();
+  state.recentPage = 1;
+  state.recentItems = [];
+  fetchRecentPage();
+}
+
+function updateRecentModeButton() {
+  const btn = document.getElementById('lib-sort-mode');
+  if (!btn) return;
+  const visible = state.librarySort === 'upload';
+  btn.style.display = visible ? '' : 'none';
+  if (!visible) return;
+  btn.textContent = state.recentMode === 'window'
+    ? `Last ${state.recentWindowDays}d · Full sweep →`
+    : `Full sweep ✓`;
+  btn.title = state.recentMode === 'window'
+    ? `Showing uploads from the last ${state.recentWindowDays} days. Click for a full sweep of all uploads (slower, 5‑min cache).`
+    : 'Showing all uploads, sorted by upload date. Click to return to the fast window view.';
 }
 
 async function loadRecent() {
@@ -172,7 +197,12 @@ function absorbAssetMeta(items) {
       city: a.city || '',
       state: a.state || '',
       filename: a.originalFileName || '',
-      takenAt: a.takenAt || a.localDateTime || a.fileCreatedAt || ''
+      takenAt: a.takenAt || a.localDateTime || a.fileCreatedAt || '',
+      // Tags from Immich (synced from LR keywords by lr-immich plugin).
+      // Title is NOT here — server doesn't include it in list responses
+      // (would need a JPEG-header read per asset, too expensive for 500-item
+      // grids). Title is fetched lazily by renderRecentDetail.
+      tags: Array.isArray(a.tags) ? a.tags : []
     };
   }
 }
@@ -205,7 +235,8 @@ async function fetchRecentPage() {
     }
   }
   const size = 250;
-  const r = await fetch(`/api/immich/recent?page=${state.recentPage}&size=${size}&sort=${state.librarySort}&dir=${state.librarySortDir}`);
+  const url = `/api/immich/recent?page=${state.recentPage}&size=${size}&sort=${state.librarySort}&dir=${state.librarySortDir}` + (state.librarySort === 'upload' ? `&mode=${state.recentMode}&windowDays=${state.recentWindowDays}` : '');
+  const r = await fetch(url);
   const data = await r.json();
   const items = data.assets || [];
   absorbAssetMeta(items);
@@ -265,7 +296,8 @@ async function loadRecentMetaBatch(ids) {
         city: meta.city || '',
         state: meta.state || '',
         filename: meta.filename || '',
-        takenAt: meta.takenAt || ''
+        takenAt: meta.takenAt || '',
+        tags: Array.isArray(meta.tags) ? meta.tags : []
       };
     } catch(e) {}
   }
@@ -501,6 +533,81 @@ function updateRecentFilterChips() {
   if (cityEl) cityEl.innerHTML = cities.map(c => chip(c, c)).join('') || loadingMsg;
   if (peopleEl) peopleEl.innerHTML = people.map(p => personChip(p)).join('') || loadingMsg;
 
+}
+
+// Filter the Library grid to all assets carrying a specific Immich tag.
+// Hits /api/immich/tag-search which resolves the name → tagId on the
+// server side and runs Immich's metadata search.
+//
+// Triggered when the user clicks a tag chip inside the photo detail view
+// — we close the detail overlay, switch to the Recent (Library) tab if
+// needed, and show the filtered grid.
+async function searchByImmichTag(tagName) {
+  if (!tagName) return;
+
+  // Close the detail overlay (mirrors goBackFromDetail's overlay-fade).
+  const overlay = document.getElementById('recent-detail-view');
+  if (overlay && overlay.classList.contains('active')) {
+    overlay.classList.add('dismissing');
+    setTimeout(() => overlay.classList.remove('active', 'dismissing'), 230);
+    document.getElementById('back-btn').style.display = 'none';
+  }
+
+  // Ensure we're on the Recent tab.
+  if (typeof switchTab === 'function') {
+    try { switchTab('recent'); } catch (e) { /* tab may already be active */ }
+  }
+
+  // Clear other filters so the tag search isn't intersected unexpectedly.
+  state.recentActiveChips = new Set();
+  state.recentActivePerson = null;
+  if (typeof updateRecentFilterChips === 'function') updateRecentFilterChips();
+  const searchBox = document.getElementById('recent-search');
+  if (searchBox) searchBox.value = '';
+
+  const grid = document.getElementById('recent-grid');
+  if (grid) grid.innerHTML = `<div class="loading">Searching tag "${tagName}"…</div>`;
+
+  state.recentActiveImmichTag = tagName;
+  state.searchPage = 1;
+
+  try {
+    const r = await fetch('/api/immich/tag-search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tag: tagName, size: 250, page: 1 }),
+    });
+    const data = await r.json();
+    const items = data.assets || [];
+    state.recentSmartResults = items;
+    absorbAssetMeta(items);
+    renderRecentGrid(items);
+    loadRecentMetaBatch(items.map(a => a.id));
+
+    // Header strip: show the active tag with a clear-button. Reuses any
+    // existing "active-chip-label" pill the chip system uses.
+    const headerTitle = document.getElementById('header-title');
+    if (headerTitle) headerTitle.textContent = `Tag: ${tagName}`;
+
+    const loadMoreBtn = document.getElementById('load-more-btn');
+    if (loadMoreBtn) {
+      loadMoreBtn.style.display = items.length === 250 ? 'block' : 'none';
+      loadMoreBtn.onclick = async () => {
+        state.searchPage++;
+        const r2 = await fetch('/api/immich/tag-search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tag: tagName, size: 250, page: state.searchPage }),
+        });
+        const d2 = await r2.json();
+        state.recentSmartResults = [...state.recentSmartResults, ...(d2.assets || [])];
+        renderRecentGrid(state.recentSmartResults);
+        loadMoreBtn.style.display = (d2.assets || []).length === 250 ? 'block' : 'none';
+      };
+    }
+  } catch (e) {
+    if (grid) grid.innerHTML = '<div class="loading">Tag search failed.</div>';
+  }
 }
 
 async function searchByPerson(personId, name) {
@@ -815,6 +922,7 @@ async function renderRecentDetail(assetId, navGen) {
             ${state.viewingFromAlbum ? `<button class="btn btn-ghost btn-sm" data-action="removeFromAlbum" data-id="${assetId}">− Remove</button>` : ''}
             ${state.previousView === 'immich-album-view' && !state.viewingArchived && !state.viewingTrash ? `<button class="btn btn-ghost btn-sm" data-action="removeFromImmichAlbumDetail" data-id="${assetId}">− Remove</button>` : ''}
             <button class="btn btn-ghost btn-sm" data-action="downloadRecent" data-id="${assetId}" data-filename="${meta.filename}">↓ DL</button>
+            <button class="btn btn-ghost btn-sm" data-action="copyEmbedUrl" data-id="${assetId}" title="Copy forum [img] BBCode (1024px)">⧉ Embed</button>
           </div>
           <div style="display:flex;gap:0.4rem">
             ${state.viewingTrash ? `
@@ -833,6 +941,7 @@ async function renderRecentDetail(assetId, navGen) {
           </div>
         </div>
         <div class="detail-meta">
+          ${meta.title ? `<div class="detail-title" style="margin-bottom:0.5rem;font-weight:600;color:var(--text);font-size:18px;line-height:1.3">${meta.title}</div>` : ''}
           ${meta.description ? `<div class="detail-film" style="margin-bottom:0.75rem;font-weight:500;color:var(--text);font-size:16px">${meta.description}</div>` : ''}
           <div class="exif-table">
             ${takenDate ? `
@@ -877,6 +986,16 @@ async function renderRecentDetail(assetId, navGen) {
               <div class="exif-row-value">
                 <div class="print-albums-row" style="margin-top:0">
                   ${assetAlbums.map(a => `<button class="album-chip" data-action="openAlbum" data-id="${a.id}" title="Open album">${a.title}</button>`).join('')}
+                </div>
+              </div>
+            </div>` : ''}
+            ${(Array.isArray(meta.tags) && meta.tags.length) ? `
+            <div class="exif-row-item">
+              <div class="exif-row-icon">🏷</div>
+              <div class="exif-row-label">Tags</div>
+              <div class="exif-row-value">
+                <div style="display:flex;gap:0.25rem;flex-wrap:wrap">
+                  ${meta.tags.map(t => `<button class="immich-tag" data-action="searchByImmichTag" data-tag="${t.replace(/"/g,'&quot;')}" title="Show all photos tagged &quot;${t.replace(/"/g,'&quot;')}&quot;" style="background:var(--bg-elev,#222);color:var(--text);padding:2px 8px;border-radius:10px;font-size:11px;font-family:'IBM Plex Mono',monospace;border:1px solid var(--border);cursor:pointer">${t}</button>`).join('')}
                 </div>
               </div>
             </div>` : ''}
@@ -1670,6 +1789,11 @@ async function addToImmichAlbum(albumId) {
     closeModal('add-to-album-modal');
     state.pendingAddAssetId = null;
     if (state.immichSelectMode) exitImmichSelectMode();
+    // Re-render the detail view so the Albums panel reflects the new membership
+    // without the user having to back out and re-open the photo.
+    if (state.currentRecentId && document.getElementById('recent-detail-view').classList.contains('active')) {
+      await renderRecentDetail(state.currentRecentId);
+    }
   } catch(e) { alert('Failed to add to Immich album.'); }
 }
 
@@ -1686,6 +1810,9 @@ async function quickCreateAndAddImmich() {
     closeModal('add-to-album-modal');
     state.pendingAddAssetId = null;
     if (state.immichSelectMode) exitImmichSelectMode();
+    if (state.currentRecentId && document.getElementById('recent-detail-view').classList.contains('active')) {
+      await renderRecentDetail(state.currentRecentId);
+    }
   } catch(e) { alert('Failed to create Immich album.'); }
 }
 
@@ -1823,8 +1950,10 @@ async function addToAlbum(albumId) {
   const album = state.albums.find(a => a.id === albumId);
   if (!album) return;
   const toAdd = Array.isArray(state.pendingAddAssetId) ? state.pendingAddAssetId : [state.pendingAddAssetId];
-  const newAssets = [...album.assets];
-  toAdd.forEach(id => { if (!newAssets.includes(id)) newAssets.push(id); });
+  // v1.5.45 — prepend new adds so the just-added photo is the first thing
+  // visible when the album opens. Preserves selection order on multi-add.
+  const newAdds = toAdd.filter(id => !album.assets.includes(id));
+  const newAssets = [...newAdds, ...album.assets];
   const cover = album.cover || newAssets[0];
   await fetch('/api/albums/' + albumId, {
     method: 'PUT', headers: {'Content-Type':'application/json'},
@@ -1836,6 +1965,9 @@ async function addToAlbum(albumId) {
   state.pendingAddAssetId = null;
   if (state.selectMode) exitSelectMode();
   if (state.immichSelectMode) exitImmichSelectMode();
+  if (state.currentRecentId && document.getElementById('recent-detail-view').classList.contains('active')) {
+    await renderRecentDetail(state.currentRecentId);
+  }
 }
 
 async function quickCreateAndAdd() {
@@ -1862,6 +1994,15 @@ function copyShareLink(url) {
   });
 }
 
+function copyEmbedUrl(assetId) {
+  const url = `${location.origin}/embed/${assetId}-1024.jpg`;
+  navigator.clipboard.writeText(url).then(() => {
+    alert('Embed URL copied:\n' + url);
+  }).catch(() => {
+    prompt('Copy this:', url);
+  });
+}
+
 // ── SLIDESHOW ─────────────────────────────────────────────────────────────────
 
 function startSlideshow() {
@@ -1877,6 +2018,15 @@ async function openAlbumSlideshow(startIdx) {
   document.getElementById('slideshow-slide-a').innerHTML = '';
   document.getElementById('slideshow-slide-b').innerHTML = '';
   document.getElementById('slideshow-overlay').classList.add('active');
+  // Auto-enter fullscreen using the user-gesture activation from the
+  // Start-button tap that called us. Desktop + Android honor this; iOS
+  // Safari rejects fullscreen on non-video elements, so the request no-ops
+  // there — overlay is already position:fixed inset:0 anyway.
+  try {
+    const ov = document.getElementById('slideshow-overlay');
+    const req = ov.requestFullscreen || ov.webkitRequestFullscreen;
+    if (req) { const p = req.call(ov); if (p && p.catch) p.catch(()=>{}); }
+  } catch(e) { /* iOS / no permission — ignore */ }
   // Start music
   startSlideshowMusic(album.slideshowSettings || {});
   // Show title card first if enabled, otherwise go straight to first slide
@@ -1898,6 +2048,12 @@ function openSlideshowSettings() {
   ssSetToggle('ss-show-location', settings.showLocation || false);
   ssSetToggle('ss-show-dates', settings.showDates || false);
   ssSetToggle('ss-show-count', settings.showCount || false);
+  // Per-photo overlay toggles. showPhotoDescription defaults to true to
+  // preserve pre-v1.5.45 behavior where description always showed.
+  ssSetToggle('ss-show-photo-title',
+    settings.showPhotoTitle === true);
+  ssSetToggle('ss-show-photo-description',
+    settings.showPhotoDescription !== false);
   toggleSSTitleOptions();
   loadMusicList(settings.musicFile || null);
   document.getElementById('slideshow-settings-modal').classList.add('active');
@@ -1953,6 +2109,8 @@ async function saveSlideshowSettingsAndStart() {
     showLocation: ssToggleVal('ss-show-location'),
     showDates: ssToggleVal('ss-show-dates'),
     showCount: ssToggleVal('ss-show-count'),
+    showPhotoTitle: ssToggleVal('ss-show-photo-title'),
+    showPhotoDescription: ssToggleVal('ss-show-photo-description'),
     musicFile: document.getElementById('ss-music-select').value || null,
   };
   album.slideshowSettings = settings;
@@ -2047,20 +2205,91 @@ function showSlide(idx) {
   counter.textContent = (idx + 1) + ' / ' + album.assets.length;
   state.slideshow.index = idx;
 
-  // Show description
-  const descEl = document.getElementById('slideshow-description');
+  // Per-photo overlay toggles. showPhotoDescription defaults to true for
+  // backward compat (previous versions always showed description).
+  const ssSettings = album.slideshowSettings || {};
+  const wantTitle = ssSettings.showPhotoTitle === true;
+  const wantDesc  = ssSettings.showPhotoDescription !== false;
+
+  const descEl  = document.getElementById('slideshow-description');
+  const titleEl = document.getElementById('slideshow-photo-title');
   const assetId = album.assets[idx];
-  if (descEl) {
-    if (state.recentMeta[assetId]?.description) {
-      descEl.textContent = state.recentMeta[assetId].description;
-    } else {
-      descEl.textContent = '';
-      fetch('/api/immich/photo/' + assetId).then(r => r.json()).then(m => {
-        if (!state.recentMeta[assetId]) state.recentMeta[assetId] = {};
-        state.recentMeta[assetId].description = m.description || '';
-        if (state.slideshow.index === idx && descEl) descEl.textContent = m.description || '';
-      }).catch(() => {});
+
+  // Helper: apply current cached values to the overlay elements, honoring
+  // visibility toggles. Called both immediately (from cache) and again
+  // after a meta fetch resolves.
+  //
+  // Title behavior:
+  //   • On slide change: opacity → 0 immediately (CSS 0.5s transition
+  //     fades the previous title out).
+  //   • After ~1.2s: set new text + opacity → 1 (fades in via same CSS).
+  //   • Description: still appears instantly to preserve prior behavior.
+  const TITLE_DELAY_MS = 2800;
+  // Fade-out is scheduled BEFORE the slide change so the title is fully
+  // gone before the cross-fade arrives. With 12s slides + 2.5s fade, fire
+  // fade-out at 9500ms (gives 4s of readable steady-visible time after
+  // the 5.3s fully-in moment).
+  const TITLE_FADE_OUT_AT_MS = Math.max(0, _slideDurationMs() - 2500);
+  if (titleEl && titleEl._slideTitleTimer) {
+    clearTimeout(titleEl._slideTitleTimer);
+    titleEl._slideTitleTimer = null;
+  }
+  if (titleEl && titleEl._slideTitleFadeOutTimer) {
+    clearTimeout(titleEl._slideTitleFadeOutTimer);
+    titleEl._slideTitleFadeOutTimer = null;
+  }
+  // Kick off the fade-OUT of the previous title now. We do NOT clear
+  // textContent yet — letting opacity drive the fade is smoother.
+  if (titleEl) titleEl.style.opacity = '0';
+
+  const applyOverlay = (m) => {
+    if (descEl) {
+      if (wantDesc && m && m.description) {
+        descEl.textContent = m.description;
+        descEl.style.display = '';
+      } else {
+        descEl.textContent = '';
+        descEl.style.display = wantDesc ? '' : 'none';
+      }
     }
+    if (titleEl) {
+      if (wantTitle && m && m.title) {
+        titleEl.style.display = '';
+        if (titleEl._slideTitleTimer) clearTimeout(titleEl._slideTitleTimer);
+        if (titleEl._slideTitleFadeOutTimer) clearTimeout(titleEl._slideTitleFadeOutTimer);
+        titleEl._slideTitleTimer = setTimeout(() => {
+          titleEl.textContent = m.title;
+          titleEl.style.opacity = '1';     // fade-in (CSS 2.5s)
+          titleEl._slideTitleTimer = null;
+        }, TITLE_DELAY_MS);
+        // Schedule fade-out so it completes BEFORE the next slide arrives.
+        titleEl._slideTitleFadeOutTimer = setTimeout(() => {
+          titleEl.style.opacity = '0';     // fade-out (CSS 2.5s)
+          titleEl._slideTitleFadeOutTimer = null;
+        }, TITLE_FADE_OUT_AT_MS);
+      } else {
+        titleEl.textContent = '';
+        titleEl.style.opacity = '0';
+        titleEl.style.display = 'none';
+      }
+    }
+  };
+
+  applyOverlay(state.recentMeta[assetId]);
+  // If we don't already have title (or description) cached, fetch the
+  // full photo metadata once. /api/immich/photo/:id now returns `title`
+  // alongside description.
+  const cached = state.recentMeta[assetId];
+  const needFetch = !cached
+    || (wantTitle && cached.title === undefined)
+    || (wantDesc && cached.description === undefined);
+  if (needFetch) {
+    fetch('/api/immich/photo/' + assetId).then(r => r.json()).then(m => {
+      if (!state.recentMeta[assetId]) state.recentMeta[assetId] = {};
+      state.recentMeta[assetId].description = m.description || '';
+      state.recentMeta[assetId].title = m.title || '';
+      if (state.slideshow.index === idx) applyOverlay(state.recentMeta[assetId]);
+    }).catch(() => {});
   }
 
   const move = KB_MOVES[idx % KB_MOVES.length];
@@ -2124,8 +2353,12 @@ function toggleSlideshowMusic() {
 function toggleSlideshowDesc() {
   ssDescVisible = !ssDescVisible;
   const descEl = document.getElementById('slideshow-description');
+  const titleEl = document.getElementById('slideshow-photo-title');
   const btn = document.getElementById('slideshow-desc-btn');
+  // Toggle both overlay elements together — treats title+description as
+  // one "overlay text" unit for the in-slideshow ✦ button.
   if (descEl) descEl.style.opacity = ssDescVisible ? '1' : '0';
+  if (titleEl) titleEl.style.opacity = ssDescVisible ? '1' : '0';
   if (btn) btn.style.color = ssDescVisible ? 'var(--safe)' : '';
 }
 function showSlideshowControls() {
@@ -2140,12 +2373,21 @@ function showSlideshowControls() {
   }, 3000);
 }
 
+// Slide hold duration. When a per-photo title is enabled the slide stays
+// up 12s instead of the classic 7s — gives the title time to fade in,
+// hold readable for several seconds, and fade out cleanly BEFORE the
+// next slide arrives. When title is off, classic 7s rhythm is preserved.
+function _slideDurationMs() {
+  const settings = (state.currentAlbum && state.currentAlbum.slideshowSettings) || {};
+  return settings.showPhotoTitle === true ? 12000 : 7000;
+}
+
 function scheduleNext() {
   if (state.slideshow.timer) clearTimeout(state.slideshow.timer);
   if (!state.slideshow.paused) {
     state.slideshow.timer = setTimeout(() => {
       slideshowNext();
-    }, 7000);
+    }, _slideDurationMs());
   }
 }
 
@@ -2660,7 +2902,12 @@ function searchImmich(q) {
     const items = await r.json();
     const el = document.getElementById('immich-results');
     if (!items.length) { el.innerHTML = '<div class="search-result-item" style="color:var(--text-dim)">No results</div>'; return; }
-    el.innerHTML = '<div class="search-results">' + items.map(i => `<div class="search-result-item" data-action="selectImmich" data-item='${JSON.stringify(i).replace(/'/g, "&#39;")}'>${i.filename}</div>`).join('') + '</div>';
+    const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+    el.innerHTML = '<div class="search-results">' + items.map(i => {
+      const titleLine = i.title ? `<div style="font-weight:600;line-height:1.2">${esc(i.title)}</div>` : '';
+      const fnStyle = i.title ? 'color:var(--text-dim);font-size:11px;line-height:1.2' : '';
+      return `<div class="search-result-item" data-action="selectImmich" data-item='${JSON.stringify(i).replace(/'/g, "&#39;")}'>${titleLine}<div style="${fnStyle}">${esc(i.filename)}</div></div>`;
+    }).join('') + '</div>';
   }, 300);
 }
 
@@ -3344,6 +3591,8 @@ function wireListeners() {
   w('lib-sort-upload', 'click', () => setLibrarySort('upload'));
   w('lib-sort-taken', 'click', () => setLibrarySort('taken'));
   w('lib-sort-dir', 'click', () => toggleLibrarySortDir());
+  w('lib-sort-mode', 'click', () => toggleRecentMode());
+  updateRecentModeButton();
   w('filters-btn', 'click', () => toggleFiltersPopup());
   w('filters-done-btn', 'click', () => toggleFiltersPopup());
   w('btn-clear-chips', 'click', () => { clearRecentChip(); toggleFiltersPopup(); });
@@ -3392,6 +3641,8 @@ function wireListeners() {
   w('toggle-show-location', 'click', () => ssToggle('ss-show-location'));
   w('toggle-show-dates', 'click', () => ssToggle('ss-show-dates'));
   w('toggle-show-count', 'click', () => ssToggle('ss-show-count'));
+  w('toggle-show-photo-title', 'click', () => ssToggle('ss-show-photo-title'));
+  w('toggle-show-photo-description', 'click', () => ssToggle('ss-show-photo-description'));
   w('btn-ss-start', 'click', () => saveSlideshowSettingsAndStart());
 
   // Modals
@@ -3506,6 +3757,7 @@ document.addEventListener('click', (e) => {
     // Filter chips
     case 'setRecentChip': setRecentChip(val); break;
     case 'searchByPerson': searchByPerson(id, el.dataset.name); break;
+    case 'searchByImmichTag': searchByImmichTag(el.dataset.tag); break;
     case 'clearRecentSearch': clearRecentSearch(); break;
 
     // Library
@@ -3525,6 +3777,7 @@ document.addEventListener('click', (e) => {
     case 'archiveFromDetail': archiveImmichAssets(id); break;
     case 'restoreFromDetail': restoreImmichAssets(id); break;
 case 'downloadRecent': downloadRecent(id, el.dataset.filename); break;
+    case 'copyEmbedUrl': copyEmbedUrl(id); break;
     case 'deleteImmichAsset': deleteImmichAsset(id, el.dataset.filename); break;
     case 'shareRecent': shareRecent(id, el.dataset.filename, el.dataset.desc, el.dataset.size); break;
     case 'executeShare': executeShare(); break;

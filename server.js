@@ -15,6 +15,58 @@ const fetch = require('node-fetch');
 const fs = require('fs');
 const path = require('path');
 const sharp = require('sharp');
+const exifr = require('exifr');
+
+// In-memory cache for asset titles extracted from JPEG IPTC/XMP.
+// Immich's API doesn't surface a title field — LR exports title to IPTC
+// ObjectName / XMP dc:title, which we have to read from the JPEG header
+// directly. Key = `${assetId}|${updatedAt}` so a re-upload (Immich's
+// updatedAt bumps) invalidates automatically. Worst case: cache is lost
+// on container restart and we re-fetch first 64KB per detail view.
+const _titleCache = new Map();
+
+async function fetchAssetTitle(assetId, updatedAt) {
+  const key = `${assetId}|${updatedAt || ''}`;
+  if (_titleCache.has(key)) return _titleCache.get(key);
+  let title = '';
+  try {
+    // Range-request the first 256KB. Initial guess was 64KB but for some
+    // JPEGs (verified 2026-05-12 on a_001_mamiya6.jpg) LR pushes IPTC
+    // past the 64KB mark — Photoshop IRB / XMP / thumbnail segments take
+    // up the early header. 64KB returned undefined for ObjectName; 128KB
+    // returned "Belay". 256KB gives us margin without fetching the full
+    // 20MB original. Sub-100ms on LAN.
+    const r = await fetch(`${IMMICH_URL}/assets/${assetId}/original`, {
+      headers: { 'x-api-key': IMMICH_KEY, 'Range': 'bytes=0-262143' },
+    });
+    if (r.ok || r.status === 206) {
+      const buf = await r.buffer();
+      // mergeOutput:false keeps IPTC/XMP/IFD0 in separate namespaces.
+      // exifr's default merge silently drops IPTC ObjectName when there's
+      // no top-level conflict — verified 2026-05-12 against a JPEG that
+      // had ObjectName="Lines" in IPTC: merged result had no `ObjectName`
+      // key at all, but `result.iptc.ObjectName === "Lines"`.
+      const meta = await exifr.parse(buf, {
+        iptc: true, xmp: true, ifd0: true, mergeOutput: false
+      });
+      // Priority: IPTC ObjectName (where LR writes title on JPEG export)
+      // → XMP dc:title → Windows XPTitle.
+      let raw = (meta?.iptc?.ObjectName)
+             || (meta?.xmp?.title)
+             || (meta?.ifd0?.XPTitle)
+             || '';
+      if (typeof raw === 'object' && raw !== null) {
+        // dc:title sometimes parses as a language-map { en: "..." }
+        raw = raw.en || raw.value || Object.values(raw)[0] || '';
+      }
+      title = String(raw).trim();
+    }
+  } catch (e) {
+    // Silent on EXIF parse failure — title is best-effort
+  }
+  _titleCache.set(key, title);
+  return title;
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -24,10 +76,88 @@ const IMMICH_KEY = process.env.IMMICH_KEY || '';
 const DATA_FILE = '/data/prints.json';
 const ALBUMS_FILE = '/data/albums.json';
 const SETTINGS_FILE = '/data/settings.json';
+const TITLE_INDEX_FILE = '/data/titles.json';
 
 // Ensure data files exist
 if (!fs.existsSync(DATA_FILE)) fs.writeFileSync(DATA_FILE, JSON.stringify([]));
 if (!fs.existsSync(ALBUMS_FILE)) fs.writeFileSync(ALBUMS_FILE, JSON.stringify([]));
+
+// ── Title index ────────────────────────────────────────────────────────────
+// Persistent map of assetId → { title, updatedAt, indexedAt }. Lets library
+// search match against IPTC ObjectName (LR's "title" field), which Immich's
+// own search-metadata endpoint doesn't expose. Built by a background backfill
+// that walks Immich and reads each JPEG's IPTC header via fetchAssetTitle.
+let _titleIndex = new Map();
+let _titleIndexSaveTimer = null;
+function loadTitleIndex() {
+  try {
+    const obj = JSON.parse(fs.readFileSync(TITLE_INDEX_FILE, 'utf8'));
+    _titleIndex = new Map(Object.entries(obj));
+    console.log(`title index: loaded ${_titleIndex.size} entries`);
+  } catch (e) {
+    if (e.code !== 'ENOENT') console.error('title index load:', e.message);
+    _titleIndex = new Map();
+  }
+}
+function saveTitleIndexSoon() {
+  if (_titleIndexSaveTimer) return;
+  _titleIndexSaveTimer = setTimeout(() => {
+    _titleIndexSaveTimer = null;
+    try { fs.writeFileSync(TITLE_INDEX_FILE, JSON.stringify(Object.fromEntries(_titleIndex))); }
+    catch (e) { console.error('title index save:', e.message); }
+  }, 5000);
+}
+function searchTitleIndex(q) {
+  if (!q) return [];
+  const needle = q.toLowerCase();
+  const hits = [];
+  for (const [id, e] of _titleIndex) {
+    if (e.title && e.title.toLowerCase().includes(needle)) hits.push({ id, title: e.title });
+  }
+  return hits.slice(0, 50);
+}
+async function backfillTitleIndex() {
+  console.log('title index: backfill started');
+  let page = 1, scanned = 0, updated = 0;
+  while (true) {
+    let data;
+    try {
+      const r = await fetch(`${IMMICH_URL}/search/metadata`, {
+        method: 'POST',
+        headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ page, size: 250, type: 'IMAGE' })
+      });
+      data = await r.json();
+    } catch (e) { console.error('title index: page fetch failed:', e.message); break; }
+    const items = data.assets?.items || [];
+    if (!items.length) break;
+    scanned += items.length;
+    // Process in batches of 8 for some concurrency without hammering Immich
+    for (let i = 0; i < items.length; i += 8) {
+      const batch = items.slice(i, i + 8);
+      await Promise.all(batch.map(async (a) => {
+        const updatedAt = a.updatedAt || a.fileModifiedAt;
+        const cached = _titleIndex.get(a.id);
+        if (cached && cached.updatedAt === updatedAt) return;
+        try {
+          const title = await fetchAssetTitle(a.id, updatedAt);
+          _titleIndex.set(a.id, { title: title || '', updatedAt, indexedAt: Date.now() });
+          updated++;
+        } catch (e) { /* skip */ }
+      }));
+      if (updated > 0 && updated % 50 === 0) saveTitleIndexSoon();
+    }
+    if (data.assets?.nextPage == null) break;
+    page = parseInt(data.assets.nextPage, 10);
+  }
+  saveTitleIndexSoon();
+  console.log(`title index: backfill done. scanned=${scanned} updated=${updated} total=${_titleIndex.size}`);
+}
+loadTitleIndex();
+// Kick off backfill 10s after start so we don't block the boot path, then
+// every 6h for incremental refresh as new photos land.
+setTimeout(() => backfillTitleIndex().catch(e => console.error('backfill:', e)), 10000);
+setInterval(() => backfillTitleIndex().catch(()=>{}), 6 * 60 * 60 * 1000);
 
 const loadData = () => {
   try { return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); }
@@ -151,27 +281,48 @@ app.get('/api/auth/check', (req, res) => {
   res.json({ authenticated: !!req.session.authenticated });
 });
 
-// Immich proxy - search photos
+// Immich proxy - search photos. Queries Immich's filename index AND the
+// local title index in parallel; merges results so a search for "curtains"
+// finds the photo whose IPTC title is Curtains even if the filename is
+// 2024-05-13_M7_036.jpg. Title index is built by background backfill.
 app.get('/api/immich/search', requireAuth, async (req, res) => {
   const { q } = req.query;
+  if (!q || !q.trim()) return res.json([]);
   try {
-    const response = await fetch(`${IMMICH_URL}/search/metadata`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': IMMICH_KEY
-      },
-      body: JSON.stringify({ originalFileName: q, size: 20 })
-    });
-    const data = await response.json();
-    const items = (data.assets?.items || []).map(a => ({
+    const [immichData, titleHits] = await Promise.all([
+      fetch(`${IMMICH_URL}/search/metadata`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': IMMICH_KEY },
+        body: JSON.stringify({ originalFileName: q, size: 20 })
+      }).then(r => r.json()).catch(() => ({ assets: { items: [] } })),
+      Promise.resolve(searchTitleIndex(q))
+    ]);
+    const immichItems = (immichData.assets?.items || []).map(a => ({
       id: a.id,
       filename: a.originalFileName,
+      title: _titleIndex.get(a.id)?.title || '',
       takenAt: a.fileCreatedAt,
       width: a.width,
       height: a.height
     }));
-    res.json(items);
+    const seenIds = new Set(immichItems.map(i => i.id));
+    const titleOnly = titleHits.filter(t => !seenIds.has(t.id)).slice(0, 30);
+    // Fetch full asset data for title-only matches so the UI gets thumbs etc.
+    const titleAssets = await Promise.all(
+      titleOnly.map(t =>
+        fetch(`${IMMICH_URL}/assets/${t.id}`, { headers: { 'x-api-key': IMMICH_KEY } })
+          .then(r => r.ok ? r.json() : null).catch(() => null)
+      )
+    );
+    const titleItems = titleAssets.filter(Boolean).map(a => ({
+      id: a.id,
+      filename: a.originalFileName,
+      title: _titleIndex.get(a.id)?.title || '',
+      takenAt: a.fileCreatedAt,
+      width: a.width,
+      height: a.height
+    }));
+    res.json([...immichItems, ...titleItems]);
   } catch(e) {
     res.status(500).json({ error: e.message });
   }
@@ -184,9 +335,13 @@ app.get('/api/immich/photo/:id', requireAuth, async (req, res) => {
       headers: { 'x-api-key': IMMICH_KEY }
     });
     const data = await response.json();
+    // Title isn't in Immich's API — read it from the JPEG header directly.
+    // fetchAssetTitle is cached by id+updatedAt, so once per asset version.
+    const title = await fetchAssetTitle(req.params.id, data.updatedAt || data.fileModifiedAt);
     res.json({
       id: data.id,
       filename: data.originalFileName,
+      title: title || '',
       description: data.exifInfo?.description || '',
       make: data.exifInfo?.make || '',
       model: data.exifInfo?.model || '',
@@ -202,6 +357,8 @@ app.get('/api/immich/photo/:id', requireAuth, async (req, res) => {
       country: data.exifInfo?.country || data.country || '',
       width: data.exifInfo?.exifImageWidth || '',
       height: data.exifInfo?.exifImageHeight || '',
+      // Tag names from Immich (synced from LR keywords by the lr-immich plugin)
+      tags: Array.isArray(data.tags) ? data.tags.map(t => t.name).filter(Boolean) : [],
       isArchived: data.isArchived || false
     });
   } catch(e) {
@@ -231,18 +388,63 @@ function mapAssetWithMeta(a) {
     country: exif.country || a.country || '',
     width: exif.exifImageWidth || '',
     height: exif.exifImageHeight || '',
+    // Tags come from Immich directly — `tags` is an array of {id,name,value,...}.
+    // We forward just the names since that's all the UI needs.
+    // No title here — that requires a JPEG-header EXIF read per asset which
+    // would be way too expensive for a 500-item grid. Title is fetched
+    // lazily in /api/immich/photo/:id (detail view) where the cost is fine.
+    tags: Array.isArray(a.tags) ? a.tags.map(t => t.name).filter(Boolean) : [],
     isArchived: a.isArchived || false
   };
 }
 
 // Immich proxy - recent uploads
+// Upload sort uses windowed createdAfter by default (fast). Mode=full pages
+// through everything and caches the sorted list (5 min) so users can find old
+// photos uploaded recently — Immich's metadata search only sorts by
+// fileCreatedAt, so a window-by-upload-time was the only way to surface fresh
+// uploads of historical scans.
+let _uploadSweepCache = null;
+let _uploadSweepCachedAt = 0;
+const UPLOAD_SWEEP_TTL_MS = 5 * 60 * 1000;
+async function _fetchAllTimelineAssets() {
+  const all = [];
+  const pageSize = 1000;
+  for (let p = 1; p <= 50; p++) {
+    const r = await fetch(`${IMMICH_URL}/search/metadata`, {
+      method: 'POST',
+      headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ size: pageSize, page: p, visibility: 'timeline' })
+    });
+    const data = await r.json();
+    const items = (data.assets && data.assets.items) || [];
+    all.push(...items);
+    if (items.length < pageSize) break;
+  }
+  return all;
+}
+async function _fetchTimelineSince(sinceIso) {
+  const all = [];
+  const pageSize = 1000;
+  for (let p = 1; p <= 10; p++) {
+    const r = await fetch(`${IMMICH_URL}/search/metadata`, {
+      method: 'POST',
+      headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ size: pageSize, page: p, visibility: 'timeline', createdAfter: sinceIso })
+    });
+    const data = await r.json();
+    const items = (data.assets && data.assets.items) || [];
+    all.push(...items);
+    if (items.length < pageSize) break;
+  }
+  return all;
+}
 app.get('/api/immich/recent', requireAuth, async (req, res) => {
   const page = parseInt(req.query.page) || 1;
   const size = parseInt(req.query.size) || 500;
   const sort = req.query.sort || 'upload';
   const dir = req.query.dir || 'desc';
   try {
-    let allItems = [];
     if (sort === 'taken') {
       const order = dir === 'asc' ? 'asc' : 'desc';
       const r = await fetch(`${IMMICH_URL}/search/metadata`, {
@@ -251,21 +453,36 @@ app.get('/api/immich/recent', requireAuth, async (req, res) => {
         body: JSON.stringify({ size, page, order, visibility: 'timeline' })
       });
       const data = await r.json();
-      allItems = (data.assets && data.assets.items) || [];
-      res.json({ assets: allItems.map(mapAssetWithMeta), total: data.assets?.total || 0 });
+      const items = (data.assets && data.assets.items) || [];
+      res.json({ assets: items.map(mapAssetWithMeta), total: data.assets?.total || 0 });
       return;
     }
-    const r = await fetch(`${IMMICH_URL}/search/metadata`, {
-      method: 'POST',
-      headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ size, page, visibility: 'timeline' })
-    });
-    const data = await r.json();
-    allItems = (data.assets && data.assets.items) || [];
-    allItems.sort((a, b) => dir === 'asc'
+    // sort === 'upload' — window (default) or full sweep
+    const mode = req.query.mode === 'full' ? 'full' : 'window';
+    const windowDays = Math.max(1, Math.min(365, parseInt(req.query.windowDays) || 7));
+    let pool;
+    if (mode === 'full') {
+      const now = Date.now();
+      if (!_uploadSweepCache || (now - _uploadSweepCachedAt) > UPLOAD_SWEEP_TTL_MS) {
+        _uploadSweepCache = await _fetchAllTimelineAssets();
+        _uploadSweepCachedAt = now;
+      }
+      pool = _uploadSweepCache;
+    } else {
+      const since = new Date(Date.now() - windowDays * 86400e3).toISOString();
+      pool = await _fetchTimelineSince(since);
+    }
+    pool = pool.slice().sort((a, b) => dir === 'asc'
       ? new Date(a.createdAt) - new Date(b.createdAt)
       : new Date(b.createdAt) - new Date(a.createdAt));
-    res.json({ assets: allItems.map(mapAssetWithMeta), total: data.assets?.total || 0 });
+    const startIdx = (page - 1) * size;
+    const slice = pool.slice(startIdx, startIdx + size);
+    res.json({
+      assets: slice.map(mapAssetWithMeta),
+      total: pool.length,
+      mode,
+      windowDays: mode === 'window' ? windowDays : null
+    });
   } catch(e) {
     res.status(500).json({ error: e.message });
   }
@@ -296,6 +513,7 @@ app.get('/api/immich/thumb/:id', requireAuth, async (req, res) => {
       const buf = Buffer.from(await upstream.arrayBuffer());
       const out = await sharp(buf, { failOn: 'none' })
         .resize({ width: 1800, height: 1800, fit: 'inside', withoutEnlargement: true })
+        .withMetadata()
         .jpeg({ quality: 80, mozjpeg: true })
         .toBuffer();
       // Atomic write: tmp + rename — survives concurrent generations.
@@ -444,7 +662,7 @@ app.get('/api/immich/download/:id', requireAuth, async (req, res) => {
     // smooth image lands well under target, that's the correct answer for that image.
     let q = 95, attempts = 0, out;
     while (attempts++ < 6) {
-      out = await base.clone().jpeg({ quality: q, mozjpeg: true }).toBuffer();
+      out = await base.clone().withMetadata().jpeg({ quality: q, mozjpeg: true }).toBuffer();
       if (out.length <= target.maxBytes) break;
       if (q <= 50) break;
       q = Math.max(50, q - 5);
@@ -586,7 +804,7 @@ app.post('/api/immich/text-search', requireAuth, async (req, res) => {
     ].filter(Boolean);
 
     const results = await Promise.all(searches.map(p => p.then(r => r.json()).catch(() => ({assets:{items:[]}}))));
-    
+
     // Merge and deduplicate by id
     const seen = new Set();
     const items = [];
@@ -598,6 +816,51 @@ app.post('/api/immich/text-search', requireAuth, async (req, res) => {
         }
       }
     }
+
+    // Also match the local title index — IPTC ObjectName lives only in JPEG
+    // headers and Immich's API doesn't expose it. The title index is built
+    // by a background backfill in fetchAssetTitle.
+    const titleHits = searchTitleIndex(query).filter(t => !seen.has(t.id));
+    if (titleHits.length) {
+      const titleAssets = await Promise.all(
+        titleHits.slice(0, 30).map(t =>
+          fetch(`${IMMICH_URL}/assets/${t.id}`, { headers: { 'x-api-key': IMMICH_KEY } })
+            .then(r => r.ok ? r.json() : null).catch(() => null)
+        )
+      );
+      for (const a of titleAssets) {
+        if (a && !seen.has(a.id)) {
+          seen.add(a.id);
+          items.push(mapAssetWithMeta(a));
+        }
+      }
+    }
+
+    // Match tag names — find any tag whose name contains the query
+    // (case-insensitive substring), then search by those tagIds. Lets
+    // "trestle" find photos tagged "Trestle" or "trestle-railroad".
+    try {
+      const tagsR = await fetch(`${IMMICH_URL}/tags`, { headers: { 'x-api-key': IMMICH_KEY } });
+      const allTags = await tagsR.json();
+      const needle = query.toLowerCase();
+      const matched = (Array.isArray(allTags) ? allTags : [])
+        .filter(t => t.name && t.name.toLowerCase().includes(needle));
+      if (matched.length) {
+        const tagR = await fetch(`${IMMICH_URL}/search/metadata`, {
+          method: 'POST',
+          headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tagIds: matched.map(t => t.id), size, page })
+        });
+        const tagData = await tagR.json();
+        for (const a of (tagData.assets?.items || [])) {
+          if (!seen.has(a.id)) {
+            seen.add(a.id);
+            items.push(mapAssetWithMeta(a));
+          }
+        }
+      }
+    } catch(e) { /* tag search is additive — failure is non-fatal */ }
+
     res.json({ assets: items, total: items.length });
   } catch(e) {
     res.status(500).json({ error: e.message });
@@ -696,6 +959,41 @@ app.post('/api/immich/combined-search', requireAuth, async (req, res) => {
       }
     }
     res.json({ assets: items, total: items.length });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Tag search — find all Immich assets carrying a given tag (by name).
+// LR keywords sync to Immich tags via the lr-immich plugin; clicking a
+// tag chip in the library detail view hits this endpoint to filter the
+// library grid to other photos sharing that tag.
+//
+// Two-step on the Immich side:
+//   1. GET /api/tags to resolve name → tagId
+//   2. POST /search/metadata with tagIds:[tagId]
+app.post('/api/immich/tag-search', requireAuth, async (req, res) => {
+  const { tag, size = 60, page = 1 } = req.body;
+  if (!tag) return res.json({ assets: [], total: 0 });
+  try {
+    const tagsR = await fetch(`${IMMICH_URL}/tags`, {
+      headers: { 'x-api-key': IMMICH_KEY }
+    });
+    const allTags = await tagsR.json();
+    const match = (Array.isArray(allTags) ? allTags : []).find(t => t.name === tag);
+    if (!match) return res.json({ assets: [], total: 0 });
+
+    const r = await fetch(`${IMMICH_URL}/search/metadata`, {
+      method: 'POST',
+      headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tagIds: [match.id], size, page })
+    });
+    const data = await r.json();
+    const items = (data.assets && data.assets.items) || [];
+    res.json({
+      assets: items.map(mapAssetWithMeta),
+      total: data.assets?.total || items.length
+    });
   } catch(e) {
     res.status(500).json({ error: e.message });
   }
@@ -912,6 +1210,39 @@ app.get('/api/public/thumb/:id', async (req, res) => {
   } catch(e) { res.status(500).end(); }
 });
 
+// PUBLIC forum-embed proxy — clean .jpg URL for BBCode [img] tags (Fred
+// Miranda, etc.). Filename pattern is <assetId>.jpg so any forum's image
+// detector recognizes it. Stable across Immich share-key rotations because
+// the proxy holds the admin API key server-side; only Immich asset_id needs
+// to stay constant for the URL to survive. Built to replace Flickr embeds
+// that were being broken by platform-side secret rotations.
+app.get('/embed/:filename', async (req, res) => {
+  // Accept both <id>.jpg and <id>-<width>.jpg. Filename-based sizing avoids
+  // forum BBCode parsers that truncate URLs at "?" (Fred Miranda does this:
+  // ?w=800 leaks outside the [img] tag). Query string still works as backup.
+  const m = req.params.filename.match(/^([0-9a-f-]{32,36})(?:-(\d{3,4}))?\.jpe?g$/i);
+  if (!m) return res.status(400).send('bad filename');
+  const id = m[1];
+  // 1024px is the forum-standard width (old Flickr "_b" size). Override via
+  // filename suffix (<id>-800.jpg) or ?w= query. Capped at 2400.
+  let width = parseInt(m[2] || req.query.w, 10);
+  if (!Number.isFinite(width) || width < 100 || width > 2400) width = 1024;
+  try {
+    const r = await fetch(`${IMMICH_URL}/assets/${id}/thumbnail?size=preview`, {
+      headers: { 'x-api-key': IMMICH_KEY }
+    });
+    if (!r.ok) return res.status(r.status).end();
+    const buf = Buffer.from(await r.arrayBuffer());
+    const out = await sharp(buf)
+      .resize({ width, withoutEnlargement: true })
+      .jpeg({ quality: 88, mozjpeg: true })
+      .toBuffer();
+    res.set('Content-Type', 'image/jpeg');
+    res.set('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
+    res.end(out);
+  } catch(e) { res.status(502).end(); }
+});
+
 // PUBLIC original proxy (no auth)
 app.get('/api/public/original/:id', async (req, res) => {
   try {
@@ -931,7 +1262,12 @@ app.get('/api/public/photo/:id', async (req, res) => {
     });
     const data = await r.json();
     const exif = data.exifInfo || {};
+    // Title comes from JPEG IPTC ObjectName (Immich's API doesn't expose it).
+    // fetchAssetTitle is cached by id+updatedAt so subsequent slideshow
+    // ticks across the same asset hit cache.
+    const title = await fetchAssetTitle(req.params.id, data.updatedAt || data.fileModifiedAt);
     res.json({
+      title: title || '',
       description: exif.description || '',
       make: exif.make || '',
       model: exif.model || '',
@@ -945,11 +1281,15 @@ app.get('/api/public/photo/:id', async (req, res) => {
       state: exif.state || '',
       country: exif.country || ''
     });
-  } catch(e) { res.json({ description: '' }); }
+  } catch(e) { res.json({ description: '', title: '' }); }
 });
 
 // Serve public album page
 app.get('/album/:slug', async (req, res) => {
+  // Tell Cloudflare + browsers not to edge-cache the HTML so meta-tag /
+  // script-tag updates land immediately. The JS/CSS files referenced
+  // FROM this HTML are still cache-busted via ?v=N suffixes.
+  res.set('Cache-Control', 'no-cache, must-revalidate');
   const albums = loadAlbums();
   const album = albums.find(a => a.slug === req.params.slug);
   const html = fs.readFileSync(path.join(__dirname, 'public', 'album.html'), 'utf8');
