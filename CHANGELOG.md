@@ -9,8 +9,8 @@
 - Files: `public/app.js` (state, `toggleRecentMode`, `updateRecentModeButton`, `setLibrarySort` hook, `fetchRecentPage` URL, click handler) → cache-busted to `?v=237`; `public/sw.js` shell cache → `darkroom-v109`. `index.html` button stub unchanged. `server.js` unchanged.
 - **Operational note from the restore session:** After the front-end deploy, the live response still appeared to omit the just-uploaded historical photos. Cause turned out to be a stale `_uploadSweepCache` (in-process, 5-min TTL — but persisting across sessions in container memory). A `docker restart darkroom` cleared it; first Full Sweep click after restart did a fresh `_fetchAllTimelineAssets()` and the 2024 uploads landed at the top of the createdAt-desc sort as expected. If the same symptom recurs after a bulk upload, the fastest path is a container restart — or wait 5 min and click Full Sweep, which forces a refetch on the next request past TTL.
 
-### Known gap to audit
-- The CHANGELOG jumped from v1.5.45 (`app.js?v=74`, SW `v=96`) straight to v1.5.46 below, but the deployed app between those two entries went through ~14 cache-bust versions of `app.js` (v=75 → v=222) and a stack of SW bumps. Slideshow/audio/album work that landed in that window — beat-fade transitions (`showSlideBeatFade`), dynamic slide hold (`_currentSlideHoldMs`, `_slideDurationMs`), album date-range calc (`_computeAlbumDateRange`), fade-out (`fadeOutSlideshow`), and others — is not documented here. A back-fill pass is needed.
+### Known gap — back-filled
+- The CHANGELOG previously jumped from v1.5.45 (`app.js?v=74`, SW `v=96`) straight to v1.5.46 below, leaving ~14 cache-bust versions of `app.js` (v=75 → v=222) and a stack of SW bumps undocumented. Back-filled as the `v1.5.45.5 — back-fill` entry below v1.5.46: Web Audio engine, beat-aligned scheduler, four new slideshow presets (Quick / Beat / Beat Fade / Custom), per-photo title+description overlay, album title-card + auto date-range, fade-out at end, pace-pulse preview, music+description toggles. Sub-version attribution wasn't recoverable; consolidated into one entry.
 
 ---
 
@@ -37,6 +37,171 @@
   way to recover the live state.
 - Files: `public/audio-engine.js` (closes OAC after `startRendering`),
   cache-busted to `?v=10`; `public/index.html` references updated.
+
+---
+
+## v1.5.45.5 — back-fill (2026-05-11 → 2026-05-17)
+
+**Pre-restore back-fill.** The CHANGELOG had a hole between v1.5.45
+(`app.js?v=74`, SW `v=96` on 2026-05-11) and v1.5.46 above (`app.js?v=222`,
+SW `v=107` on 2026-05-17). Roughly 14 cache-bust versions of `app.js`
+shipped to the NAS in that window, plus a new sibling `public/audio-engine.js`,
+plus essentia.js / WASM bundles for in-browser BPM analysis. Sub-version
+attribution isn't recoverable; this single entry consolidates the
+slideshow / album / audio work that landed in that period.
+
+### New: Web Audio engine for slideshow music (`public/audio-engine.js`)
+- New `window.DarkroomAudio` global. Replaces the prior `<audio>`-element
+  playback because HTMLAudio's `currentTime` reports ~100–300 ms behind
+  actual audio output, making beat-locked visual scheduling drift
+  permanently. Web Audio's `AudioContext.currentTime` is the same clock
+  the audio is generated against — sample-accurate.
+- Lifecycle: `ensureCtx()` (idempotent, must fire from a user-gesture
+  handler before any `await`) → `loadTrack(file)` (fetch + decode +
+  cache) → `playMusic(file, {fadeMs, loop, volume})` → `pauseMusic`
+  (remembers offset) / `stopMusic` (doesn't) / `getMusicTime()` (live
+  position in seconds, sample-accurate) / `scheduleClick(ctxTime)` (one
+  metronome tick at exact audio time, used for in-context BPM previews).
+- Track + analysis caches (`Map<file, AudioBuffer>` and
+  `Map<file, {bpm, beats:[seconds], confidence}>`) survive across
+  preview / play cycles. Concurrent `analyzeTrack()` calls share a single
+  in-flight Promise.
+- Essentia.js worker (`public/essentia-worker.js` + the WASM bundle
+  `essentia-wasm.umd.js` + `essentia.js-core.js`) does the BPM / beat-grid
+  detection off the main thread. Results posted back to `DarkroomAudio`
+  and cached per-file.
+- Pause / stop / fade ramps via per-source `GainNode` (each
+  `AudioBufferSourceNode` gets its own — Web Audio sources are one-shot).
+- Click tick is a 40 ms dual-tone (2.5 kHz + 5 kHz) with exponential
+  decay, built once at engine init; bright enough to cut through music.
+
+### New: Slideshow presets (Classic / Quick / Beat / Beat Fade / Custom)
+- The slideshow gained four new render paths alongside the existing
+  Classic (Ken Burns + 1.5 s opacity crossfade) path. Each is a
+  standalone function so Classic's frozen animation timing isn't
+  disturbed:
+  - `showSlideSlide(idx, direction)` — **Quick** preset. No Ken Burns;
+    a 1.8 s horizontal slide-in (`ss-slide-h-from-right` /
+    `ss-slide-h-from-left`) with the outgoing slot exiting in the same
+    direction. 6 s hold.
+  - `showSlideBeatFade(idx)` — **Beat Fade** preset. Same beat-aligned
+    scheduler as Beat but no motion; just a crisp 400 ms opacity
+    crossfade on each beat-aligned tick (`ss-fade-quick`).
+  - Beat / Beat Fade share `scheduleNext()`'s beat-grid scheduling
+    (below). Custom is constant-BPM; Quick / Classic use fixed time.
+- `slideshowPrev()` re-anchors the beat grid (`beatIdx = beatPtnIdx =
+  null`) so backward nav resyncs from the current music position
+  instead of stepping the old grid backward.
+
+### New: Beat-aligned scheduler with pattern support
+- `scheduleNext()` for Beat / Beat Fade walks the
+  Essentia-detected beats array using `DarkroomAudio.getMusicTime()`,
+  finds the next beat that's at least `dur * 0.5` seconds away, and
+  schedules `setTimeout(slideshowNext, target - musicSec)` so the slide
+  change lands on that exact audio sample.
+- `paceBeatsEvery` accepts a constant (`"8"`) or comma-separated pattern
+  (`"8,4"`); `_parseBeatPattern()` validates → array of positive ints
+  ≤ 64, falls back to `[8]`. The scheduler cycles through the pattern
+  per slide via `state.slideshow.beatPtnIdx`.
+- Two scheduling paths:
+  1. **Override** (`paceBpmOverrideEnabled === true` + numeric
+     `paceBpmOverride ≥ 40`): synthesizes a beat grid from
+     `analysis.beats[0]` as the phase offset, walks the pattern from
+     there. Used when Essentia's detected BPM is wrong or absent.
+  2. **Auto**: walks Essentia's detected `analysis.beats` array
+     directly, snapping the first slide to a multiple of `pattern[0]`
+     so cadence starts on a clean barline.
+- **Catch-up logic** in both paths: if a slow image load advances
+  `musicSec` past the next target beat, the scheduler walks the pattern
+  (and beats array) forward until the target is comfortably ahead.
+  Prevents the failure mode where `delay = max(50, negative)` fires
+  the next slide instantly and every late slide cascades.
+- `_currentSlideHoldMs()` returns the hold for the *current* pattern
+  step (correct mid-pattern); `_slideDurationMs()` returns a
+  representative (first-step) duration used for fallback timing and
+  the minAhead computation.
+- Debug logs (`console.log('[beat-schedule] ...')`) are retained in
+  both override + auto paths to aid future BPM-drift diagnosis.
+
+### New: Per-photo title + description overlay (`_renderPerPhotoOverlay`)
+- Title and description overlays render on each slide for any preset
+  whose render path calls `_renderPerPhotoOverlay(idx)` (currently:
+  Classic via showSlide, Quick via showSlideSlide, Beat Fade via
+  showSlideBeatFade — explicitly added to Quick + Beat Fade because
+  only Classic had it originally).
+- Overlay shows iff `slideshowSettings.showPhotoTitle === true` /
+  `showPhotoDescription === true` (strict-true; matches v1.5.46's
+  description-toggle semantics fix).
+- **Adaptive fade timings** keyed off the actual slide hold duration:
+  - `≥ 6 s`: 1000 ms fade-in/out, 800 ms delay past image fade
+  - `≥ 3.5 s`: 600 ms fades, baseline delay
+  - `≥ 2.2 s` (~4-beat): 400 ms fades, delay tightened so the title
+    appears before the next slide arrives
+  - `< 2.2 s`: 300 ms fades, minimal 200 ms delay
+  - `< 1.4 s` (≤2-beat @ 120 BPM): overlays **suppressed entirely** —
+    can't fit a readable fade-in/hold/fade-out cycle.
+- Per-element fade-in / fade-out timers are stashed on the DOM node
+  (`titleEl._slideTitleTimer`, `descEl._slideDescFadeOutTimer` etc.)
+  and cleared at the top of each new slide so a fast skip doesn't
+  leak ghost titles.
+- `toggleSlideshowDesc()` (✦ button in slideshow controls) toggles both
+  overlays as one unit.
+
+### New: Album title card + auto date-range
+- `showTitleCard(album)` — pre-roll card before the first slide.
+  Shows album title (always when `showTitle` is on), and conditionally:
+  `byline` ("Photography by …"), location, date range, photo count.
+  Fades in via two-rAF gate, holds 3.5 s, fades out 1 s.
+- `_computeAlbumDateRange(album)` — fetches each asset's `takenAt`
+  (using the `state.recentMeta` cache when available, falling back to
+  `/api/immich/photo/<id>`), finds the min/max, returns a formatted
+  range via `_formatDateRange()`. Capped at a 2 s `Promise.race`
+  timeout so a slow Immich call can't delay the slideshow start
+  indefinitely.
+- `_formatDateRange()` handles four cases: same day ("Nov 16, 2024"),
+  same month/year ("Nov 2024"), same year different months
+  ("Nov — Dec 2024"), different years ("Nov 2024 — Mar 2025").
+- Manual override: `slideshowSettings.dateRange` string wins over the
+  auto-computed range when set.
+
+### New: Fade-out at end-of-album
+- `fadeOutSlideshow()` — when `slideshowSettings.fadeOutAtEnd === true`
+  and `slidesShown >= album.assets.length`, the slideshow fades to
+  black over 6 s while `DarkroomAudio.stopMusic({fadeMs: 6000})` fades
+  the music in parallel, then `closeSlideshow()`. Opt-in per album;
+  default (looping, no fade) is unchanged.
+
+### New: In-settings pace-pulse preview
+- `startPacePulse()` / `stopPacePulse()` — visible while the **Custom**
+  preset is the selected one in the slideshow-settings modal. A
+  growing/shrinking opacity-pulse on the `#ss-pace-pulse` element
+  flashes at the slider's current BPM so the user can tap-match the
+  music in their head before committing.
+
+### New: Slideshow music-toggle + description-toggle controls
+- `toggleSlideshowMusic()` — ♪ button in slideshow controls.
+  Pause-with-200 ms-fade if currently playing; resume from the current
+  album's `musicFile` (or the engine's last music file) if not.
+- `toggleSlideshowDesc()` — ✦ button. See per-photo overlay above.
+- Both controls auto-hide via `showSlideshowControls()` (3 s timer).
+
+### New: Music engine routing — `startSlideshowMusic` / `stopSlideshowMusic`
+- Replaces the prior HTMLAudio path with `DarkroomAudio.playMusic(file,
+  { fadeMs: 1600, loop: true, volume: 0.85 })` for slideshow entry and
+  `DarkroomAudio.stopMusic({ fadeMs: 800 })` for exit.
+- Settings-modal music preview shares the same single music slot via
+  `startMusicPreview` / `stopMusicPreview` at 0.6 volume — so previewing
+  a track while a slideshow is queued doesn't double up.
+
+### Pre-existing infrastructure touched
+- `index.html` got new `<script>` tags for `audio-engine.js`,
+  `essentia-worker.js`, `essentia.js-core.js`, `essentia-wasm.umd.js`,
+  plus `<div id="ss-pace-pulse">`, `<div id="ss-title-card">`,
+  `<div id="slideshow-photo-title">`, `<div id="slideshow-description">`
+  and the ✦ / ♪ control buttons.
+- SW (`public/sw.js`) cache key bumped repeatedly in this window
+  (`darkroom-v96` → … → `darkroom-v107`); `STATIC` precache list
+  unchanged (essentia / engine load on demand via `<script defer>`).
 
 ---
 
