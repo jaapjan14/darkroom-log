@@ -185,6 +185,23 @@ slideshow / album / audio work that landed in that period.
 - `toggleSlideshowDesc()` — ✦ button. See per-photo overlay above.
 - Both controls auto-hide via `showSlideshowControls()` (3 s timer).
 
+### New: Beat-analysis status surface (`refreshBeatStatus`)
+- Live status line under the music-track picker in the slideshow-settings
+  modal: `Select a music track to begin analysis` → `Analyzing track…`
+  (with worker progress stages: `Analyzing: decode (12%)…`) → on
+  completion `Detected: 124.0 BPM · 482 beats · confidence 0.87`, or
+  `Detection failed — try BPM override or pick another preset` on
+  failure. Backed by `DarkroomAudio.getAnalysisStatus(file)` and
+  `window.onBeatAnalysisProgress` hooks posted from the Essentia worker.
+
+### New: Forum-embed URL copy (`copyEmbedUrl`)
+- "⧉ Embed" button in the photo detail-view header. Copies
+  `${origin}/embed/<assetId>-1024.jpg` to the clipboard
+  (`navigator.clipboard.writeText` with a `prompt()` fallback for
+  permission-blocked contexts) so the URL drops cleanly into forum
+  `[img]` BBCode at a sensible 1024px width. Companion to the
+  Leica-forum-friendly server-side 1024 embed path.
+
 ### New: Music engine routing — `startSlideshowMusic` / `stopSlideshowMusic`
 - Replaces the prior HTMLAudio path with `DarkroomAudio.playMusic(file,
   { fadeMs: 1600, loop: true, volume: 0.85 })` for slideshow entry and
