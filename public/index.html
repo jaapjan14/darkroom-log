@@ -184,6 +184,15 @@
   .slideshow-overlay.active { display: block; }
   .slideshow-slide { position: absolute; inset: 0; overflow: hidden; opacity: 0; transition: opacity 1.5s ease-in-out; will-change: opacity; }
   .slideshow-slide.ss-visible { opacity: 1; }
+  /* Beat Fade preset — clean opacity crossfade, no ken-burns */
+  .slideshow-slide.ss-fade-quick { transition: opacity 700ms ease-in-out; }
+  /* Quick preset (slide-horizontal). Only takes effect when JS adds .ss-slide-h. */
+  .slideshow-slide.ss-slide-h { opacity: 1; transition: transform 1.8s cubic-bezier(0.4, 0, 0.2, 1); will-change: transform; }
+  .slideshow-slide.ss-slide-h.ss-slide-h-from-right { transform: translateX(100%); }
+  .slideshow-slide.ss-slide-h.ss-slide-h-from-left  { transform: translateX(-100%); }
+  .slideshow-slide.ss-slide-h.ss-visible            { transform: translateX(0); }
+  .slideshow-slide.ss-slide-h.ss-exiting-left       { transform: translateX(-100%); }
+  .slideshow-slide.ss-slide-h.ss-exiting-right      { transform: translateX(100%); }
   .slideshow-slide .ss-bg { position: absolute; inset: -20px; background-size: cover; background-position: center; filter: blur(20px) brightness(0.35); transform: scale(1.1); }
   .slideshow-slide .ss-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; transform-origin: center center; will-change: transform; }
   /* animation applied via inline style in JS so it persists through fade-out */
@@ -488,9 +497,15 @@
           <div class="ss-toggle-box" id="ss-show-location"></div>
           <span class="ss-toggle-label">Show location</span>
         </div>
+        <div class="form-group" style="margin-top:0.5rem;margin-bottom:0.75rem">
+          <input type="text" id="ss-location" placeholder="e.g. Seattle, WA">
+        </div>
         <div class="ss-toggle" id="toggle-show-dates">
           <div class="ss-toggle-box" id="ss-show-dates"></div>
           <span class="ss-toggle-label">Show date range</span>
+        </div>
+        <div class="form-group" style="margin-top:0.5rem;margin-bottom:0.75rem">
+          <input type="text" id="ss-date-range" placeholder="Leave blank to auto-calculate from photo dates">
         </div>
         <div class="ss-toggle" id="toggle-show-count">
           <div class="ss-toggle-box" id="ss-show-count"></div>
@@ -506,11 +521,62 @@
         <div class="ss-toggle-box" id="ss-show-photo-description"></div>
         <span class="ss-toggle-label">Show description (caption)</span>
       </div>
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--text-dim);margin-bottom:0.75rem;margin-top:0.5rem">Animation</div>
+      <select id="ss-preset" style="margin-bottom:0.5rem">
+        <option value="classic">Classic — Ken Burns, 7s slides (default)</option>
+        <option value="quick">Quick — slide-in transitions, no Ken Burns, 6s</option>
+        <option value="custom">Custom — Ken Burns + fade, choose your own pace</option>
+        <option value="beat">Beat — auto-detect tempo, slide changes on the beat</option>
+        <option value="beatfade">Beat Fade — fade in/out on the beat, no Ken Burns</option>
+      </select>
+      <div id="ss-custom-pace" style="display:none;margin-bottom:0.5rem;padding-left:0.25rem">
+        <div style="display:flex;align-items:center;gap:0.75rem">
+          <input type="range" id="ss-pace" min="40" max="200" step="1" value="60" style="flex:1">
+          <span id="ss-pace-label" style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text-dim);min-width:11em;text-align:right">60 BPM · 8.0s/slide</span>
+          <span id="ss-pace-pulse" title="Pulses at the chosen tempo" style="display:inline-block;width:22px;height:22px;border-radius:50%;background:var(--safe);opacity:.28;transform:scale(.55);transition:opacity .12s ease-out, transform .12s ease-out;box-shadow:0 0 12px rgba(200,97,26,.75);flex-shrink:0"></span>
+        </div>
+      </div>
+      <div id="ss-beat-pace" style="display:none;margin-bottom:0.5rem;padding-left:0.25rem">
+        <div id="ss-beat-status" style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text-dim);margin-bottom:0.5rem">Select a music track to begin analysis</div>
+        <div style="display:flex;align-items:center;gap:0.75rem">
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--text-dim);min-width:6em">Change every</span>
+          <select id="ss-beat-every" style="flex:1">
+            <optgroup label="Constant">
+              <option value="1">1 beat</option>
+              <option value="2">2 beats</option>
+              <option value="4">4 beats (every bar)</option>
+              <option value="8" selected>8 beats (every 2 bars)</option>
+              <option value="16">16 beats (every 4 bars)</option>
+              <option value="32">32 beats (every 8 bars)</option>
+            </optgroup>
+            <optgroup label="Mixed pattern">
+              <option value="8,4">8 then 4 (long-short)</option>
+              <option value="4,8">4 then 8 (short-long)</option>
+              <option value="8,8,4">8, 8, 4</option>
+              <option value="8,4,4">8, 4, 4</option>
+              <option value="16,8,4,4">16, 8, 4, 4</option>
+              <option value="8,4,2,2">8, 4, 2, 2 (accelerating)</option>
+            </optgroup>
+          </select>
+        </div>
+        <div class="ss-toggle" id="toggle-ss-beat-override" style="margin-top:0.5rem">
+          <div class="ss-toggle-box" id="ss-beat-override-enabled"></div>
+          <span class="ss-toggle-label">Override detected BPM</span>
+        </div>
+        <div id="ss-beat-override-row" style="display:none;align-items:center;gap:0.75rem;margin-top:0.5rem">
+          <input type="range" id="ss-beat-bpm-override" min="40" max="200" step="1" value="120" style="flex:1">
+          <span id="ss-beat-bpm-override-label" style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text-dim);min-width:5em;text-align:right">120 BPM</span>
+        </div>
+      </div>
       <div style="font-family:'IBM Plex Mono',monospace;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--text-dim);margin-bottom:0.75rem;margin-top:0.5rem">Music</div>
       <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--text-dim);margin-bottom:0.4rem">Drop MP3s into /data/music on the NAS to add tracks</div>
       <select id="ss-music-select" style="margin-bottom:0.5rem">
         <option value="">No music</option>
       </select>
+      <div class="ss-toggle" id="toggle-ss-fade-out-end" style="margin-top:0.5rem">
+        <div class="ss-toggle-box" id="ss-fade-out-end"></div>
+        <span class="ss-toggle-label">Fade out at end (otherwise loops)</span>
+      </div>
       <div style="margin-top:1.5rem;display:flex;gap:0.5rem;justify-content:flex-end">
         <button class="btn btn-ghost btn-sm" id="btn-ss-modal-cancel">Cancel</button>
         <button class="btn btn-sm" id="btn-ss-start" >▶ Start</button>
@@ -696,7 +762,8 @@
 </div>
 
 <script src="/zoom.js?v=2" defer></script>
-<script src="/app.js?v=79" defer></script>
+<script src="/audio-engine.js?v=10" defer></script>
+<script src="/app.js?v=237" defer></script>
 <script>
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.getRegistrations().then(regs => regs.forEach(r => r.unregister()));

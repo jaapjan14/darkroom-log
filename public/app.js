@@ -115,7 +115,9 @@ function switchTab(tab) {
 
 function setLibrarySort(sort) {
   state.librarySort = sort;
-  document.querySelectorAll('[id^="lib-sort-"]').forEach(b => b.classList.remove('active'));
+  // Only clear `active` from actual sort buttons (upload/taken). lib-sort-mode
+  // and lib-sort-dir are toggle buttons with their own visual state, not sorts.
+  document.querySelectorAll('#lib-sort-upload, #lib-sort-taken').forEach(b => b.classList.remove('active'));
   document.getElementById('lib-sort-' + sort).classList.add('active');
   state.recentPage = 1;
   state.recentItems = [];
@@ -132,12 +134,26 @@ function toggleLibrarySortDir() {
   fetchRecentPage();
 }
 
+// Upload-Date sort has two modes:
+//   window: query Immich with createdAfter = now-7d, fast (default)
+//   full:   page through every timeline asset, server caches for 5 min,
+//           surfaces freshly-uploaded film scans whose fileCreatedAt buries
+//           them deep in the chronological timeline
+// The toggle also fires /api/filters/refresh-people so newly-tagged faces
+// from Immich's face-recognition appear in the people filter without a
+// full filter-cache rebuild.
 function toggleRecentMode() {
   state.recentMode = state.recentMode === 'window' ? 'full' : 'window';
   updateRecentModeButton();
   state.recentPage = 1;
   state.recentItems = [];
   fetchRecentPage();
+  // Fire-and-forget: pull fresh face tags from Immich. Don't await — the
+  // grid reload above shouldn't wait on this.
+  fetch('/api/filters/refresh-people', { method: 'POST' })
+    .then(r => r.json())
+    .then(d => { if (d && d.ok) console.log('People refreshed:', d.count); })
+    .catch(() => {});
 }
 
 function updateRecentModeButton() {
@@ -150,7 +166,7 @@ function updateRecentModeButton() {
     ? `Last ${state.recentWindowDays}d · Full sweep →`
     : `Full sweep ✓`;
   btn.title = state.recentMode === 'window'
-    ? `Showing uploads from the last ${state.recentWindowDays} days. Click for a full sweep of all uploads (slower, 5‑min cache).`
+    ? `Showing uploads from the last ${state.recentWindowDays} days. Click for a full sweep of all uploads (slower, 5-min cache). Also refreshes face tags.`
     : 'Showing all uploads, sorted by upload date. Click to return to the fast window view.';
 }
 
@@ -235,7 +251,8 @@ async function fetchRecentPage() {
     }
   }
   const size = 250;
-  const url = `/api/immich/recent?page=${state.recentPage}&size=${size}&sort=${state.librarySort}&dir=${state.librarySortDir}` + (state.librarySort === 'upload' ? `&mode=${state.recentMode}&windowDays=${state.recentWindowDays}` : '');
+  const url = `/api/immich/recent?page=${state.recentPage}&size=${size}&sort=${state.librarySort}&dir=${state.librarySortDir}`
+    + (state.librarySort === 'upload' ? `&mode=${state.recentMode}&windowDays=${state.recentWindowDays}` : '');
   const r = await fetch(url);
   const data = await r.json();
   const items = data.assets || [];
@@ -2012,7 +2029,7 @@ function startSlideshow() {
 async function openAlbumSlideshow(startIdx) {
   const album = state.currentAlbum;
   if (!album || !album.assets.length) return;
-  state.slideshow = { active: true, index: startIdx, timer: null, paused: false };
+  state.slideshow = { active: true, index: startIdx, timer: null, paused: false, beatIdx: null, beatPtnIdx: null, slidesShown: 1 };
   ssActiveSlot = 'a';
   ssDescVisible = true;
   document.getElementById('slideshow-slide-a').innerHTML = '';
@@ -2022,17 +2039,27 @@ async function openAlbumSlideshow(startIdx) {
   // Start-button tap that called us. Desktop + Android honor this; iOS
   // Safari rejects fullscreen on non-video elements, so the request no-ops
   // there — overlay is already position:fixed inset:0 anyway.
-  try {
-    const ov = document.getElementById('slideshow-overlay');
-    const req = ov.requestFullscreen || ov.webkitRequestFullscreen;
-    if (req) { const p = req.call(ov); if (p && p.catch) p.catch(()=>{}); }
-  } catch(e) { /* iOS / no permission — ignore */ }
+  // Only auto-fullscreen on touch-primary devices. Desktop stays in browser
+  // tab; user can hit the ⤢ button manually if they want fullscreen.
+  if (window.matchMedia('(hover: none) and (pointer: coarse)').matches) {
+    try {
+      const ov = document.getElementById('slideshow-overlay');
+      const req = ov.requestFullscreen || ov.webkitRequestFullscreen;
+      if (req) { const p = req.call(ov); if (p && p.catch) p.catch(()=>{}); }
+    } catch(e) { /* iOS / no permission — ignore */ }
+  }
   // Start music
   startSlideshowMusic(album.slideshowSettings || {});
   // Show title card first if enabled, otherwise go straight to first slide
   await showTitleCard(album);
+  // beatIdx tracks the last-scheduled beat index for tempo presets; null
+  // means "re-anchor on next scheduleNext call". beatPtnIdx cycles through
+  // the beat-step pattern (e.g. [8,4,8,4,...]).
+  state.slideshow.beatIdx = null;
+  state.slideshow.beatPtnIdx = null;
   showSlide(startIdx);
-  scheduleNext();
+  // showSlide's image-load callback calls scheduleNext — single source of
+  // truth, prevents the historical double-scheduling bug
   showSlideshowControls();
 }
 
@@ -2041,22 +2068,96 @@ async function openAlbumSlideshow(startIdx) {
 function openSlideshowSettings() {
   const album = state.currentAlbum;
   if (!album || !album.assets.length) return;
+  // Warm AudioContext inside this user-gesture handler.
+  try { if (window.DarkroomAudio) DarkroomAudio.ensureCtx(); } catch(e) {}
   const settings = album.slideshowSettings || {};
   // Restore saved settings
   ssSetToggle('ss-show-title', settings.showTitle || false);
   document.getElementById('ss-byline').value = settings.byline || 'JJ Lakatua';
   ssSetToggle('ss-show-location', settings.showLocation || false);
+  const locEl = document.getElementById('ss-location');
+  if (locEl) locEl.value = settings.location || '';
   ssSetToggle('ss-show-dates', settings.showDates || false);
+  const drEl = document.getElementById('ss-date-range');
+  if (drEl) drEl.value = settings.dateRange || '';
   ssSetToggle('ss-show-count', settings.showCount || false);
-  // Per-photo overlay toggles. showPhotoDescription defaults to true to
-  // preserve pre-v1.5.45 behavior where description always showed.
+  // Per-photo overlay toggles. Both default to OFF unless explicitly
+  // enabled — user-facing principle is "I unchecked it, it should be off."
   ssSetToggle('ss-show-photo-title',
     settings.showPhotoTitle === true);
   ssSetToggle('ss-show-photo-description',
-    settings.showPhotoDescription !== false);
+    settings.showPhotoDescription === true);
+  ssSetToggle('ss-fade-out-end', settings.fadeOutAtEnd === true);
+  const presetEl = document.getElementById('ss-preset');
+  if (presetEl) presetEl.value = settings.preset || 'classic';
+  // Custom pace slider: BPM (40-120), default 60. Slide duration = 8 beats.
+  const paceEl = document.getElementById('ss-pace');
+  const paceLabel = document.getElementById('ss-pace-label');
+  const paceWrap = document.getElementById('ss-custom-pace');
+  if (paceEl) {
+    const savedBpm = Number(settings.paceBpm);
+    paceEl.value = Number.isFinite(savedBpm) && savedBpm >= 40 && savedBpm <= 200 ? savedBpm : 60;
+  }
+  if (paceLabel) {
+    const bpm = Number(paceEl?.value) || 60;
+    paceLabel.textContent = `${bpm} BPM · ${(8 * 60 / bpm).toFixed(1)}s/slide`;
+  }
+  if (paceWrap) paceWrap.style.display = (presetEl && presetEl.value === 'custom') ? 'block' : 'none';
+  // Beat preset controls — separate pane from Custom
+  const beatPane = document.getElementById('ss-beat-pace');
+  const beatEveryEl = document.getElementById('ss-beat-every');
+  if (beatEveryEl) {
+    // paceBeatsEvery is a string — "8" (constant) or "8,4" (alternating pattern).
+    const valid = ['1','2','4','8','16','32','8,4','4,8','8,8,4','8,4,4','16,8,4,4','8,4,2,2'];
+    const saved = settings.paceBeatsEvery != null ? String(settings.paceBeatsEvery) : '8';
+    beatEveryEl.value = valid.includes(saved) ? saved : '8';
+  }
+  const bpmOverrideEl = document.getElementById('ss-beat-bpm-override');
+  const bpmOverrideLabel = document.getElementById('ss-beat-bpm-override-label');
+  const overrideRow = document.getElementById('ss-beat-override-row');
+  if (bpmOverrideEl) {
+    const saved = Number(settings.paceBpmOverride);
+    bpmOverrideEl.value = String(Number.isFinite(saved) && saved >= 40 && saved <= 200 ? saved : 120);
+    if (bpmOverrideLabel) bpmOverrideLabel.textContent = `${bpmOverrideEl.value} BPM`;
+  }
+  ssSetToggle('ss-beat-override-enabled', settings.paceBpmOverrideEnabled === true);
+  if (overrideRow) overrideRow.style.display = (settings.paceBpmOverrideEnabled === true) ? 'flex' : 'none';
+  const _isBeat = presetEl && (presetEl.value === 'beat' || presetEl.value === 'beatfade');
+  if (beatPane) beatPane.style.display = _isBeat ? 'block' : 'none';
+  // Kick off the preview pulse if Custom is the chosen preset on modal open.
+  if (presetEl && presetEl.value === 'custom') startPacePulse(); else stopPacePulse();
   toggleSSTitleOptions();
   loadMusicList(settings.musicFile || null);
+  // Music does NOT auto-play in the settings modal — only starts when you
+  // click Start. Analysis (Beat preset) runs against the decoded buffer
+  // silently, no playback needed.
+  if (presetEl && (presetEl.value === 'beat' || presetEl.value === 'beatfade') && settings.musicFile) {
+    refreshBeatStatus(settings.musicFile);
+  }
   document.getElementById('slideshow-settings-modal').classList.add('active');
+}
+
+// Beat-preset status — shows analyzing progress → detected / failed.
+function refreshBeatStatus(file) {
+  const status = document.getElementById('ss-beat-status');
+  if (!status || !window.DarkroomAudio) return;
+  if (!file) { status.textContent = 'Select a music track to begin analysis'; return; }
+  const st = DarkroomAudio.getAnalysisStatus(file);
+  if (st === 'ready') {
+    const a = DarkroomAudio.getTrackAnalysis(file);
+    status.textContent = `Detected: ${a.bpm.toFixed(1)} BPM · ${a.beats.length} beats · confidence ${a.confidence.toFixed(2)}`;
+    return;
+  }
+  if (st === 'failed') { status.textContent = 'Detection failed — try BPM override or pick another preset'; return; }
+  status.textContent = 'Analyzing track…';
+  // Live progress messages from the worker
+  window.onBeatAnalysisProgress = (f, stage, message) => {
+    if (f !== file) return;
+    if (status) status.textContent = `Analyzing: ${stage || ''}${message ? ' (' + message + ')' : ''}…`;
+  };
+  DarkroomAudio.analyzeTrack(file)
+    .then(() => { window.onBeatAnalysisProgress = null; refreshBeatStatus(file); })
+    .catch(() => { window.onBeatAnalysisProgress = null; refreshBeatStatus(file); });
 }
 
 function ssToggle(id) {
@@ -2103,14 +2204,25 @@ async function loadMusicList(currentFile) {
 
 async function saveSlideshowSettingsAndStart() {
   const album = state.currentAlbum;
+  // Warm AudioContext synchronously inside this click — must happen before
+  // any await, or Safari drops user-gesture activation and audio stays muted.
+  try { if (window.DarkroomAudio) DarkroomAudio.ensureCtx(); } catch(e) {}
   const settings = {
     showTitle: ssToggleVal('ss-show-title'),
     byline: document.getElementById('ss-byline').value.trim(),
     showLocation: ssToggleVal('ss-show-location'),
+    location: (document.getElementById('ss-location')?.value || '').trim(),
     showDates: ssToggleVal('ss-show-dates'),
+    dateRange: (document.getElementById('ss-date-range')?.value || '').trim(),
     showCount: ssToggleVal('ss-show-count'),
     showPhotoTitle: ssToggleVal('ss-show-photo-title'),
     showPhotoDescription: ssToggleVal('ss-show-photo-description'),
+    preset: document.getElementById('ss-preset')?.value || 'classic',
+    paceBpm: Number(document.getElementById('ss-pace')?.value) || 60,
+    paceBeatsEvery: document.getElementById('ss-beat-every')?.value || '8',
+    paceBpmOverride: Number(document.getElementById('ss-beat-bpm-override')?.value) || 0,
+    paceBpmOverrideEnabled: ssToggleVal('ss-beat-override-enabled'),
+    fadeOutAtEnd: ssToggleVal('ss-fade-out-end'),
     musicFile: document.getElementById('ss-music-select').value || null,
   };
   album.slideshowSettings = settings;
@@ -2122,18 +2234,84 @@ async function saveSlideshowSettingsAndStart() {
       body: JSON.stringify({ slideshowSettings: settings })
     });
   } catch(e) {}
+  stopPacePulse();
+  stopMusicPreview();
   closeModal('slideshow-settings-modal');
   openAlbumSlideshow(0);
+}
+
+// Compute the date range string for an album by fetching each asset's
+// takenAt and finding min/max. Uses state.recentMeta cache when available.
+// Returns '' if no usable dates found.
+async function _computeAlbumDateRange(album) {
+  if (!album || !album.assets || !album.assets.length) return '';
+  const fetches = album.assets.map(id => {
+    const cached = state.recentMeta[id];
+    if (cached && cached.takenAt) return Promise.resolve(cached.takenAt);
+    return fetch('/api/immich/photo/' + id)
+      .then(r => r.json())
+      .then(m => {
+        if (!state.recentMeta[id]) state.recentMeta[id] = {};
+        state.recentMeta[id].takenAt = m.takenAt || '';
+        state.recentMeta[id].title = m.title || '';
+        state.recentMeta[id].description = m.description || '';
+        return m.takenAt || '';
+      })
+      .catch(() => '');
+  });
+  const taken = await Promise.all(fetches);
+  const dates = taken.filter(Boolean).map(s => new Date(s)).filter(d => !isNaN(d.getTime()));
+  if (!dates.length) return '';
+  dates.sort((a, b) => a - b);
+  return _formatDateRange(dates[0], dates[dates.length - 1]);
+}
+
+function _formatDateRange(d1, d2) {
+  const month = d => d.toLocaleString('en-US', { month: 'short' });
+  const year = d => d.getFullYear();
+  // Same calendar day
+  if (d1.toDateString() === d2.toDateString()) {
+    return `${month(d1)} ${d1.getDate()}, ${year(d1)}`;
+  }
+  // Same month and year
+  if (year(d1) === year(d2) && d1.getMonth() === d2.getMonth()) {
+    return `${month(d1)} ${year(d1)}`;
+  }
+  // Same year, different months
+  if (year(d1) === year(d2)) {
+    return `${month(d1)} — ${month(d2)} ${year(d1)}`;
+  }
+  // Different years
+  return `${month(d1)} ${year(d1)} — ${month(d2)} ${year(d2)}`;
 }
 
 async function showTitleCard(album) {
   const settings = album.slideshowSettings || {};
   if (!settings.showTitle) return;
+  // If dates are on, resolve the display string before rendering — either
+  // the user-entered override or the auto-computed range from photo
+  // takenAt values. Capped at a hard 2s timeout so a slow Immich call
+  // doesn't delay the slideshow start indefinitely.
+  let dateRangeStr = '';
+  if (settings.showDates) {
+    if (settings.dateRange) {
+      dateRangeStr = settings.dateRange;
+    } else {
+      try {
+        dateRangeStr = await Promise.race([
+          _computeAlbumDateRange(album),
+          new Promise(res => setTimeout(() => res(''), 2000))
+        ]);
+      } catch (e) { dateRangeStr = ''; }
+    }
+  }
   const card = document.getElementById('ss-title-card');
   const content = document.getElementById('ss-title-card-content');
   let html = `<div class="ss-title-main">${album.title}</div>`;
   html += `<div style="width:60px;height:1px;background:var(--safe);margin:1.5rem auto"></div>`;
   if (settings.byline) html += `<div class="ss-title-sub">Photography by ${settings.byline}</div>`;
+  if (settings.showLocation && settings.location) html += `<div class="ss-title-sub" style="margin-top:0.5rem">${settings.location}</div>`;
+  if (settings.showDates && dateRangeStr) html += `<div class="ss-title-sub" style="margin-top:0.5rem">${dateRangeStr}</div>`;
   if (settings.showCount) html += `<div class="ss-title-sub" style="margin-top:0.75rem;letter-spacing:0.2em">${album.assets.length} PHOTOS</div>`;
   content.innerHTML = html;
   card.style.display = 'flex';
@@ -2145,37 +2323,18 @@ async function showTitleCard(album) {
   card.style.display = 'none';
 }
 
-let ssAudio = null;
-let ssMusicFade = null;
+// Slideshow music — routed through DarkroomAudio (Web Audio engine).
 function startSlideshowMusic(settings) {
-  if (ssMusicFade) { clearInterval(ssMusicFade); ssMusicFade = null; }
-  if (ssAudio) { ssAudio.pause(); ssAudio = null; }
   if (!settings.musicFile) return;
-  ssAudio = new Audio('/api/albums/music/' + encodeURIComponent(settings.musicFile));
-  ssAudio.loop = true;
-  ssAudio.volume = 0;
-  ssAudio.play().catch(() => {});
-  const targetAudio = ssAudio;
-  let vol = 0;
-  ssMusicFade = setInterval(() => {
-    if (ssAudio !== targetAudio) { clearInterval(ssMusicFade); ssMusicFade = null; return; }
-    vol = Math.min(vol + 0.05, 0.8);
-    ssAudio.volume = vol;
-    if (vol >= 0.8) { clearInterval(ssMusicFade); ssMusicFade = null; }
-  }, 100);
+  DarkroomAudio.playMusic(settings.musicFile, {
+    fadeMs: 1600,
+    loop: true,
+    volume: 0.85,
+  }).catch(e => console.warn('slideshow music failed:', e));
 }
 
 function stopSlideshowMusic() {
-  if (ssMusicFade) { clearInterval(ssMusicFade); ssMusicFade = null; }
-  if (!ssAudio) return;
-  const targetAudio = ssAudio;
-  let vol = ssAudio.volume;
-  ssMusicFade = setInterval(() => {
-    if (ssAudio !== targetAudio) { clearInterval(ssMusicFade); ssMusicFade = null; return; }
-    vol = Math.max(vol - 0.05, 0);
-    ssAudio.volume = vol;
-    if (vol <= 0) { clearInterval(ssMusicFade); ssMusicFade = null; ssAudio.pause(); ssAudio = null; }
-  }, 80);
+  if (window.DarkroomAudio) DarkroomAudio.stopMusic({ fadeMs: 800 });
 }
 
 const KB_MOVES = [
@@ -2199,37 +2358,99 @@ function cancelSlideCleanup() {
   if (inactiveEl) { inactiveEl.classList.remove('ss-visible'); inactiveEl.style.zIndex = 1; }
 }
 
-function showSlide(idx) {
-  const album = state.currentAlbum;
-  const counter = document.getElementById('slideshow-counter');
-  counter.textContent = (idx + 1) + ' / ' + album.assets.length;
-  state.slideshow.index = idx;
+// Returns the duration the CURRENT slide will hold, including the actual
+// beat-pattern step for beat/beatfade presets (where successive slides can
+// have very different durations). _slideDurationMs() returns only the first
+// step and is wrong mid-pattern.
+function _currentSlideHoldMs() {
+  const settings = (state.currentAlbum && state.currentAlbum.slideshowSettings) || {};
+  if (settings.preset === 'quick') return 6000;
+  if (settings.preset === 'custom') {
+    const bpm = Number(settings.paceBpm);
+    if (Number.isFinite(bpm) && bpm >= 40 && bpm <= 200) return Math.round(8 * 60000 / bpm);
+    return 8000;
+  }
+  if (settings.preset === 'beat' || settings.preset === 'beatfade') {
+    const pattern = _parseBeatPattern(settings.paceBeatsEvery);
+    const ptnIdx = (state.slideshow.beatPtnIdx == null) ? 0 : (state.slideshow.beatPtnIdx % pattern.length);
+    const beats = pattern[ptnIdx];
+    let bpm = 0;
+    if (settings.paceBpmOverrideEnabled === true && Number(settings.paceBpmOverride) >= 40) {
+      bpm = Number(settings.paceBpmOverride);
+    } else if (window.DarkroomAudio && settings.musicFile) {
+      const analysis = DarkroomAudio.getTrackAnalysis(settings.musicFile);
+      if (analysis && analysis.bpm) bpm = analysis.bpm;
+    }
+    if (!bpm) bpm = 60;
+    return Math.round(beats * 60000 / bpm);
+  }
+  return 7000; // classic default
+}
 
-  // Per-photo overlay toggles. showPhotoDescription defaults to true for
-  // backward compat (previous versions always showed description).
+// Per-photo overlay (title + description) — shared by all preset render
+// paths. Title fade timing scales with the actual current slide duration
+// so 8/4/2-beat slides each get appropriate fade-in/out windows. Titles
+// are skipped entirely on slides shorter than ~1.5s (can't surface before
+// the next slide arrives).
+function _renderPerPhotoOverlay(idx) {
+  const album = state.currentAlbum;
+  if (!album) return;
   const ssSettings = album.slideshowSettings || {};
   const wantTitle = ssSettings.showPhotoTitle === true;
-  const wantDesc  = ssSettings.showPhotoDescription !== false;
-
+  const wantDesc  = ssSettings.showPhotoDescription === true;
   const descEl  = document.getElementById('slideshow-description');
   const titleEl = document.getElementById('slideshow-photo-title');
   const assetId = album.assets[idx];
 
-  // Helper: apply current cached values to the overlay elements, honoring
-  // visibility toggles. Called both immediately (from cache) and again
-  // after a meta fetch resolves.
-  //
-  // Title behavior:
-  //   • On slide change: opacity → 0 immediately (CSS 0.5s transition
-  //     fades the previous title out).
-  //   • After ~1.2s: set new text + opacity → 1 (fades in via same CSS).
-  //   • Description: still appears instantly to preserve prior behavior.
-  const TITLE_DELAY_MS = 2800;
-  // Fade-out is scheduled BEFORE the slide change so the title is fully
-  // gone before the cross-fade arrives. With 12s slides + 2.5s fade, fire
-  // fade-out at 9500ms (gives 4s of readable steady-visible time after
-  // the 5.3s fully-in moment).
-  const TITLE_FADE_OUT_AT_MS = Math.max(0, _slideDurationMs() - 2500);
+  const slideDur = _currentSlideHoldMs();
+  // Skip both overlays on slides too short to fit a readable fade-in/hold/
+  // fade-out. Duration-based — a 2-beat slide at 60 BPM is 2s and totally
+  // workable, while at 120 BPM it's only 1s and isn't.
+  const overlayTooFast = slideDur < 1400;
+
+  // Image crossfade duration per preset — title shouldn't materialize
+  // until the image it belongs to is fully in view.
+  //   Beat Fade: 700ms (.ss-fade-quick override)
+  //   Quick: 1.8s slide-in transform
+  //   Classic / Beat / Custom: 1.5s default opacity transition
+  const imgFadeMs = (ssSettings.preset === 'beatfade') ? 700
+                  : (ssSettings.preset === 'quick') ? 1800
+                  : 1500;
+  // Baseline delay = image fully in + small breathing buffer.
+  const baseDelay = imgFadeMs + 200;
+
+  // Adaptive fade timings keyed off the actual hold duration. Title and
+  // description share these so they fade in / out in lockstep.
+  let OV_DELAY_MS, OV_FADE_IN_MS, OV_FADE_OUT_MS, OV_FADE_OUT_AT_MS;
+  if (slideDur >= 6000) {
+    // Long slides — wait past image, then leisurely text fade.
+    OV_DELAY_MS = baseDelay + 800;
+    OV_FADE_IN_MS = 1000;
+    OV_FADE_OUT_MS = 1000;
+    OV_FADE_OUT_AT_MS = slideDur - OV_FADE_OUT_MS - 200;
+  } else if (slideDur >= 3500) {
+    // Mid-length — wait for image to settle.
+    OV_DELAY_MS = baseDelay;
+    OV_FADE_IN_MS = 600;
+    OV_FADE_OUT_MS = 600;
+    OV_FADE_OUT_AT_MS = slideDur - OV_FADE_OUT_MS - 200;
+  } else if (slideDur >= 2200) {
+    // ~4 beat / tight slides. Compromise: title starts at end of image
+    // crossfade tail (rather than way after). Better to see the title
+    // briefly than not at all.
+    OV_DELAY_MS = Math.max(500, baseDelay - 400);
+    OV_FADE_IN_MS = 400;
+    OV_FADE_OUT_MS = 400;
+    OV_FADE_OUT_AT_MS = slideDur - OV_FADE_OUT_MS - 150;
+  } else {
+    // Very short slides — minimal fade, title appears during image fade.
+    OV_DELAY_MS = 200;
+    OV_FADE_IN_MS = 300;
+    OV_FADE_OUT_MS = 300;
+    OV_FADE_OUT_AT_MS = slideDur - OV_FADE_OUT_MS - 100;
+  }
+
+  // Clear any in-flight timers from a previous slide.
   if (titleEl && titleEl._slideTitleTimer) {
     clearTimeout(titleEl._slideTitleTimer);
     titleEl._slideTitleTimer = null;
@@ -2238,35 +2459,65 @@ function showSlide(idx) {
     clearTimeout(titleEl._slideTitleFadeOutTimer);
     titleEl._slideTitleFadeOutTimer = null;
   }
-  // Kick off the fade-OUT of the previous title now. We do NOT clear
-  // textContent yet — letting opacity drive the fade is smoother.
-  if (titleEl) titleEl.style.opacity = '0';
+  if (descEl && descEl._slideDescTimer) {
+    clearTimeout(descEl._slideDescTimer);
+    descEl._slideDescTimer = null;
+  }
+  if (descEl && descEl._slideDescFadeOutTimer) {
+    clearTimeout(descEl._slideDescFadeOutTimer);
+    descEl._slideDescFadeOutTimer = null;
+  }
+  // Pre-set fade-in transition + reset opacity so both elements start
+  // invisible and fade in via the adaptive duration (CSS defaults are too
+  // slow for short slides).
+  if (titleEl) {
+    titleEl.style.transition = `opacity ${OV_FADE_IN_MS}ms ease-in-out`;
+    titleEl.style.opacity = '0';
+  }
+  if (descEl) {
+    descEl.style.transition = `opacity ${OV_FADE_IN_MS}ms ease-in-out`;
+    descEl.style.opacity = '0';
+  }
 
   const applyOverlay = (m) => {
     if (descEl) {
-      if (wantDesc && m && m.description) {
+      if (wantDesc && !overlayTooFast && m && m.description) {
         descEl.textContent = m.description;
         descEl.style.display = '';
+        if (descEl._slideDescTimer) clearTimeout(descEl._slideDescTimer);
+        if (descEl._slideDescFadeOutTimer) clearTimeout(descEl._slideDescFadeOutTimer);
+        descEl._slideDescTimer = setTimeout(() => {
+          descEl.style.transition = `opacity ${OV_FADE_IN_MS}ms ease-in-out`;
+          descEl.style.opacity = '1';
+          descEl._slideDescTimer = null;
+        }, OV_DELAY_MS);
+        descEl._slideDescFadeOutTimer = setTimeout(() => {
+          descEl.style.transition = `opacity ${OV_FADE_OUT_MS}ms ease-in-out`;
+          descEl.style.opacity = '0';
+          descEl._slideDescFadeOutTimer = null;
+        }, OV_FADE_OUT_AT_MS);
       } else {
         descEl.textContent = '';
+        descEl.style.opacity = '0';
         descEl.style.display = wantDesc ? '' : 'none';
       }
     }
     if (titleEl) {
-      if (wantTitle && m && m.title) {
+      if (wantTitle && !overlayTooFast && m && m.title) {
         titleEl.style.display = '';
         if (titleEl._slideTitleTimer) clearTimeout(titleEl._slideTitleTimer);
         if (titleEl._slideTitleFadeOutTimer) clearTimeout(titleEl._slideTitleFadeOutTimer);
         titleEl._slideTitleTimer = setTimeout(() => {
           titleEl.textContent = m.title;
-          titleEl.style.opacity = '1';     // fade-in (CSS 2.5s)
+          titleEl.style.transition = `opacity ${OV_FADE_IN_MS}ms ease-in-out`;
+          titleEl.style.opacity = '1';
           titleEl._slideTitleTimer = null;
-        }, TITLE_DELAY_MS);
-        // Schedule fade-out so it completes BEFORE the next slide arrives.
+        }, OV_DELAY_MS);
         titleEl._slideTitleFadeOutTimer = setTimeout(() => {
-          titleEl.style.opacity = '0';     // fade-out (CSS 2.5s)
+          titleEl.style.transition = `opacity ${OV_FADE_OUT_MS}ms ease-in-out`;
+          titleEl.style.opacity = '0';
           titleEl._slideTitleFadeOutTimer = null;
-        }, TITLE_FADE_OUT_AT_MS);
+        }, OV_FADE_OUT_AT_MS);
       } else {
         titleEl.textContent = '';
         titleEl.style.opacity = '0';
@@ -2276,9 +2527,6 @@ function showSlide(idx) {
   };
 
   applyOverlay(state.recentMeta[assetId]);
-  // If we don't already have title (or description) cached, fetch the
-  // full photo metadata once. /api/immich/photo/:id now returns `title`
-  // alongside description.
   const cached = state.recentMeta[assetId];
   const needFetch = !cached
     || (wantTitle && cached.title === undefined)
@@ -2291,6 +2539,30 @@ function showSlide(idx) {
       if (state.slideshow.index === idx) applyOverlay(state.recentMeta[assetId]);
     }).catch(() => {});
   }
+}
+
+function showSlide(idx, direction) {
+  const album = state.currentAlbum;
+  // Dispatch to alternative implementation for non-Classic presets.
+  // Classic (default / unset) falls through unchanged below.
+  const _preset = (album && album.slideshowSettings && album.slideshowSettings.preset) || 'classic';
+  // music-sync uses Classic visuals (Ken Burns + crossfade) — falls through
+  // below. Only the SCHEDULING is beat-driven, handled in scheduleNext().
+  if (_preset === 'quick') return showSlideSlide(idx, direction);
+  if (_preset === 'beatfade') return showSlideBeatFade(idx);
+  // Clear leftover classes from non-Classic runs so Classic's crossfade path
+  // isn't fighting transform-based or ss-fade-quick positioning.
+  ['a','b'].forEach(s => {
+    const el = document.getElementById('slideshow-slide-' + s);
+    if (!el) return;
+    ['ss-slide-h','ss-slide-h-from-right','ss-slide-h-from-left','ss-exiting-left','ss-exiting-right','ss-fade-quick']
+      .forEach(c => el.classList.remove(c));
+  });
+  const counter = document.getElementById('slideshow-counter');
+  counter.textContent = (idx + 1) + ' / ' + album.assets.length;
+  state.slideshow.index = idx;
+
+  _renderPerPhotoOverlay(idx);
 
   const move = KB_MOVES[idx % KB_MOVES.length];
   const nextSlot = ssActiveSlot === 'a' ? 'b' : 'a';
@@ -2298,6 +2570,22 @@ function showSlide(idx) {
   const nextEl = document.getElementById('slideshow-slide-' + nextSlot);
   const url = '/api/immich/original/' + album.assets[idx];
   const thumbUrl = '/api/immich/thumb/' + album.assets[idx];
+
+  // Adaptive crossfade duration. The default CSS 1.5s opacity transition
+  // is longer than fast beat-pattern slides (e.g. 2 beats @ 94 BPM = 1.28s),
+  // which causes consecutive crossfades to stack and look janky. Scale
+  // the slot's opacity transition to fit comfortably inside the current
+  // slide's hold time.
+  const _kbSlideDur = _currentSlideHoldMs();
+  const crossfadeMs = _kbSlideDur < 1600 ? 400
+                    : _kbSlideDur < 3000 ? 800
+                    : 1500;
+  [currentEl, nextEl].forEach(el => {
+    if (el && !el.classList.contains('ss-fade-quick')
+        && !el.classList.contains('ss-slide-h')) {
+      el.style.transition = `opacity ${crossfadeMs}ms ease-in-out`;
+    }
+  });
 
   nextEl.innerHTML = `
     <div class="ss-bg" style="background-image:url('${thumbUrl}')"></div>
@@ -2316,15 +2604,144 @@ function showSlide(idx) {
     nextEl.style.zIndex = 3;
     requestAnimationFrame(() => requestAnimationFrame(() => nextEl.classList.add('ss-visible')));
     if (!state.slideshow.paused) scheduleNext();
-    const t1 = setTimeout(() => { currentEl.classList.remove('ss-visible'); }, 1500);
+    // Cleanup timers scale with crossfade so they don't fire too early or
+    // too late relative to the visible transition.
+    const t1 = setTimeout(() => { currentEl.classList.remove('ss-visible'); }, crossfadeMs);
     const t2 = setTimeout(() => {
       currentEl.style.zIndex = 1;
       ssActiveSlot = nextSlot;
       ssCleanupTimers = ssCleanupTimers.filter(t => t !== t1 && t !== t2);
-    }, 3500);
+    }, crossfadeMs * 2 + 500);
     ssCleanupTimers.push(t1, t2);
   };
 
+  if (img.complete && img.naturalWidth > 0) { show(); }
+  else { img.onload = show; img.onerror = show; }
+
+  // Preload next image
+  const preloadIdx = (idx + 1) % album.assets.length;
+  const pre = new Image();
+  pre.src = '/api/immich/original/' + album.assets[preloadIdx];
+}
+
+// QUICK preset (slide-horizontal, no Ken Burns). Fully isolated from
+// showSlide; Classic path never enters this function.
+function showSlideSlide(idx, direction) {
+  const album = state.currentAlbum;
+  const counter = document.getElementById('slideshow-counter');
+  counter.textContent = (idx + 1) + ' / ' + album.assets.length;
+  state.slideshow.index = idx;
+
+  // Per-photo title/description overlay (was missing from Quick preset's
+  // render path — only the Classic preset had this wired up).
+  _renderPerPhotoOverlay(idx);
+
+  const assetId = album.assets[idx];
+  const url = '/api/immich/original/' + assetId;
+  const thumbUrl = '/api/immich/thumb/' + assetId;
+  const nextSlot = ssActiveSlot === 'a' ? 'b' : 'a';
+  const currentEl = document.getElementById('slideshow-slide-' + ssActiveSlot);
+  const nextEl = document.getElementById('slideshow-slide-' + nextSlot);
+
+  // Clear any prior transition-mode classes on both slots
+  ['ss-slide-h','ss-slide-h-from-right','ss-slide-h-from-left','ss-exiting-left','ss-exiting-right']
+    .forEach(c => { currentEl.classList.remove(c); nextEl.classList.remove(c); });
+
+  nextEl.innerHTML = `
+    <div class="ss-bg" style="background-image:url('${thumbUrl}')"></div>
+    <img class="ss-img" src="${url}">
+  `;
+  nextEl.style.zIndex = 1;
+  nextEl.classList.remove('ss-visible');
+
+  const img = nextEl.querySelector('.ss-img');
+  const show = () => {
+    img.style.animation = 'none';
+    img.style.transform = '';
+    const dir = direction === 'backward' ? 'backward' : 'forward';
+    const fromClass = dir === 'forward' ? 'ss-slide-h-from-right' : 'ss-slide-h-from-left';
+    nextEl.classList.add('ss-slide-h', fromClass);
+    void nextEl.offsetWidth;
+    nextEl.style.zIndex = 3;
+    // Both slots transition in parallel for a single coherent motion.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      nextEl.classList.add('ss-visible');
+      const exitClass = dir === 'forward' ? 'ss-exiting-left' : 'ss-exiting-right';
+      currentEl.classList.add('ss-slide-h', exitClass);
+    }));
+    if (!state.slideshow.paused) scheduleNext();
+    const t2 = setTimeout(() => {
+      currentEl.style.zIndex = 1;
+      currentEl.classList.remove('ss-visible');
+      ssActiveSlot = nextSlot;
+      ssCleanupTimers = ssCleanupTimers.filter(t => t !== t2);
+    }, 1900);
+    ssCleanupTimers.push(t2);
+  };
+  if (img.complete && img.naturalWidth > 0) { show(); }
+  else { img.onload = show; img.onerror = show; }
+
+  // Preload next image
+  const preloadIdx = (idx + 1) % album.assets.length;
+  const pre = new Image();
+  pre.src = '/api/immich/original/' + album.assets[preloadIdx];
+}
+
+// BEAT FADE preset — same scheduler + engine as Beat, but no Ken Burns
+// motion. Just a crisp 400ms opacity crossfade on each beat-aligned tick.
+function showSlideBeatFade(idx) {
+  const album = state.currentAlbum;
+  const counter = document.getElementById('slideshow-counter');
+  counter.textContent = (idx + 1) + ' / ' + album.assets.length;
+  state.slideshow.index = idx;
+
+  // Per-photo title/description overlay (was missing — only the Beat
+  // preset's render path through showSlide had this wired up).
+  _renderPerPhotoOverlay(idx);
+
+  const assetId = album.assets[idx];
+  const url = '/api/immich/original/' + assetId;
+  const thumbUrl = '/api/immich/thumb/' + assetId;
+  const nextSlot = ssActiveSlot === 'a' ? 'b' : 'a';
+  const currentEl = document.getElementById('slideshow-slide-' + ssActiveSlot);
+  const nextEl = document.getElementById('slideshow-slide-' + nextSlot);
+
+  // Strip mode classes from any prior preset on both slots.
+  ['a','b'].forEach(s => {
+    const el = document.getElementById('slideshow-slide-' + s);
+    if (!el) return;
+    ['ss-slide-h','ss-slide-h-from-right','ss-slide-h-from-left','ss-exiting-left','ss-exiting-right']
+      .forEach(c => el.classList.remove(c));
+  });
+
+  nextEl.innerHTML = `
+    <div class="ss-bg" style="background-image:url('${thumbUrl}')"></div>
+    <img class="ss-img" src="${url}">
+  `;
+  nextEl.style.zIndex = 1;
+  nextEl.classList.add('ss-fade-quick');
+  nextEl.classList.remove('ss-visible');
+  currentEl.classList.add('ss-fade-quick');
+
+  const img = nextEl.querySelector('.ss-img');
+  // Static image — no ken-burns animation, no transform
+  img.style.animation = 'none';
+  img.style.transform = '';
+
+  const show = () => {
+    nextEl.style.zIndex = 3;
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      nextEl.classList.add('ss-visible');
+      currentEl.classList.remove('ss-visible');
+    }));
+    if (!state.slideshow.paused) scheduleNext();
+    const t1 = setTimeout(() => {
+      currentEl.style.zIndex = 1;
+      ssActiveSlot = nextSlot;
+      ssCleanupTimers = ssCleanupTimers.filter(t => t !== t1);
+    }, 500);
+    ssCleanupTimers.push(t1);
+  };
   if (img.complete && img.naturalWidth > 0) { show(); }
   else { img.onload = show; img.onerror = show; }
 
@@ -2339,14 +2756,16 @@ let ssDescVisible = true;
 
 function toggleSlideshowMusic() {
   const btn = document.getElementById('slideshow-music-btn');
-  if (ssAudio) {
-    if (ssAudio.paused) {
-      ssAudio.play();
-      if (btn) btn.style.color = '';
-    } else {
-      ssAudio.pause();
-      if (btn) btn.style.color = 'var(--text-dim)';
-    }
+  if (!window.DarkroomAudio) return;
+  if (DarkroomAudio.isMusicPlaying()) {
+    DarkroomAudio.pauseMusic({ fadeMs: 200 });
+    if (btn) btn.style.color = 'var(--text-dim)';
+  } else {
+    const file = DarkroomAudio.getMusicFile()
+      || (state.currentAlbum?.slideshowSettings?.musicFile);
+    if (!file) return;
+    DarkroomAudio.playMusic(file, { fadeMs: 200, loop: true, volume: 0.85 });
+    if (btn) btn.style.color = '';
   }
 }
 
@@ -2377,27 +2796,202 @@ function showSlideshowControls() {
 // up 12s instead of the classic 7s — gives the title time to fade in,
 // hold readable for several seconds, and fade out cleanly BEFORE the
 // next slide arrives. When title is off, classic 7s rhythm is preserved.
+// paceBeatsEvery is a string — "8" (constant) or comma-separated pattern like
+// "8,4". Returns an array of positive integers; falls back to [8].
+function _parseBeatPattern(val) {
+  const arr = String(val ?? '8').split(',')
+    .map(s => parseInt(s.trim(), 10))
+    .filter(n => Number.isFinite(n) && n > 0 && n <= 64);
+  return arr.length ? arr : [8];
+}
+
 function _slideDurationMs() {
   const settings = (state.currentAlbum && state.currentAlbum.slideshowSettings) || {};
+  if (settings.preset === 'quick') return 6000;
+  if (settings.preset === 'custom') {
+    const bpm = Number(settings.paceBpm);
+    if (Number.isFinite(bpm) && bpm >= 40 && bpm <= 200) return Math.round(8 * 60000 / bpm);
+  }
+  if (settings.preset === 'beat' || settings.preset === 'beatfade') {
+    // For mixed patterns, use the first step's duration as the representative.
+    // _slideDurationMs is mainly used for fallback timing and the minAhead
+    // computation; the actual schedule uses the live pattern step.
+    const pattern = _parseBeatPattern(settings.paceBeatsEvery);
+    const beats = pattern[0];
+    const useOverride = settings.paceBpmOverrideEnabled === true;
+    const override = Number(settings.paceBpmOverride);
+    const file = settings.musicFile;
+    const analysis = file && window.DarkroomAudio ? DarkroomAudio.getTrackAnalysis(file) : null;
+    const bpm = useOverride && override >= 40 ? override : (analysis ? analysis.bpm : 0);
+    if (Number.isFinite(bpm) && bpm >= 40) return Math.round(beats * 60000 / bpm);
+  }
   return settings.showPhotoTitle === true ? 12000 : 7000;
 }
 
+// Slide scheduler. For the Beat preset, walks the detected beats array using
+// DarkroomAudio.getMusicTime() (sample-accurate) — finds the next beat that's
+// at least minDelay away and schedules the slide change for that exact moment.
+// Falls back to fixed-duration setTimeout for other presets or if analysis
+// hasn't arrived yet.
 function scheduleNext() {
   if (state.slideshow.timer) clearTimeout(state.slideshow.timer);
-  if (!state.slideshow.paused) {
-    state.slideshow.timer = setTimeout(() => {
-      slideshowNext();
-    }, _slideDurationMs());
+  if (state.slideshow.paused) return;
+  const dur = _slideDurationMs();
+  let delay = dur;
+  const settings = (state.currentAlbum && state.currentAlbum.slideshowSettings) || {};
+  if ((settings.preset === 'beat' || settings.preset === 'beatfade')
+      && window.DarkroomAudio
+      && DarkroomAudio.isMusicPlaying()) {
+    const analysis = DarkroomAudio.getTrackAnalysis(settings.musicFile);
+    const useOverride = settings.paceBpmOverrideEnabled === true;
+    const override = Number(settings.paceBpmOverride);
+    const pattern = _parseBeatPattern(settings.paceBeatsEvery);
+    // pattern position cycles through the array; nextIdx advances by pattern[ptnIdx]
+    const ptnIdx = (state.slideshow.beatPtnIdx == null) ? 0 : (state.slideshow.beatPtnIdx % pattern.length);
+    const step = pattern[ptnIdx];
+    const _dbgBase = { pattern: pattern.join(','), ptnIdx, step, useOverride, override, detectedBpm: analysis?.bpm, musicSec: DarkroomAudio.getMusicTime().toFixed(3) };
+    if (useOverride && override >= 40) {
+      // Override path also walks the pattern. State = nextTickSec accumulator.
+      const beatSec = 60 / override;
+      const musicSec = DarkroomAudio.getMusicTime();
+      const phase = (analysis && analysis.beats && analysis.beats.length)
+        ? (analysis.beats[0] % beatSec) : 0;
+      let target;
+      let curPtnIdx = ptnIdx;
+      if (state.slideshow.beatIdx == null) {
+        const minDelay = dur * 0.001 * 0.5;
+        const k = Math.ceil((musicSec + minDelay - phase) / (pattern[0] * beatSec));
+        target = k * pattern[0] * beatSec + phase;
+      } else {
+        target = state.slideshow.beatIdx + step * beatSec;
+        // Catch-up: image load delays can push musicSec past target. Without
+        // this, delay = max(50, negative) fires the slide ~instantly. Walk
+        // forward through the pattern until target is comfortably ahead so
+        // we resync rather than slipping every late slide.
+        while (target <= musicSec + 0.1) {
+          curPtnIdx = (curPtnIdx + 1) % pattern.length;
+          target += pattern[curPtnIdx] * beatSec;
+        }
+      }
+      state.slideshow.beatIdx = target;
+      state.slideshow.beatPtnIdx = (curPtnIdx + 1) % pattern.length;
+      delay = Math.max(50, (target - musicSec) * 1000);
+      console.log('[beat-schedule] override path', { ..._dbgBase, target, delay });
+    } else if (analysis && analysis.beats && analysis.beats.length) {
+      // State-tracked: step the beat index by the current pattern element.
+      const musicSec = DarkroomAudio.getMusicTime();
+      const arr = analysis.beats;
+      let nextIdx;
+      let curPtnIdx = ptnIdx;
+      if (state.slideshow.beatIdx == null) {
+        const minAheadSec = (dur * 0.5) / 1000;
+        let firstIdx = -1;
+        for (let i = 0; i < arr.length; i++) {
+          if (arr[i] > musicSec + minAheadSec) { firstIdx = i; break; }
+        }
+        if (firstIdx < 0) {
+          console.log('[beat-schedule] no target beat found', { ..._dbgBase, beatsArrayLen: arr.length });
+          state.slideshow.timer = setTimeout(() => { slideshowNext(); }, delay);
+          return;
+        }
+        // Snap first slide to a multiple of pattern[0] so cadence starts clean
+        nextIdx = Math.ceil(firstIdx / pattern[0]) * pattern[0];
+      } else {
+        nextIdx = state.slideshow.beatIdx + step;
+        // Catch-up: if a slow image load advanced musicSec past arr[nextIdx],
+        // walk forward through the pattern (and beats array) until we land
+        // on a beat that's still in the future. Otherwise delay clamps to
+        // 50ms and slides slip past one after another instantly.
+        while (nextIdx < arr.length && arr[nextIdx] <= musicSec + 0.1) {
+          curPtnIdx = (curPtnIdx + 1) % pattern.length;
+          nextIdx += pattern[curPtnIdx];
+        }
+      }
+      const finalIdx = Math.min(arr.length - 1, nextIdx);
+      const target = arr[finalIdx];
+      state.slideshow.beatIdx = finalIdx;
+      state.slideshow.beatPtnIdx = (curPtnIdx + 1) % pattern.length;
+      delay = Math.max(50, (target - musicSec) * 1000);
+      console.log('[beat-schedule] auto path', { ..._dbgBase, nextIdx, finalIdx, target, delay });
+    } else {
+      console.log('[beat-schedule] no analysis ready, falling through to dur', { ..._dbgBase, dur });
+    }
   }
+  state.slideshow.timer = setTimeout(() => {
+    slideshowNext();
+  }, delay);
+}
+
+// Settings-modal music preview — shares the engine's single music slot.
+function startMusicPreview(file) {
+  if (!file || !window.DarkroomAudio) return;
+  DarkroomAudio.playMusic(file, { fadeMs: 200, loop: true, volume: 0.6 })
+    .catch(e => console.warn('preview failed:', e));
+}
+function stopMusicPreview() {
+  if (window.DarkroomAudio) DarkroomAudio.stopMusic({ fadeMs: 150 });
+}
+
+// Pace-preview pulse — visible inside the settings modal while Custom is the
+// selected preset. Flashes at the slider's current rate so the user can
+// tap-match the music in their head before committing.
+let _pacePulseTimer = null;
+function startPacePulse() {
+  stopPacePulse();
+  const pulse = document.getElementById('ss-pace-pulse');
+  const paceEl = document.getElementById('ss-pace');
+  if (!pulse || !paceEl) return;
+  const beat = () => {
+    // Beat-on: bright + grown
+    pulse.style.opacity = '1';
+    pulse.style.transform = 'scale(1.15)';
+    // Settle back to resting state after the visible portion of the beat
+    setTimeout(() => {
+      pulse.style.opacity = '.28';
+      pulse.style.transform = 'scale(.55)';
+    }, 220);
+    // Schedule next beat at the current BPM (live read from slider)
+    const bpm = Math.max(20, Number(paceEl.value) || 60);
+    _pacePulseTimer = setTimeout(beat, 60000 / bpm);
+  };
+  beat();
+}
+function stopPacePulse() {
+  if (_pacePulseTimer) { clearTimeout(_pacePulseTimer); _pacePulseTimer = null; }
+  const pulse = document.getElementById('ss-pace-pulse');
+  if (pulse) { pulse.style.opacity = '0'; pulse.style.transform = 'scale(.55)'; }
 }
 
 function slideshowNext() {
   const album = state.currentAlbum;
-  const nextIdx = (state.slideshow.index + 1) % album.assets.length;
   if (state.slideshow.timer) clearTimeout(state.slideshow.timer);
   cancelSlideCleanup();
-  showSlide(nextIdx);
-  scheduleNext();
+  // End-of-pass: only fade out + close when the album opts in via
+  // fadeOutAtEnd; otherwise loop (preserves the long-standing default).
+  const settings = album.slideshowSettings || {};
+  if (settings.fadeOutAtEnd === true && state.slideshow.slidesShown >= album.assets.length) {
+    fadeOutSlideshow();
+    return;
+  }
+  state.slideshow.slidesShown += 1;
+  const nextIdx = (state.slideshow.index + 1) % album.assets.length;
+  showSlide(nextIdx, 'forward');
+  // showSlide's image-load callback calls scheduleNext.
+}
+
+// Fade visuals to black and music together, then close. Used at the end of
+// a single pass through the album.
+function fadeOutSlideshow() {
+  const FADE_MS = 6000;
+  if (window.DarkroomAudio) DarkroomAudio.stopMusic({ fadeMs: FADE_MS });
+  ['a','b'].forEach(s => {
+    const el = document.getElementById('slideshow-slide-' + s);
+    if (!el) return;
+    el.style.transition = `opacity ${FADE_MS}ms ease-out`;
+    el.classList.remove('ss-visible');
+    el.style.opacity = '0';
+  });
+  setTimeout(() => closeSlideshow(), FADE_MS + 200);
 }
 
 function slideshowPrev() {
@@ -2405,31 +2999,70 @@ function slideshowPrev() {
   const prevIdx = (state.slideshow.index - 1 + album.assets.length) % album.assets.length;
   if (state.slideshow.timer) clearTimeout(state.slideshow.timer);
   cancelSlideCleanup();
-  showSlide(prevIdx);
-  scheduleNext();
+  // Backward nav re-anchors the beat grid — next scheduleNext finds a fresh
+  // target based on current music position rather than stepping forward.
+  state.slideshow.beatIdx = null;
+  state.slideshow.beatPtnIdx = null;
+  showSlide(prevIdx, 'backward');
 }
 
 function toggleSlideshow() {
   state.slideshow.paused = !state.slideshow.paused;
   document.getElementById('slideshow-pause-btn').textContent = state.slideshow.paused ? '▶' : '❚❚';
   if (!state.slideshow.paused) {
-    if (!ssAudio) startSlideshowMusic(state.currentAlbum?.slideshowSettings || {});
-    else ssAudio.play().catch(() => {});
+    const settings = state.currentAlbum?.slideshowSettings || {};
+    if (window.DarkroomAudio && !DarkroomAudio.isMusicPlaying() && settings.musicFile) {
+      DarkroomAudio.playMusic(settings.musicFile, { fadeMs: 300, loop: true, volume: 0.85 });
+    }
+    // Resume re-anchors the beat grid (musicSec jumped while paused)
+    state.slideshow.beatIdx = null;
+    state.slideshow.beatPtnIdx = null;
     showSlide(state.slideshow.index);
-    scheduleNext();
+    // showSlide's image-load callback calls scheduleNext
   } else {
     if (state.slideshow.timer) clearTimeout(state.slideshow.timer);
-    if (ssAudio) ssAudio.pause();
+    if (window.DarkroomAudio) DarkroomAudio.pauseMusic({ fadeMs: 300 });
   }
 }
 
 function closeSlideshow() {
   if (state.slideshow.timer) clearTimeout(state.slideshow.timer);
   cancelSlideCleanup();
-  state.slideshow = { active: false, index: 0, timer: null, paused: false };
+  state.slideshow = { active: false, index: 0, timer: null, paused: false, beatIdx: null, beatPtnIdx: null, slidesShown: 0 };
   document.getElementById('slideshow-overlay').classList.remove('active');
   const card = document.getElementById('ss-title-card');
   if (card) { card.style.opacity = '0'; card.style.display = 'none'; }
+  // Wipe inline styles fadeOutSlideshow may have set; otherwise the next
+  // slideshow opens with opacity:0 still on both slots = black screen.
+  ['a','b'].forEach(s => {
+    const el = document.getElementById('slideshow-slide-' + s);
+    if (!el) return;
+    el.style.transition = '';
+    el.style.opacity = '';
+  });
+  // Reset overlay text elements: clear pending fade timers AND wipe the
+  // text content so the previous slideshow's last title/description
+  // doesn't bleed into the next one. Also reset opacity/display in case
+  // toggleSlideshowDesc (✦ button) left them muted.
+  const _dEl = document.getElementById('slideshow-description');
+  const _tEl = document.getElementById('slideshow-photo-title');
+  if (_tEl) {
+    if (_tEl._slideTitleTimer) { clearTimeout(_tEl._slideTitleTimer); _tEl._slideTitleTimer = null; }
+    if (_tEl._slideTitleFadeOutTimer) { clearTimeout(_tEl._slideTitleFadeOutTimer); _tEl._slideTitleFadeOutTimer = null; }
+    _tEl.textContent = '';
+    _tEl.style.opacity = '';
+    _tEl.style.display = '';
+    _tEl.style.transition = '';
+  }
+  if (_dEl) {
+    if (_dEl._slideDescTimer) { clearTimeout(_dEl._slideDescTimer); _dEl._slideDescTimer = null; }
+    if (_dEl._slideDescFadeOutTimer) { clearTimeout(_dEl._slideDescFadeOutTimer); _dEl._slideDescFadeOutTimer = null; }
+    _dEl.textContent = '';
+    _dEl.style.opacity = '';
+    _dEl.style.display = '';
+    _dEl.style.transition = '';
+  }
+  ssDescVisible = true;
   stopSlideshowMusic();
 }
 
@@ -2475,9 +3108,8 @@ document.addEventListener('touchend', e => {
 
 // Stop stray music if page is restored from background without an active slideshow
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && !state.slideshow.active && ssAudio) {
-    ssAudio.pause();
-    ssAudio = null;
+  if (!document.hidden && !state.slideshow.active && window.DarkroomAudio && DarkroomAudio.isMusicPlaying()) {
+    DarkroomAudio.stopMusic({ fadeMs: 0 });
   }
 });
 
@@ -3592,7 +4224,6 @@ function wireListeners() {
   w('lib-sort-taken', 'click', () => setLibrarySort('taken'));
   w('lib-sort-dir', 'click', () => toggleLibrarySortDir());
   w('lib-sort-mode', 'click', () => toggleRecentMode());
-  updateRecentModeButton();
   w('filters-btn', 'click', () => toggleFiltersPopup());
   w('filters-done-btn', 'click', () => toggleFiltersPopup());
   w('btn-clear-chips', 'click', () => { clearRecentChip(); toggleFiltersPopup(); });
@@ -3635,15 +4266,57 @@ function wireListeners() {
   w('btn-ss-close', 'click', () => closeSlideshow());
 
   // Slideshow settings modal
-  w('btn-ss-modal-close', 'click', () => closeModal('slideshow-settings-modal'));
-  w('btn-ss-modal-cancel', 'click', () => closeModal('slideshow-settings-modal'));
+  w('btn-ss-modal-close', 'click', () => { stopPacePulse(); stopMusicPreview(); closeModal('slideshow-settings-modal'); });
+  w('btn-ss-modal-cancel', 'click', () => { stopPacePulse(); stopMusicPreview(); closeModal('slideshow-settings-modal'); });
   w('toggle-show-title', 'click', () => { ssToggle('ss-show-title'); toggleSSTitleOptions(); });
   w('toggle-show-location', 'click', () => ssToggle('ss-show-location'));
   w('toggle-show-dates', 'click', () => ssToggle('ss-show-dates'));
   w('toggle-show-count', 'click', () => ssToggle('ss-show-count'));
   w('toggle-show-photo-title', 'click', () => ssToggle('ss-show-photo-title'));
   w('toggle-show-photo-description', 'click', () => ssToggle('ss-show-photo-description'));
+  w('toggle-ss-fade-out-end', 'click', () => ssToggle('ss-fade-out-end'));
   w('btn-ss-start', 'click', () => saveSlideshowSettingsAndStart());
+  // Live: show/hide the pace slider when preset toggles to/from Custom
+  w('ss-preset', 'change', (e) => {
+    const customWrap = document.getElementById('ss-custom-pace');
+    const beatWrap = document.getElementById('ss-beat-pace');
+    const isBeat = e.target.value === 'beat' || e.target.value === 'beatfade';
+    if (customWrap) customWrap.style.display = e.target.value === 'custom' ? 'block' : 'none';
+    if (beatWrap) beatWrap.style.display = isBeat ? 'block' : 'none';
+    if (e.target.value === 'custom') startPacePulse(); else stopPacePulse();
+    if (isBeat) {
+      const file = document.getElementById('ss-music-select')?.value || null;
+      refreshBeatStatus(file);
+    }
+  });
+  // Live: keep the pace label in sync with slider input, retiming the pulse
+  w('ss-pace', 'input', (e) => {
+    const label = document.getElementById('ss-pace-label');
+    const bpm = Number(e.target.value) || 60;
+    if (label) label.textContent = `${bpm} BPM · ${(8 * 60 / bpm).toFixed(1)}s/slide`;
+    const presetEl = document.getElementById('ss-preset');
+    if (presetEl && presetEl.value === 'custom') startPacePulse();
+  });
+  // Beat-preset BPM override slider — only consulted when the toggle is ON.
+  w('ss-beat-bpm-override', 'input', (e) => {
+    const label = document.getElementById('ss-beat-bpm-override-label');
+    if (label) label.textContent = `${e.target.value} BPM`;
+  });
+  // Override toggle — shows/hides the slider row; scheduler reads the toggle.
+  w('toggle-ss-beat-override', 'click', () => {
+    ssToggle('ss-beat-override-enabled');
+    const on = ssToggleVal('ss-beat-override-enabled');
+    const row = document.getElementById('ss-beat-override-row');
+    if (row) row.style.display = on ? 'flex' : 'none';
+  });
+  // Live: switch the music preview when user picks a different track; if the
+  // Beat preset is active, kick off analysis on the new track.
+  w('ss-music-select', 'change', (e) => {
+    const presetEl = document.getElementById('ss-preset');
+    if (presetEl && (presetEl.value === 'beat' || presetEl.value === 'beatfade')) {
+      refreshBeatStatus(e.target.value || null);
+    }
+  });
 
   // Modals
   w('btn-close-create-album', 'click', () => closeModal('create-album-modal'));

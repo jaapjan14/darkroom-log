@@ -1,5 +1,72 @@
 # Changelog
 
+## v1.5.47 (2026-05-17)
+
+### Library — Full Sweep upload button regenerated (face-recognition refresh wired in)
+- The `#lib-sort-mode` toggle (the "Last 7d · Full sweep →" button next to the sort buttons, visible only when the Upload Date sort is active) was originally added in commit 6557de4 on 2026-05-16. The button's HTML stub stayed in `index.html`, but the supporting JavaScript in `public/app.js` was silently lost in some subsequent regeneration of that file. The deployed server still supports `mode=window|full` on `/api/immich/recent` and still serves `POST /api/filters/refresh-people`, but with no front-end glue the button was orphaned: never un-hid itself, no click handler bound.
+- Restored: `state.recentMode` / `state.recentWindowDays` initialized to `'window'` / `7`; `setLibrarySort()` now calls `updateRecentModeButton()` so the toggle becomes visible on Upload Date and re-hides on Date Taken; `fetchRecentPage()` appends `&mode=…&windowDays=…` to the request URL when the sort is `upload`; the click handler `w('lib-sort-mode', 'click', () => toggleRecentMode())` is back in `initEventDelegation`.
+- Face-recognition refresh wired in for real this time: `toggleRecentMode()` now fire-and-forgets `POST /api/filters/refresh-people` after kicking the grid reload. The original 6557de4 commit added the endpoint but never called it from the front-end — meaning newly-tagged faces from Immich never showed up in the People filter without a full filter-cache rebuild. They do now, on every Full Sweep toggle.
+- Files: `public/app.js` (state, `toggleRecentMode`, `updateRecentModeButton`, `setLibrarySort` hook, `fetchRecentPage` URL, click handler) → cache-busted to `?v=237`; `public/sw.js` shell cache → `darkroom-v109`. `index.html` button stub unchanged. `server.js` unchanged.
+
+### Known gap to audit
+- The CHANGELOG jumped from v1.5.45 (`app.js?v=74`, SW `v=96`) straight to v1.5.46 below, but the deployed app between those two entries went through ~14 cache-bust versions of `app.js` (v=75 → v=222) and a stack of SW bumps. Slideshow/audio/album work that landed in that window — beat-fade transitions (`showSlideBeatFade`), dynamic slide hold (`_currentSlideHoldMs`, `_slideDurationMs`), album date-range calc (`_computeAlbumDateRange`), fade-out (`fadeOutSlideshow`), and others — is not documented here. A back-fill pass is needed.
+
+---
+
+## v1.5.46 (2026-05-17)
+
+### Slideshow description toggle — actually hides when off
+- Per-photo "Show description (caption)" toggle now defaults to OFF and is
+  treated as off unless explicitly set to `true` — matching the title
+  toggle's semantics. Previously the runtime used `!== false`, so for any
+  album where `slideshowSettings.showPhotoDescription` was `undefined`
+  (e.g. albums that hadn't had slideshow settings re-saved since the
+  per-photo overlays landed), the description would render despite the
+  UI appearing unchecked. Title toggle was already correct.
+- Files: `public/app.js` (toggle init at ~L2040, runtime check at ~L2274),
+  cache-busted to `?v=222`.
+
+### Slideshow audio — fix Safari "silent Web Audio" after multiple track selections
+- `audio-engine.js` now explicitly calls `oac.close()` on each
+  `OfflineAudioContext` used in `_toMono44100` for analysis resampling.
+  WebKit counts unclosed (Offline)AudioContexts against a per-document
+  quota; after ~6 track previews/analyses, new AudioContexts on the page
+  would still report `state: "running"` but produce no audible output,
+  while HTMLAudio kept working. Quitting Safari entirely was the only
+  way to recover the live state.
+- Files: `public/audio-engine.js` (closes OAC after `startRendering`),
+  cache-busted to `?v=10`; `public/index.html` references updated.
+
+---
+
+## v1.5.45 (2026-05-11)
+
+### Add to album — prepends instead of appending
+- `addToAlbum()` in `app.js` was appending new photos to the END of the album's asset list. Result: when Jacob added a just-edited photo to an album, he had to scroll all the way to the bottom of the album to see it. Surprising — the mental model is "show me what I just added."
+- Now prepends: new adds land at index 0 (top of the grid). Multi-select adds preserve their selection order — the first selected photo lands at index 0, second at index 1, etc., with the existing album behind them.
+- Edge case unchanged: if the album already has a cover, it stays. If not, the new top-of-list photo becomes the cover (which matches the old behavior on an empty album, since the first add was always at index 0 there too).
+
+### Cache
+- Bumped `app.js?v=73` → `v=74` and SW shell cache `darkroom-v95` → `darkroom-v96`. Client-only fix; no server.js change, no container restart needed.
+
+---
+
+## v1.5.44 (2026-05-11)
+
+### Share button — preserve EXIF/IPTC/XMP metadata in resized JPEGs
+- Sharp's `.jpeg()` drops all metadata by default. The v1.5.43 server-side resize chain (S/M/L share + the new 1800px small thumb tier) had no `.withMetadata()` call, so every shared / share-cached JPEG since 1.5.43 was stripped of EXIF (camera, lens, shutter, aperture, ISO, date taken), GPS, IPTC caption/title, and XMP keywords. Receivers saw a plain JPEG with no metadata even though the source had full metadata.
+- Fixed at both call sites: `/api/immich/download/:id?size=...` and `/api/immich/thumbnail/:id?size=small`. Sharp now chains `.withMetadata()` before `.jpeg()`, so the encoded output carries every EXIF/IPTC/XMP tag from the source through to the recipient.
+- Cleared 39 stale entries in `/data/share-cache` so previously-cached metadata-stripped JPEGs don't keep getting served. New cache entries will be re-encoded with metadata on next request.
+- Knock-on: metadata adds ~50-300 KB per file depending on the size of embedded XMP develop history and preview thumbnails. The Leica-forum 2.7 MB ceiling (Large) and other byte targets still hold — the quality-iteration loop just may drop quality slightly more aggressively to compensate.
+
+### Privacy note
+- `withMetadata()` preserves *everything*, including GPS. If a public-share path ever wants GPS stripped while keeping camera/date, that's a follow-on — would need per-tag rewrite via exiftool or a sharp metadata-filter dance.
+
+### Cache
+- No client-side bumps; server.js change only. Container restart was enough to take effect.
+
+---
+
 ## v1.5.42 (2026-05-01)
 
 ### CSP — allow Astro portfolio iframe embed

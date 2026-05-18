@@ -757,6 +757,26 @@ async function buildFilterCache() {
   console.log('Filter cache built:', cache.cameras.length, 'cameras,', cache.lenses.length, 'lenses,', cache.cities.length, 'cities,', people.length, 'people');
 }
 
+// Refresh just the people list from Immich (fast — single API call).
+// Used by the Library "Full sweep" button to surface newly-tagged faces
+// without a full filter-cache rebuild. Camera/lens/city stays cached.
+app.post('/api/filters/refresh-people', requireAuth, async (req, res) => {
+  try {
+    const cache = loadFilterCache() || { cameras: [], lenses: [], cities: [], people: [], builtAt: new Date().toISOString() };
+    const pr = await fetch(`${IMMICH_URL}/people?withHidden=false&size=500`, {
+      headers: { 'x-api-key': IMMICH_KEY }
+    });
+    const pd = await pr.json();
+    cache.people = (pd.people || []).filter(p => p.name).map(p => ({ name: p.name, id: p.id }));
+    fs.writeFileSync(FILTER_CACHE_FILE, JSON.stringify(cache));
+    console.log('People refreshed:', cache.people.length);
+    res.json({ ok: true, count: cache.people.length });
+  } catch (e) {
+    console.log('refresh-people failed:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/immich/filter-options', requireAuth, async (req, res) => {
   const cache = loadFilterCache();
   if (!cache) {
