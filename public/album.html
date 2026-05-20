@@ -2,8 +2,18 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Album</title>
+<!-- PWA / Add to Home Screen support. iOS Safari doesn't allow native
+     fullscreen on <div>, but when the user adds the page to their
+     home screen the standalone-mode launcher runs without browser
+     chrome — effectively fullscreen for the slideshow. -->
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Darkroom Album">
+<meta name="theme-color" content="#0a0a0a">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
 <style>
@@ -32,12 +42,22 @@
   .ss-overlay.active{display:block}
   .ss-slide{position:absolute;inset:0;overflow:hidden;opacity:0;transition:opacity 1.5s ease-in-out;will-change:opacity}
   .ss-slide.ss-visible{opacity:1}
+  /* Beat Fade preset — clean opacity crossfade, no Ken Burns */
+  .ss-slide.ss-fade-quick{transition:opacity 700ms ease-in-out}
+  /* Quick preset (slide-horizontal). Only takes effect when JS adds .ss-slide-h. */
+  .ss-slide.ss-slide-h{opacity:1;transition:transform 1.8s cubic-bezier(0.4,0,0.2,1);will-change:transform}
+  .ss-slide.ss-slide-h.ss-slide-h-from-right{transform:translateX(100%)}
+  .ss-slide.ss-slide-h.ss-slide-h-from-left{transform:translateX(-100%)}
+  .ss-slide.ss-slide-h.ss-visible{transform:translateX(0)}
+  .ss-slide.ss-slide-h.ss-exiting-left{transform:translateX(-100%)}
+  .ss-slide.ss-slide-h.ss-exiting-right{transform:translateX(100%)}
   .ss-slide .ss-bg{position:absolute;inset:-20px;background-size:cover;background-position:center;filter:blur(20px) brightness(0.35);transform:scale(1.1)}
   .ss-slide .ss-img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;transform-origin:center center;will-change:transform;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-user-drag:none}
   /* animation applied via inline style in JS so it persists through fade-out */
   @keyframes kenburns{0%{transform:var(--kb-start)}100%{transform:var(--kb-end)}}
   .ss-counter{position:fixed;top:1rem;right:1rem;font-family:'IBM Plex Mono',monospace;font-size:11px;color:rgba(255,255,255,.5);z-index:401;transition:opacity .5s}
   .ss-description{position:fixed;bottom:5rem;left:50%;transform:translateX(-50%);font-family:'IBM Plex Mono',monospace;font-size:12px;color:rgba(255,255,255,.75);text-align:center;max-width:80vw;padding:0 2rem;z-index:401;pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .ss-photo-title{display:none;opacity:0;position:fixed;bottom:7rem;left:50%;transform:translateX(-50%);font-family:'IBM Plex Mono',monospace;font-size:16px;letter-spacing:0.05em;color:rgba(255,255,255,.92);text-align:center;max-width:80vw;padding:0 2rem;z-index:401;pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:opacity 2.5s ease-in-out}
   .ss-controls{position:fixed;bottom:1.5rem;left:50%;transform:translateX(-50%);display:flex;gap:.75rem;z-index:401;transition:opacity .5s}
   .ss-hidden{opacity:0;pointer-events:none}
   .ss-title-main{font-family:'IBM Plex Mono',monospace;font-size:64px;letter-spacing:0.25em;text-transform:uppercase;color:#c8611a;font-weight:300;line-height:1.2}
@@ -66,6 +86,8 @@
   .album-detail-image{width:100%;height:auto;max-height:70vh;object-fit:contain;display:block;-webkit-user-select:none;user-select:none;-webkit-user-drag:none}
   .album-detail-fs-hint{position:absolute;top:.75rem;right:.75rem;width:32px;height:32px;background:rgba(0,0,0,.55);border:1px solid #333;color:rgba(255,255,255,.75);font-size:14px;display:flex;align-items:center;justify-content:center;pointer-events:none}
   .album-detail-right{flex-shrink:0;padding:1rem 1.25rem 2.5rem;background:var(--bg)}
+  .album-detail-title{font-family:'IBM Plex Sans',sans-serif;font-size:20px;font-weight:500;color:var(--text);line-height:1.3;margin-bottom:.5rem}
+  .album-detail-title:empty{display:none}
   .album-detail-desc{font-family:'IBM Plex Sans',sans-serif;font-size:15px;font-style:italic;color:var(--text);line-height:1.5;margin-bottom:1rem}
   .album-detail-desc:empty{display:none}
   .album-exif-table{margin-top:.75rem}
@@ -127,6 +149,7 @@
   <div id="ss-slide-a" class="ss-slide"><div class="ss-bg" id="ss-bg-a"></div><img class="ss-img" id="ss-img-a"></div>
   <div id="ss-slide-b" class="ss-slide"><div class="ss-bg" id="ss-bg-b"></div><img class="ss-img" id="ss-img-b"></div>
   <div class="ss-counter" id="ss-counter"></div>
+  <div class="ss-photo-title" id="ss-photo-title"></div>
   <div class="ss-description" id="ss-description"></div>
   <div class="ss-controls" id="ss-controls">
     <button class="ss-btn" id="btn-ss-prev">‹</button>
@@ -154,6 +177,7 @@
       <div class="album-detail-fs-hint">⤢</div>
     </div>
     <div class="album-detail-right">
+      <div class="album-detail-title" id="album-detail-title"></div>
       <div class="album-detail-desc" id="album-detail-desc"></div>
       <div class="album-exif-table" id="album-exif-table"></div>
     </div>
@@ -164,6 +188,7 @@
   <button class="album-fs-close" id="album-fs-close" title="Close">✕</button>
 </div>
 <script src="/zoom.js?v=2"></script>
-<script src="/album.js?v=34"></script>
+<script src="/audio-engine.js?v=9"></script>
+<script src="/album.js?v=53"></script>
 </body>
 </html>

@@ -82,6 +82,25 @@ const TITLE_INDEX_FILE = '/data/titles.json';
 if (!fs.existsSync(DATA_FILE)) fs.writeFileSync(DATA_FILE, JSON.stringify([]));
 if (!fs.existsSync(ALBUMS_FILE)) fs.writeFileSync(ALBUMS_FILE, JSON.stringify([]));
 
+// ── LR title sync auth ─────────────────────────────────────────────────────
+// Validates incoming LR title pushes by forwarding the caller's Immich API
+// key to Immich's /users/me. Caches valid keys in-memory for 5 minutes so a
+// publish batch only pays one round-trip.
+const _apiKeyCache = new Map();
+const API_KEY_CACHE_TTL = 5 * 60 * 1000;
+async function validateImmichApiKey(apiKey) {
+  if (!apiKey) return false;
+  const c = _apiKeyCache.get(apiKey);
+  if (c && c.exp > Date.now()) return c.ok;
+  let ok = false;
+  try {
+    const r = await fetch(`${IMMICH_URL}/users/me`, { headers: { 'x-api-key': apiKey } });
+    ok = r.ok;
+  } catch (e) { ok = false; }
+  _apiKeyCache.set(apiKey, { ok, exp: Date.now() + API_KEY_CACHE_TTL });
+  return ok;
+}
+
 // ── Title index ────────────────────────────────────────────────────────────
 // Persistent map of assetId → { title, updatedAt, indexedAt }. Lets library
 // search match against IPTC ObjectName (LR's "title" field), which Immich's
@@ -138,10 +157,13 @@ async function backfillTitleIndex() {
       await Promise.all(batch.map(async (a) => {
         const updatedAt = a.updatedAt || a.fileModifiedAt;
         const cached = _titleIndex.get(a.id);
+        // LR plugin pushes are authoritative for their assets — don't let the
+        // byte scanner clobber them with whatever it finds in the JPEG.
+        if (cached && cached.source === 'lr') return;
         if (cached && cached.updatedAt === updatedAt) return;
         try {
           const title = await fetchAssetTitle(a.id, updatedAt);
-          _titleIndex.set(a.id, { title: title || '', updatedAt, indexedAt: Date.now() });
+          _titleIndex.set(a.id, { title: title || '', updatedAt, indexedAt: Date.now(), source: 'scan' });
           updated++;
         } catch (e) { /* skip */ }
       }));
@@ -281,6 +303,29 @@ app.get('/api/auth/check', (req, res) => {
   res.json({ authenticated: !!req.session.authenticated });
 });
 
+// LR plugin pushes title here on every publish so title-only edits don't
+// require re-rendering the JPEG. Auth: caller's Immich API key, validated
+// against this Darkroom's Immich. Once accepted, entries flagged source='lr'
+// are treated as authoritative — the byte-scan backfill won't overwrite them.
+app.post('/api/lr-title', async (req, res) => {
+  const apiKey = req.headers['x-api-key'];
+  if (!apiKey) return res.status(401).json({ error: 'missing api key' });
+  const ok = await validateImmichApiKey(apiKey);
+  if (!ok) return res.status(401).json({ error: 'invalid api key' });
+  const { assetId, title } = req.body || {};
+  if (!assetId || typeof assetId !== 'string') return res.status(400).json({ error: 'assetId required' });
+  if (typeof title !== 'string') return res.status(400).json({ error: 'title required (empty string clears)' });
+  _titleIndex.set(assetId, {
+    title: title.trim(),
+    updatedAt: new Date().toISOString(),
+    indexedAt: Date.now(),
+    source: 'lr',
+  });
+  saveTitleIndexSoon();
+  console.log(`lr-title: asset=${assetId} title=${JSON.stringify(title.trim())}`);
+  res.json({ ok: true });
+});
+
 // Immich proxy - search photos. Queries Immich's filename index AND the
 // local title index in parallel; merges results so a search for "curtains"
 // finds the photo whose IPTC title is Curtains even if the filename is
@@ -335,9 +380,17 @@ app.get('/api/immich/photo/:id', requireAuth, async (req, res) => {
       headers: { 'x-api-key': IMMICH_KEY }
     });
     const data = await response.json();
-    // Title isn't in Immich's API — read it from the JPEG header directly.
-    // fetchAssetTitle is cached by id+updatedAt, so once per asset version.
-    const title = await fetchAssetTitle(req.params.id, data.updatedAt || data.fileModifiedAt);
+    // Title isn't in Immich's API. Prefer the title index (which is
+    // authoritative when populated by the lr-immich plugin's POST
+    // /api/lr-title — source: 'lr'). Fall back to scanning JPEG bytes
+    // for assets the plugin never touched (older uploads, non-LR sources).
+    let title = '';
+    const indexed = _titleIndex.get(req.params.id);
+    if (indexed && indexed.source === 'lr') {
+      title = indexed.title || '';
+    } else {
+      title = await fetchAssetTitle(req.params.id, data.updatedAt || data.fileModifiedAt);
+    }
     res.json({
       id: data.id,
       filename: data.originalFileName,
@@ -1243,19 +1296,48 @@ app.get('/embed/:filename', async (req, res) => {
   const m = req.params.filename.match(/^([0-9a-f-]{32,36})(?:-(\d{3,4}))?\.jpe?g$/i);
   if (!m) return res.status(400).send('bad filename');
   const id = m[1];
-  // 1024px is the forum-standard width (old Flickr "_b" size). Override via
-  // filename suffix (<id>-800.jpg) or ?w= query. Capped at 2400.
+  // Default 1600px. The old Flickr "_b" 1024 came from a 2048px LR export
+  // (2× downscale → minimal blur). Our pipeline pulls 6800+px originals, so
+  // 1024 = 6.7× downscale, soft. 1600 = 4.3× downscale, retains detail
+  // naturally with only invisible sharpening. Override via filename suffix
+  // (<id>-1024.jpg, <id>-2048.jpg) or ?w= query. Capped at 2400.
   let width = parseInt(m[2] || req.query.w, 10);
-  if (!Number.isFinite(width) || width < 100 || width > 2400) width = 1024;
+  if (!Number.isFinite(width) || width < 100 || width > 2400) width = 1600;
   try {
-    const r = await fetch(`${IMMICH_URL}/assets/${id}/thumbnail?size=preview`, {
+    // Fetch the ORIGINAL from Immich, not /thumbnail?size=preview. Immich's
+    // preview is itself a downscaled lossy JPEG (~1440px); resizing that to
+    // 1024 compounds two rounds of resampling + recompression and the embed
+    // ends up soft. Pulling the original means sharp does a single high-
+    // quality downscale. Cache-Control headers below mean the cost is paid
+    // once per asset; subsequent forum hits are CDN-served.
+    const r = await fetch(`${IMMICH_URL}/assets/${id}/original`, {
       headers: { 'x-api-key': IMMICH_KEY }
     });
     if (!r.ok) return res.status(r.status).end();
     const buf = Buffer.from(await r.arrayBuffer());
-    const out = await sharp(buf)
-      .resize({ width, withoutEnlargement: true })
-      .jpeg({ quality: 88, mozjpeg: true })
+    // Size-conditional output sharpening (three tiers). Source ~6800px:
+    //   - width ≤ 1200 → 5.7×+ downscale. Apply max USM (sigma=0.9, m1=0,
+    //     m2=3). Closest LR analog: "Sharpen for Screen — Standard." Picked
+    //     0.9 over 1.0 after side-by-side: 1.0 just edged into "processed"
+    //     territory on high-contrast edges; 0.9 holds the line.
+    //   - 1200 < width ≤ 1280 → 5.3× downscale. Flickr-style mild USM
+    //     (sigma=0.5, m1=0, m2=2). Same recipe Flickr uses on its "_b" 1024
+    //     size — visible edges, no halos. Keeps existing 1280 renders stable.
+    //   - width > 1280 (1400, 1600, 2048, 2400) → ≤4.9× downscale; lanczos3
+    //     produces clean edges naturally and any USM reads as "processed."
+    // m1=0 across both sharpening tiers means flat areas (skies, OOF foliage)
+    // are not sharpened, so no grain crunch. Quality 95 + mozjpeg + 4:4:4
+    // chroma preserve post-resize detail. sRGB ICC for color-accurate view.
+    let pipeline = sharp(buf, { failOn: 'none' })
+      .resize({ width, withoutEnlargement: true, kernel: 'lanczos3' });
+    if (width <= 1200) {
+      pipeline = pipeline.sharpen({ sigma: 0.9, m1: 0, m2: 3 });
+    } else if (width <= 1280) {
+      pipeline = pipeline.sharpen({ sigma: 0.5, m1: 0, m2: 2 });
+    }
+    const out = await pipeline
+      .withMetadata({ icc: 'srgb' })
+      .jpeg({ quality: 95, mozjpeg: true, chromaSubsampling: '4:4:4' })
       .toBuffer();
     res.set('Content-Type', 'image/jpeg');
     res.set('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');

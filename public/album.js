@@ -1,8 +1,13 @@
 const slug=location.pathname.replace('/album/','').replace(/\//g,'');
 let album=null,assetMeta={};
 let ssActiveSlot='a',ssIndex=0,ssPausedState=false,ssTimer=null,ssHideTimer=null;
-let ssAudio=null,ssAudioFade=null,ssDescVisible=true,ssCleanupTimers=[];
+let ssDescVisible=true,ssCleanupTimers=[];
+// Beat-preset state — tracks last-scheduled beat + pattern position so each
+// scheduleNext call steps cleanly instead of recomputing from a moving
+// musicSec reference (variable image load times caused inconsistent snaps).
+let ssBeatIdx=null,ssBeatPtnIdx=null,ssSlidesShown=0;
 let ssZoom={scale:1,tx:0,ty:0}; // pinch-zoom inside the slideshow overlay
+let _embedExpanded=false; // true when the parent page has expanded our iframe in-place via postMessage
 
 function isZoomed(){return ssZoom.scale>1.001;}
 function applyZoomTransform(){
@@ -33,6 +38,8 @@ const KB=[
   {s:'scale(1.08) translate(0%,-5%)',e:'scale(1.25) translate(0%,3%)'},
   {s:'scale(1.25) translate(0%,4%)',e:'scale(1.08) translate(0%,-3%)'},
 ];
+// No-motion pose for non-Ken-Burns presets (Quick uses this).
+const KB_NONE=[{s:'scale(1) translate(0,0)',e:'scale(1) translate(0,0)'}];
 
 async function init(){
   const r=await fetch('/api/public/album/'+slug);
@@ -40,6 +47,21 @@ async function init(){
   album=await r.json();
   document.title=album.title+' — Darkroom Log';
   document.getElementById('album-name').textContent=album.title;
+  // Pre-decode the music track in the background so when the visitor clicks
+  // Slideshow, playback starts instantly (decode takes 1–3s). For beat-driven
+  // presets also run beat analysis on the buffer so the scheduler has the
+  // beats array ready by the time the slideshow starts.
+  if (window.DarkroomAudio && album.slideshowSettings && album.slideshowSettings.musicFile) {
+    try {
+      DarkroomAudio.ensureCtx();
+      const file = album.slideshowSettings.musicFile;
+      DarkroomAudio.loadTrack(file).catch(() => {});
+      const preset = album.slideshowSettings.preset;
+      if (preset === 'beat' || preset === 'beatfade') {
+        DarkroomAudio.analyzeTrack(file).catch(() => {});
+      }
+    } catch(e) {}
+  }
   if (isEmbed) {
     const coverId = album.cover || album.assets[0];
     if (coverId) {
@@ -49,13 +71,39 @@ async function init(){
       document.getElementById('photo-grid').style.display = 'none';
     }
   } else {
-    // If ?autoplay landed inside an iframe, escalate to top-level so we escape the embed
-    if (new URLSearchParams(location.search).has('autoplay') && window !== window.top) {
+    const params = new URLSearchParams(location.search);
+    // If a fullscreen-only mode landed inside an iframe, escalate to top.
+    if (params.has('fs') && window !== window.top) {
       try { window.top.location.href = window.location.href; } catch(e) {}
       return;
     }
+    if (params.has('fs')) {
+      // Slideshow-only mode — used by the embed's ⤢ button. No grid rendered;
+      // closing the slideshow returns the user to where they came from
+      // (history.back to the article, or window.close for popup-opened tabs).
+      document.body.classList.add('fs-mode');
+      // iOS Safari rejects audio.play() after a tab navigation because the
+      // user-gesture token doesn't carry across page loads. Hook the first
+      // touch/click to retry — silent slideshow until the user interacts.
+      const resumeMusic = () => {
+        // After a tab navigation iOS Safari may have suspended the
+        // AudioContext; the first user interaction lets us resume it.
+        if (window.DarkroomAudio) {
+          try {
+            DarkroomAudio.ensureCtx();
+            if (!DarkroomAudio.isMusicPlaying() && album?.slideshowSettings?.musicFile) {
+              DarkroomAudio.playMusic(album.slideshowSettings.musicFile, { fadeMs: 300, loop: true, volume: 0.85 });
+            }
+          } catch(e) {}
+        }
+      };
+      document.addEventListener('touchstart', resumeMusic, { once: true, capture: true });
+      document.addEventListener('click', resumeMusic, { once: true, capture: true });
+      openSlideshow(0);
+      return;
+    }
     renderGrid();
-    if (!new URLSearchParams(location.search).has('gallery')) openSlideshowPaused(0);
+    if (!params.has('gallery')) openSlideshowPaused(0);
   }
 }
 
@@ -70,9 +118,12 @@ async function openSlideshow(idx){
   ssIndex=idx;ssPausedState=false;ssActiveSlot='a';ssDescVisible=true;ssCleanupTimers=[];
   document.getElementById('ss-overlay').classList.add('active');
   startMusic();
+  // Reset beat-preset state; showKBSlide's image-load callback calls
+  // scheduleNext (single source of truth — explicit calls here would cause
+  // double-scheduling and inconsistent timing).
+  ssBeatIdx=null;ssBeatPtnIdx=null;ssSlidesShown=1;
   await showTitleCard();
   showKBSlide(idx);
-  scheduleNext();
   showSSControls();
 }
 async function openSlideshowPaused(idx){
@@ -96,18 +147,47 @@ async function openSlideshowPaused(idx){
   playBtn.addEventListener('mouseenter',()=>{playBtn.style.background='#c8611a';playBtn.style.color='#0a0a0a';});
   playBtn.addEventListener('mouseleave',()=>{playBtn.style.background='transparent';playBtn.style.color='#c8611a';});
   playBtn.addEventListener('click',async()=>{
+    // Try entering native fullscreen NOW — while the user-gesture
+    // activation token from this tap is still live. Desktop + Android
+    // Chrome both honor it. iOS Safari rejects fullscreen on <div>
+    // elements, so the call no-ops there — but the slideshow overlay
+    // is already position:fixed inset:0 so the visual result is close
+    // enough. Don't navigate away on failure (the iosFallbackFullscreen
+    // path is for explicit ⤢ taps, not the play button).
+    // Only auto-fullscreen on touch-primary devices (phones, tablets). On
+    // desktop, leave the user in a browser tab — they can use the ⤢ button
+    // if they want fullscreen.
+    if (window.matchMedia('(hover: none) and (pointer: coarse)').matches) {
+      try {
+        const overlay = document.getElementById('ss-overlay');
+        const req = overlay.requestFullscreen || overlay.webkitRequestFullscreen;
+        if (req) { const p = req.call(overlay); if (p && p.catch) p.catch(()=>{}); }
+      } catch(e) { /* iOS Safari / cross-origin iframe — ignore */ }
+    }
+
     card.style.opacity='0';
     await new Promise(r=>setTimeout(r,800));
     card.style.display='none';
     card.style.pointerEvents='none';
     ssPausedState=false;
     startMusic();
+    ssBeatIdx=null;ssBeatPtnIdx=null;ssSlidesShown=1;
     showKBSlide(idx);
-    scheduleNext();
     showSSControls();
   });
 }
-function startSlideshow(){openSlideshow(0);}
+function startSlideshow(){
+  // Re-entry guard: the embed-hero has 4 stacked click handlers (overlay click,
+  // hero click via w() + via direct addEventListener, document data-action delegator)
+  // so a single tap fires startSlideshow 4 times. Without this guard each call
+  // re-runs openSlideshow → re-calls scheduleNext with a stale ssBeatIdx that
+  // increments by 16 each time, scheduling slide 2 to fire ~31s out instead of ~7s.
+  // openSlideshow adds .active to #ss-overlay synchronously on its first line,
+  // so calls #2/#3/#4 see it and bail. Standalone (non-embed) path is unaffected
+  // because openSlideshowPaused's title-card play button has only one handler.
+  if(document.getElementById('ss-overlay').classList.contains('active')) return;
+  openSlideshow(0);
+}
 // Tapping a thumbnail opens the library-style detail view (two-column on desktop,
 // stacked on mobile): image on one side, EXIF/description on the other. Tapping
 // the image inside detail view enters the pure fullscreen viewer (image only,
@@ -117,14 +197,66 @@ function openPhotoView(idx){
   albumDetailOpen(idx);
 }
 
+// Compute album date range from photo takenAt values. Uses assetMeta cache
+// when available, lazy-fetches missing entries via the public photo endpoint.
+async function _computeAlbumDateRange(){
+  if(!album||!album.assets||!album.assets.length) return '';
+  const fetches=album.assets.map(id=>{
+    const cached=assetMeta[id];
+    if(cached&&cached.takenAt) return Promise.resolve(cached.takenAt);
+    return fetch('/api/public/photo/'+id)
+      .then(r=>r.json())
+      .then(m=>{
+        if(!assetMeta[id])assetMeta[id]={};
+        assetMeta[id].takenAt=m.takenAt||'';
+        assetMeta[id].title=m.title||'';
+        assetMeta[id].description=m.description||'';
+        return m.takenAt||'';
+      })
+      .catch(()=>'');
+  });
+  const taken=await Promise.all(fetches);
+  const dates=taken.filter(Boolean).map(s=>new Date(s)).filter(d=>!isNaN(d.getTime()));
+  if(!dates.length) return '';
+  dates.sort((a,b)=>a-b);
+  return _formatDateRange(dates[0],dates[dates.length-1]);
+}
+
+function _formatDateRange(d1,d2){
+  const month=d=>d.toLocaleString('en-US',{month:'short'});
+  const year=d=>d.getFullYear();
+  if(d1.toDateString()===d2.toDateString()) return `${month(d1)} ${d1.getDate()}, ${year(d1)}`;
+  if(year(d1)===year(d2)&&d1.getMonth()===d2.getMonth()) return `${month(d1)} ${year(d1)}`;
+  if(year(d1)===year(d2)) return `${month(d1)} — ${month(d2)} ${year(d1)}`;
+  return `${month(d1)} ${year(d1)} — ${month(d2)} ${year(d2)}`;
+}
+
 async function showTitleCard(){
   const settings=album.slideshowSettings||{};
   if(!settings.showTitle)return;
+  // Resolve the date range string before rendering — manual override or
+  // auto-computed from photo takenAt. Capped at 2s so a slow Immich call
+  // can't delay the slideshow indefinitely.
+  let dateRangeStr='';
+  if(settings.showDates){
+    if(settings.dateRange){
+      dateRangeStr=settings.dateRange;
+    } else {
+      try {
+        dateRangeStr=await Promise.race([
+          _computeAlbumDateRange(),
+          new Promise(res=>setTimeout(()=>res(''),2000))
+        ]);
+      } catch(e){ dateRangeStr=''; }
+    }
+  }
   const card=document.getElementById('ss-title-card');
   const content=document.getElementById('ss-title-card-content');
   let html=`<div class="ss-title-main">${album.title}</div>`;
   html+=`<div style="width:60px;height:1px;background:#c8611a;margin:1.5rem auto"></div>`;
   if(settings.byline)html+=`<div class="ss-title-sub">Photography by ${settings.byline}</div>`;
+  if(settings.showLocation&&settings.location)html+=`<div class="ss-title-sub" style="margin-top:0.5rem">${settings.location}</div>`;
+  if(settings.showDates&&dateRangeStr)html+=`<div class="ss-title-sub" style="margin-top:0.5rem">${dateRangeStr}</div>`;
   if(settings.showCount)html+=`<div class="ss-title-sub" style="margin-top:0.75rem">${album.assets.length} PHOTOS</div>`;
   content.innerHTML=html;
   card.style.display='flex';
@@ -136,30 +268,23 @@ async function showTitleCard(){
   card.style.display='none';
 }
 
+// Music — routed through DarkroomAudio (Web Audio engine). Gives a
+// sample-accurate music clock that beat-locked scheduling can reference.
+// Pre-decode happens at album load, so playMusic here is near-instant.
 function stopMusic(){
-  if(ssAudioFade){clearInterval(ssAudioFade);ssAudioFade=null;}
-  if(ssAudio){
-    ssAudio.pause();
-    ssAudio.src=''; // release resource so iOS bfcache can't keep it playing
-    ssAudio.load();
-    ssAudio=null;
-  }
+  if (window.DarkroomAudio) DarkroomAudio.stopMusic({ fadeMs: 800 });
 }
 function startMusic(){
   const settings=album.slideshowSettings||{};
-  stopMusic();
   if(!settings.musicFile)return;
   if(_bc) _bc.postMessage('stop'); // tell other tabs to stop their music
-  const audio=new Audio('/api/albums/music/'+encodeURIComponent(settings.musicFile));
-  ssAudio=audio;
-  audio.loop=true;audio.volume=0;
-  audio.play().catch(()=>{});
-  let vol=0;
-  ssAudioFade=setInterval(()=>{
-    if(ssAudio!==audio){clearInterval(ssAudioFade);ssAudioFade=null;return;}
-    vol=Math.min(vol+0.05,0.8);audio.volume=vol;
-    if(vol>=0.8){clearInterval(ssAudioFade);ssAudioFade=null;}
-  },100);
+  if (!window.DarkroomAudio) return;
+  DarkroomAudio.ensureCtx();
+  DarkroomAudio.playMusic(settings.musicFile, {
+    fadeMs: 1600,
+    loop: true,
+    volume: 0.85,
+  }).catch(e => console.warn('music start failed:', e));
 }
 
 function cancelSlideCleanup(){
@@ -184,7 +309,144 @@ function prepareSlot(ns, idx){
   return img;
 }
 
-function showKBSlide(idx){
+// Returns the CURRENT slide's hold duration, including the actual
+// beat-pattern step for beat/beatfade presets. _slideDurationMs() uses
+// only the first step and is wrong mid-pattern.
+function _currentSlideHoldMs(){
+  const s=(album&&album.slideshowSettings)||{};
+  if(s.preset==='quick') return 6000;
+  if(s.preset==='beat'||s.preset==='beatfade'){
+    const pattern=_parseBeatPattern(s.paceBeatsEvery);
+    const ptnIdx=(ssBeatPtnIdx==null)?0:(ssBeatPtnIdx%pattern.length);
+    const beats=pattern[ptnIdx];
+    const useOverride=s.paceBpmOverrideEnabled===true;
+    const override=Number(s.paceBpmOverride);
+    const analysis=s.musicFile&&window.DarkroomAudio?DarkroomAudio.getTrackAnalysis(s.musicFile):null;
+    let bpm=useOverride&&override>=40?override:(analysis?analysis.bpm:0);
+    if(!bpm||!Number.isFinite(bpm)||bpm<40) bpm=60;
+    return Math.round(beats*60000/bpm);
+  }
+  return s.showPhotoTitle===true?12000:7000;
+}
+
+// Per-photo overlay (title + description) — shared by all preset render
+// paths. Adaptive timing scaled to the actual current slide duration so
+// each step in a beat pattern gets appropriate fade timing. Title and
+// description fade in lockstep.
+function _renderPerPhotoOverlay(id){
+  const ssSettings=(album&&album.slideshowSettings)||{};
+  const wantTitle=ssSettings.showPhotoTitle===true;
+  const wantDesc=ssSettings.showPhotoDescription===true;
+  const desc=document.getElementById('ss-description');
+  const title=document.getElementById('ss-photo-title');
+  const slideDur=_currentSlideHoldMs();
+  // Skip overlay on slides too short for a readable fade in/hold/out.
+  const overlayTooFast=slideDur<1400;
+  // Per-preset image-crossfade duration. Title shouldn't materialize until
+  // the image it belongs to is fully shown.
+  //   Beat Fade: 700ms; Quick: 1.8s; Classic/Beat/Custom: 1.5s default.
+  const imgFadeMs=(ssSettings.preset==='beatfade')?700
+                 :(ssSettings.preset==='quick')?1800
+                 :1500;
+  const baseDelay=imgFadeMs+200;
+  let OV_DELAY_MS,OV_FADE_IN_MS,OV_FADE_OUT_MS,OV_FADE_OUT_AT_MS;
+  if(slideDur>=6000){
+    OV_DELAY_MS=baseDelay+800;
+    OV_FADE_IN_MS=1000;
+    OV_FADE_OUT_MS=1000;
+    OV_FADE_OUT_AT_MS=slideDur-OV_FADE_OUT_MS-200;
+  } else if(slideDur>=3500){
+    OV_DELAY_MS=baseDelay;
+    OV_FADE_IN_MS=600;
+    OV_FADE_OUT_MS=600;
+    OV_FADE_OUT_AT_MS=slideDur-OV_FADE_OUT_MS-200;
+  } else if(slideDur>=2200){
+    OV_DELAY_MS=Math.max(500,baseDelay-400);
+    OV_FADE_IN_MS=400;
+    OV_FADE_OUT_MS=400;
+    OV_FADE_OUT_AT_MS=slideDur-OV_FADE_OUT_MS-150;
+  } else {
+    OV_DELAY_MS=200;
+    OV_FADE_IN_MS=300;
+    OV_FADE_OUT_MS=300;
+    OV_FADE_OUT_AT_MS=slideDur-OV_FADE_OUT_MS-100;
+  }
+  // Clear in-flight timers from the previous slide.
+  if(title&&title._slideTitleTimer){clearTimeout(title._slideTitleTimer);title._slideTitleTimer=null;}
+  if(title&&title._slideTitleFadeOutTimer){clearTimeout(title._slideTitleFadeOutTimer);title._slideTitleFadeOutTimer=null;}
+  if(desc&&desc._slideDescTimer){clearTimeout(desc._slideDescTimer);desc._slideDescTimer=null;}
+  if(desc&&desc._slideDescFadeOutTimer){clearTimeout(desc._slideDescFadeOutTimer);desc._slideDescFadeOutTimer=null;}
+  if(title){title.style.transition=`opacity ${OV_FADE_IN_MS}ms ease-in-out`;title.style.opacity='0';}
+  if(desc){desc.style.transition=`opacity ${OV_FADE_IN_MS}ms ease-in-out`;desc.style.opacity='0';}
+
+  const applyOverlay=(m)=>{
+    if(desc){
+      if(wantDesc&&!overlayTooFast&&m&&m.description){
+        desc.textContent=m.description;
+        desc.style.display='';
+        if(desc._slideDescTimer)clearTimeout(desc._slideDescTimer);
+        if(desc._slideDescFadeOutTimer)clearTimeout(desc._slideDescFadeOutTimer);
+        desc._slideDescTimer=setTimeout(()=>{
+          desc.style.transition=`opacity ${OV_FADE_IN_MS}ms ease-in-out`;
+          desc.style.opacity='1';
+          desc._slideDescTimer=null;
+        },OV_DELAY_MS);
+        desc._slideDescFadeOutTimer=setTimeout(()=>{
+          desc.style.transition=`opacity ${OV_FADE_OUT_MS}ms ease-in-out`;
+          desc.style.opacity='0';
+          desc._slideDescFadeOutTimer=null;
+        },OV_FADE_OUT_AT_MS);
+      } else {
+        desc.textContent='';
+        desc.style.opacity='0';
+        desc.style.display=wantDesc?'':'none';
+      }
+    }
+    if(title){
+      if(wantTitle&&!overlayTooFast&&m&&m.title){
+        title.style.display='block';
+        if(title._slideTitleTimer)clearTimeout(title._slideTitleTimer);
+        if(title._slideTitleFadeOutTimer)clearTimeout(title._slideTitleFadeOutTimer);
+        title._slideTitleTimer=setTimeout(()=>{
+          title.textContent=m.title;
+          title.style.transition=`opacity ${OV_FADE_IN_MS}ms ease-in-out`;
+          title.style.opacity='1';
+          title._slideTitleTimer=null;
+        },OV_DELAY_MS);
+        title._slideTitleFadeOutTimer=setTimeout(()=>{
+          title.style.transition=`opacity ${OV_FADE_OUT_MS}ms ease-in-out`;
+          title.style.opacity='0';
+          title._slideTitleFadeOutTimer=null;
+        },OV_FADE_OUT_AT_MS);
+      } else {
+        title.textContent='';
+        title.style.opacity='0';
+        title.style.display='none';
+      }
+    }
+  };
+  applyOverlay(assetMeta[id]);
+  // Closure-capture the slide we're rendering for so the fetch callback
+  // doesn't apply stale meta if the user has navigated away.
+  const _idxAtFetch=ssIndex;
+  const cached=assetMeta[id];
+  const needFetch=!cached||(wantTitle&&cached.title===undefined)||(wantDesc&&cached.description===undefined);
+  if(needFetch){
+    fetch('/api/public/photo/'+id).then(r=>r.json()).then(m=>{
+      if(!assetMeta[id])assetMeta[id]={};
+      assetMeta[id].description=m.description||'';
+      assetMeta[id].title=m.title||'';
+      assetMeta[id].takenAt=m.takenAt||assetMeta[id].takenAt||'';
+      if(ssIndex===_idxAtFetch) applyOverlay(assetMeta[id]);
+    }).catch(()=>{});
+  }
+}
+
+function showKBSlide(idx, direction){
+  // Dispatch to alternative implementation if a non-Classic preset is set.
+  const _preset=(album&&album.slideshowSettings&&album.slideshowSettings.preset)||'classic';
+  if(_preset==='quick') return showSlideSlide(idx, direction);
+  if(_preset==='beatfade') return showSlideBeatFade(idx);
   resetZoom();
   ssIndex=idx;
   const id=album.assets[idx];
@@ -192,17 +454,24 @@ function showKBSlide(idx){
   const ns=ssActiveSlot==='a'?'b':'a';
   const cur=document.getElementById('ss-slide-'+ssActiveSlot);
   const nxt=document.getElementById('ss-slide-'+ns);
+  // Clear leftover classes from non-Classic presets (Quick or Beat Fade)
+  ['ss-slide-h','ss-slide-h-from-right','ss-slide-h-from-left','ss-exiting-left','ss-exiting-right','ss-fade-quick']
+    .forEach(c=>{cur.classList.remove(c);nxt.classList.remove(c);});
+  // Adaptive crossfade — default CSS 1.5s is longer than fast pattern
+  // steps (e.g. 2 beats @ 94 BPM = 1.28s), causing transitions to stack
+  // and look janky. Scale to fit comfortably inside the slide hold time.
+  const _kbDur=_currentSlideHoldMs();
+  const crossfadeMs=_kbDur<1600?400:_kbDur<3000?800:1500;
+  [cur,nxt].forEach(el=>{
+    if(el) el.style.transition=`opacity ${crossfadeMs}ms ease-in-out`;
+  });
   nxt.classList.remove('ss-visible');
   nxt.style.zIndex=1;
+  _renderPerPhotoOverlay(id);
   const img=prepareSlot(ns, idx);
   const show=()=>{
-    const desc=document.getElementById('ss-description');
-    if(assetMeta[id]){desc.textContent=assetMeta[id].description||'';}
-    else desc.textContent='';
     nxt.style.zIndex=3;
     img.style.transform=''; // clear any stale zoom transform
-    // Set KB vars here (not prepareSlot) — CSS vars in @keyframes are live, changing them
-    // on a running animation causes an immediate position jump.
     const move=KB[idx%KB.length];
     img.style.setProperty('--kb-start',move.s);
     img.style.setProperty('--kb-end',move.e);
@@ -211,59 +480,368 @@ function showKBSlide(idx){
     img.style.animation='kenburns 14s linear forwards';
     requestAnimationFrame(()=>requestAnimationFrame(()=>nxt.classList.add('ss-visible')));
     if(!ssPausedState) scheduleNext();
-    const t1=setTimeout(()=>{cur.classList.remove('ss-visible');},1500);
+    const t1=setTimeout(()=>{cur.classList.remove('ss-visible');},crossfadeMs);
     const t2=setTimeout(()=>{
       cur.style.zIndex=1;
       ssActiveSlot=ns;
       ssCleanupTimers=ssCleanupTimers.filter(t=>t!==t1&&t!==t2);
       prepareSlot(ns==='a'?'b':'a', (idx+1)%album.assets.length);
-    },3500);
+    },crossfadeMs*2+500);
     ssCleanupTimers.push(t1,t2);
   };
   if(img.complete && img.naturalWidth>0)show();else{img.onload=show;img.onerror=show;}
 }
 
-function scheduleNext(){clearTimeout(ssTimer);if(!ssPausedState)ssTimer=setTimeout(ssNext,7000);}
-function ssNext(){cancelSlideCleanup();showKBSlide((ssIndex+1)%album.assets.length);scheduleNext();}
-function ssPrev(){cancelSlideCleanup();showKBSlide((ssIndex-1+album.assets.length)%album.assets.length);scheduleNext();}
+// QUICK preset (slide-horizontal, no Ken Burns). Fully isolated from
+// showKBSlide. The Classic code path never enters this function.
+function showSlideSlide(idx, direction){
+  resetZoom();
+  ssIndex=idx;
+  const id=album.assets[idx];
+  document.getElementById('ss-counter').textContent=(idx+1)+' / '+album.assets.length;
+  const ns=ssActiveSlot==='a'?'b':'a';
+  const cur=document.getElementById('ss-slide-'+ssActiveSlot);
+  const nxt=document.getElementById('ss-slide-'+ns);
+  // Clean transition-mode classes off both slots (last preset may have been different)
+  ['ss-slide-h','ss-slide-h-from-right','ss-slide-h-from-left','ss-exiting-left','ss-exiting-right']
+    .forEach(c=>{cur.classList.remove(c);nxt.classList.remove(c);});
+  nxt.classList.remove('ss-visible');
+  nxt.style.zIndex=1;
+  _renderPerPhotoOverlay(id);
+  const img=prepareSlot(ns, idx);
+  const show=()=>{
+    img.style.animation='none';     // no Ken Burns for Quick
+    img.style.transform='';
+    const dir=direction==='backward'?'backward':'forward';
+    const fromClass=dir==='forward'?'ss-slide-h-from-right':'ss-slide-h-from-left';
+    nxt.classList.add('ss-slide-h', fromClass);
+    void nxt.offsetWidth;           // force layout so initial position takes effect
+    nxt.style.zIndex=3;
+    requestAnimationFrame(()=>requestAnimationFrame(()=>{
+      nxt.classList.add('ss-visible');
+      const exitClass=dir==='forward'?'ss-exiting-left':'ss-exiting-right';
+      cur.classList.add('ss-slide-h', exitClass);
+    }));
+    if(!ssPausedState) scheduleNext();
+    const t2=setTimeout(()=>{
+      cur.style.zIndex=1;
+      cur.classList.remove('ss-visible');
+      ssActiveSlot=ns;
+      ssCleanupTimers=ssCleanupTimers.filter(t=>t!==t2);
+      prepareSlot(ns==='a'?'b':'a', (idx+1)%album.assets.length);
+    }, 1900);
+    ssCleanupTimers.push(t2);
+  };
+  if(img.complete && img.naturalWidth>0)show();else{img.onload=show;img.onerror=show;}
+}
+
+// BEAT FADE preset — same beat-aligned scheduler as Beat preset, but no Ken
+// Burns motion. Just a 700ms opacity crossfade on each beat-aligned tick.
+function showSlideBeatFade(idx){
+  resetZoom();
+  ssIndex=idx;
+  const id=album.assets[idx];
+  document.getElementById('ss-counter').textContent=(idx+1)+' / '+album.assets.length;
+  const ns=ssActiveSlot==='a'?'b':'a';
+  const cur=document.getElementById('ss-slide-'+ssActiveSlot);
+  const nxt=document.getElementById('ss-slide-'+ns);
+  // Strip any prior preset's classes from both slots, then apply ss-fade-quick
+  ['ss-slide-h','ss-slide-h-from-right','ss-slide-h-from-left','ss-exiting-left','ss-exiting-right']
+    .forEach(c=>{cur.classList.remove(c);nxt.classList.remove(c);});
+  nxt.classList.add('ss-fade-quick');
+  cur.classList.add('ss-fade-quick');
+  nxt.classList.remove('ss-visible');
+  nxt.style.zIndex=1;
+  _renderPerPhotoOverlay(id);
+  const img=prepareSlot(ns, idx);
+  // No ken-burns animation; static image
+  img.style.animation='none';
+  img.style.transform='';
+  const show=()=>{
+    nxt.style.zIndex=3;
+    requestAnimationFrame(()=>requestAnimationFrame(()=>{
+      nxt.classList.add('ss-visible');
+      cur.classList.remove('ss-visible');
+    }));
+    if(!ssPausedState) scheduleNext();
+    const t1=setTimeout(()=>{
+      cur.style.zIndex=1;
+      ssActiveSlot=ns;
+      ssCleanupTimers=ssCleanupTimers.filter(t=>t!==t1);
+    },500);
+    ssCleanupTimers.push(t1);
+  };
+  if(img.complete && img.naturalWidth>0)show();else{img.onload=show;img.onerror=show;}
+}
+
+// Slide hold duration. With per-photo title enabled, use 12s (gives
+// time for fade-in + readable hold + fade-out). Otherwise classic 7s.
+// paceBeatsEvery is "8" (constant) or comma-separated like "8,4" (pattern).
+function _parseBeatPattern(val){
+  const arr=String(val??'8').split(',').map(s=>parseInt(s.trim(),10)).filter(n=>Number.isFinite(n)&&n>0&&n<=64);
+  return arr.length?arr:[8];
+}
+
+function _slideDurationMs(){
+  const s=(album&&album.slideshowSettings)||{};
+  if(s.preset==='quick') return 6000;
+  if(s.preset==='beat'||s.preset==='beatfade'){
+    const pattern=_parseBeatPattern(s.paceBeatsEvery);
+    const beats=pattern[0];
+    const useOverride=s.paceBpmOverrideEnabled===true;
+    const override=Number(s.paceBpmOverride);
+    const analysis=s.musicFile&&window.DarkroomAudio?DarkroomAudio.getTrackAnalysis(s.musicFile):null;
+    const bpm=useOverride&&override>=40?override:(analysis?analysis.bpm:0);
+    if(Number.isFinite(bpm)&&bpm>=40) return Math.round(beats*60000/bpm);
+  }
+  return s.showPhotoTitle===true?12000:7000;
+}
+
+// Beat-aligned scheduler — for beat/beatfade presets only. Stateful step
+// through detected beats so successive slide changes are exactly N beats
+// apart (no inconsistent snap distances from variable image-load delays).
+function scheduleNext(){
+  clearTimeout(ssTimer);
+  if(ssPausedState) return;
+  const s=(album&&album.slideshowSettings)||{};
+  const dur=_slideDurationMs();
+  let delay=dur;
+  if((s.preset==='beat'||s.preset==='beatfade')&&window.DarkroomAudio&&DarkroomAudio.isMusicPlaying()){
+    const analysis=DarkroomAudio.getTrackAnalysis(s.musicFile);
+    const useOverride=s.paceBpmOverrideEnabled===true;
+    const override=Number(s.paceBpmOverride);
+    const pattern=_parseBeatPattern(s.paceBeatsEvery);
+    const ptnIdx=(ssBeatPtnIdx==null)?0:(ssBeatPtnIdx%pattern.length);
+    const step=pattern[ptnIdx];
+    if(useOverride&&override>=40){
+      const beatSec=60/override;
+      const musicSec=DarkroomAudio.getMusicTime();
+      const phase=(analysis&&analysis.beats&&analysis.beats.length)?(analysis.beats[0]%beatSec):0;
+      let target;
+      let curPtnIdx=ptnIdx;
+      if(ssBeatIdx==null){
+        const minDelay=dur*0.001*0.5;
+        const k=Math.ceil((musicSec+minDelay-phase)/(pattern[0]*beatSec));
+        target=k*pattern[0]*beatSec+phase;
+      } else {
+        target=ssBeatIdx+step*beatSec;
+        // Catch-up: slow image loads can push musicSec past target. Walk
+        // forward through the pattern until target is comfortably ahead,
+        // otherwise delay=max(50,negative) fires the slide ~instantly.
+        while(target<=musicSec+0.1){
+          curPtnIdx=(curPtnIdx+1)%pattern.length;
+          target+=pattern[curPtnIdx]*beatSec;
+        }
+      }
+      ssBeatIdx=target;
+      ssBeatPtnIdx=(curPtnIdx+1)%pattern.length;
+      delay=Math.max(50,(target-musicSec)*1000);
+    } else if(analysis&&analysis.beats&&analysis.beats.length){
+      const musicSec=DarkroomAudio.getMusicTime();
+      const arr=analysis.beats;
+      let nextIdx;
+      let curPtnIdx=ptnIdx;
+      if(ssBeatIdx==null){
+        const minAheadSec=(dur*0.5)/1000;
+        let firstIdx=-1;
+        for(let i=0;i<arr.length;i++){if(arr[i]>musicSec+minAheadSec){firstIdx=i;break;}}
+        if(firstIdx<0){ssTimer=setTimeout(ssNext,delay);return;}
+        nextIdx=Math.ceil(firstIdx/pattern[0])*pattern[0];
+      } else {
+        nextIdx=ssBeatIdx+step;
+        // Catch-up: walk forward through the pattern until we land on a
+        // beat that's still in the future, so slides don't slip instantly.
+        while(nextIdx<arr.length&&arr[nextIdx]<=musicSec+0.1){
+          curPtnIdx=(curPtnIdx+1)%pattern.length;
+          nextIdx+=pattern[curPtnIdx];
+        }
+      }
+      const finalIdx=Math.min(arr.length-1,nextIdx);
+      const target=arr[finalIdx];
+      ssBeatIdx=finalIdx;
+      ssBeatPtnIdx=(curPtnIdx+1)%pattern.length;
+      delay=Math.max(50,(target-musicSec)*1000);
+    }
+  }
+  ssTimer=setTimeout(ssNext,delay);
+}
+
+function ssNext(){
+  cancelSlideCleanup();
+  // End-of-pass: fade out + close, only when fadeOutAtEnd is opted-in. Default
+  // is to loop (preserves existing public album behavior).
+  const s=(album&&album.slideshowSettings)||{};
+  if(s.fadeOutAtEnd===true && album && album.assets && ssSlidesShown>=album.assets.length){
+    fadeOutSlideshow();
+    return;
+  }
+  ssSlidesShown+=1;
+  showKBSlide((ssIndex+1)%album.assets.length,'forward');
+}
+function ssPrev(){
+  cancelSlideCleanup();
+  ssBeatIdx=null;ssBeatPtnIdx=null;
+  showKBSlide((ssIndex-1+album.assets.length)%album.assets.length,'backward');
+}
 function ssToggle(){
   ssPausedState=!ssPausedState;
   document.getElementById('ss-pause').textContent=ssPausedState?'▶':'❚❚';
   if(!ssPausedState){
-    if(!ssAudio)startMusic();
-    else ssAudio.play().catch(()=>{});
+    if(window.DarkroomAudio&&!DarkroomAudio.isMusicPlaying()) startMusic();
+    ssBeatIdx=null;ssBeatPtnIdx=null;  // resume re-anchors the beat grid
     showKBSlide(ssIndex);
-    scheduleNext();
   } else {
     clearTimeout(ssTimer);
-    if(ssAudio)ssAudio.pause();
+    if(window.DarkroomAudio) DarkroomAudio.pauseMusic({fadeMs:300});
   }
+}
+
+// Fade visuals to black + music together over 6s, then close. Only used when
+// settings.fadeOutAtEnd is opted-in.
+function fadeOutSlideshow(){
+  const FADE_MS=6000;
+  if(window.DarkroomAudio) DarkroomAudio.stopMusic({fadeMs:FADE_MS});
+  ['a','b'].forEach(s=>{
+    const el=document.getElementById('ss-slide-'+s);
+    if(!el) return;
+    el.style.transition=`opacity ${FADE_MS}ms ease-out`;
+    el.classList.remove('ss-visible');
+    el.style.opacity='0';
+  });
+  setTimeout(()=>ssClose(),FADE_MS+200);
 }
 function ssToggleDesc(){
   ssDescVisible=!ssDescVisible;
   const desc=document.getElementById('ss-description');
+  const title=document.getElementById('ss-photo-title');
   const btn=document.getElementById('ss-desc-btn');
+  // Toggle title + description together — the ✦ button hides all per-photo
+  // overlay text as a unit.
   if(desc)desc.style.opacity=ssDescVisible?'1':'0';
+  if(title)title.style.opacity=ssDescVisible?'1':'0';
   if(btn)btn.style.color=ssDescVisible?'var(--safe)':'';
 }
 function ssToggleMusic(){
   const btn=document.getElementById('ss-music-btn');
-  if(ssAudio){
-    if(ssAudio.paused){ssAudio.play();if(btn)btn.style.color='';}
-    else{ssAudio.pause();if(btn)btn.style.color='var(--text-dim)';}
+  if(!window.DarkroomAudio) return;
+  if(DarkroomAudio.isMusicPlaying()){
+    DarkroomAudio.pauseMusic({fadeMs:200});
+    if(btn)btn.style.color='var(--text-dim)';
+  } else {
+    const file=DarkroomAudio.getMusicFile()||album?.slideshowSettings?.musicFile;
+    if(!file) return;
+    DarkroomAudio.playMusic(file,{fadeMs:200,loop:true,volume:0.85});
+    if(btn)btn.style.color='';
   }
 }
 function ssClose(){
   clearTimeout(ssTimer);cancelSlideCleanup();resetZoom();
   document.getElementById('ss-overlay').classList.remove('active');
+  // Exit native fullscreen if we entered it. Android Chrome honors
+  // requestFullscreen on <div>, so openSlideshowPaused's play-button handler
+  // puts ss-overlay into native fullscreen on touch-primary devices. Without
+  // exitFullscreen here, the overlay remains document.fullscreenElement after
+  // ssClose removes the .active class — Android keeps that element as the
+  // input target and silently swallows taps on the gallery grid below. iOS
+  // WebKit rejects requestFullscreen on <div>, so fullscreenElement is always
+  // null there and this branch is a no-op.
+  if (document.fullscreenElement || document.webkitFullscreenElement) {
+    const exit = document.exitFullscreen || document.webkitExitFullscreen;
+    if (exit) { try { exit.call(document); } catch(e) {} }
+  }
   const card=document.getElementById('ss-title-card');
   if(card){card.style.opacity='0';card.style.display='none';}
+  // Wipe inline styles fadeOutSlideshow may have set; otherwise the next
+  // slideshow opens with opacity:0 still on both slots = black screen.
+  ['a','b'].forEach(s=>{
+    const el=document.getElementById('ss-slide-'+s);
+    if(!el) return;
+    el.style.transition='';
+    el.style.opacity='';
+  });
+  // Wipe overlay text + cancel in-flight fade timers so the next slideshow
+  // doesn't open with the last slide's title/description bleeding through.
+  const _dEl=document.getElementById('ss-description');
+  const _tEl=document.getElementById('ss-photo-title');
+  if(_tEl){
+    if(_tEl._slideTitleTimer){clearTimeout(_tEl._slideTitleTimer);_tEl._slideTitleTimer=null;}
+    if(_tEl._slideTitleFadeOutTimer){clearTimeout(_tEl._slideTitleFadeOutTimer);_tEl._slideTitleFadeOutTimer=null;}
+    _tEl.textContent='';
+    _tEl.style.opacity='';
+    _tEl.style.display='';
+    _tEl.style.transition='';
+  }
+  if(_dEl){
+    if(_dEl._slideDescTimer){clearTimeout(_dEl._slideDescTimer);_dEl._slideDescTimer=null;}
+    if(_dEl._slideDescFadeOutTimer){clearTimeout(_dEl._slideDescFadeOutTimer);_dEl._slideDescFadeOutTimer=null;}
+    _dEl.textContent='';
+    _dEl.style.opacity='';
+    _dEl.style.display='';
+    _dEl.style.transition='';
+  }
+  ssDescVisible=true;
   stopMusic();
+  // If the parent had expanded our iframe in-place, collapse it back.
+  if (_embedExpanded) {
+    collapseViaParent();
+    _embedExpanded = false;
+    document.getElementById('ss-fs-btn').textContent = '⤢';
+  }
+  // ?fs mode = slideshow-only escape from an embed. Closing the overlay would
+  // leave the user on a blank page, so route them back: window.close handles
+  // popup-opened tabs (window.open path), history.back returns to the article
+  // (window.top.location fallback path), and if neither works we drop to the
+  // standard album URL so they at least see the grid.
+  if (new URLSearchParams(location.search).has('fs')) {
+    const fallback = setTimeout(() => {
+      const u = new URL(window.location.href);
+      u.searchParams.delete('fs');
+      window.location.replace(u.toString());
+    }, 250);
+    window.addEventListener('pagehide', () => clearTimeout(fallback), { once: true });
+    try { window.close(); } catch(e) {}
+    try { history.back(); } catch(e) {}
+  }
 }
-function iosFallbackFullscreen(){
-  const dest = window.location.href.replace(/[?&]embed/g, '') + '?autoplay';
+// Ask the parent page to expand this iframe to viewport-fill. Works only when
+// the host has the darkroom helper script installed (postMessage listener).
+// Returns true if the parent acknowledged within 200ms. When this path wins,
+// the slideshow document never reloads — audio keeps playing seamlessly.
+function expandViaParent(){
+  return new Promise(resolve => {
+    if (window.parent === window) { resolve(false); return; }
+    let done = false;
+    const onMsg = e => {
+      if (e.data && e.data.type === 'darkroom-expanded' && !done) {
+        done = true;
+        window.removeEventListener('message', onMsg);
+        resolve(true);
+      }
+    };
+    window.addEventListener('message', onMsg);
+    try { window.parent.postMessage({ type: 'darkroom-expand', slug: slug }, '*'); } catch(e) {}
+    setTimeout(() => {
+      if (!done) { done = true; window.removeEventListener('message', onMsg); resolve(false); }
+    }, 200);
+  });
+}
+function collapseViaParent(){
+  if (window.parent === window) return;
+  try { window.parent.postMessage({ type: 'darkroom-collapse', slug: slug }, '*'); } catch(e) {}
+}
+// Escape an iframe embed to a new tab on the standalone URL with ?fs so the
+// slideshow runs full-bleed there. Falls back to navigating the top frame
+// if the browser blocks the popup. Closing the tab returns to the article.
+function escapeEmbedToStandalone(){
+  const u = new URL(window.location.href);
+  u.searchParams.delete('embed');
+  u.searchParams.set('fs', '1');
+  const w = window.open(u.toString(), '_blank', 'noopener');
+  if (!w) {
+    try { window.top.location.href = u.toString(); }
+    catch(e) { window.location.href = u.toString(); }
+  }
   ssClose();
-  window.location.href = dest; // navigate iframe → ?autoplay → escalates to top frame
 }
 function ssFullscreen(){
   const el = document.getElementById('ss-overlay');
@@ -277,15 +855,36 @@ function ssFullscreen(){
     return;
   }
 
+  // Already expanded via the parent helper — tap to collapse.
+  if (_embedExpanded) {
+    collapseViaParent();
+    _embedExpanded = false;
+    document.getElementById('ss-fs-btn').textContent = '⤢';
+    return;
+  }
+
+  // Embed fallback chain when real fullscreen rejects:
+  //   1. Ask the parent page to expand the iframe (music keeps playing)
+  //   2. Pop the standalone ?fs URL in a new tab (last resort, music restarts)
+  const onRealFsFail = async () => {
+    if (isEmbed) {
+      if (await expandViaParent()) {
+        _embedExpanded = true;
+        document.getElementById('ss-fs-btn').textContent = '⤡';
+        return;
+      }
+      escapeEmbedToStandalone();
+    } else {
+      ssClose();
+    }
+  };
+
   if (req) {
     req.call(el).then(() => {
       document.getElementById('ss-fs-btn').textContent = '⤡';
-    }).catch(() => {
-      // API exists but failed (e.g. cross-origin iframe without permission) — fall back to navigation
-      iosFallbackFullscreen();
-    });
+    }).catch(onRealFsFail);
   } else {
-    iosFallbackFullscreen();
+    onRealFsFail();
   }
 }
 ['fullscreenchange','webkitfullscreenchange'].forEach(ev => document.addEventListener(ev, () => {
@@ -379,11 +978,11 @@ document.addEventListener('touchend',e=>{
 const isEmbed = location.search.includes('embed');
 if (isEmbed) {
   document.querySelector('.header').style.display = 'none';
-  // Hide fullscreen button on touch-primary devices (phones/tablets) — not reliable in cross-origin iframes on iOS
-  if (window.matchMedia('(hover: none) and (pointer: coarse)').matches) {
-    const fsBtn = document.getElementById('ss-fs-btn');
-    if (fsBtn) fsBtn.style.display = 'none';
-  }
+  // (Previously hid the ⤢ button on touch-primary devices in embed mode.
+  // Restored 2026-05-12 — Android needs it for real fullscreen, and even
+  // on iOS the request does some useful work when it succeeds via the
+  // play-tap activation. iosFallbackFullscreen still handles the worst
+  // case by navigating to ?autoplay if the API outright rejects.)
 }
 // Wire all event listeners
 function wireAlbumListeners() {
@@ -568,10 +1167,12 @@ async function _albDetailRender(forIdx){
   const total = album.assets.length;
   // Reset stale UI immediately so the prior photo's data doesn't linger
   const img = document.getElementById('album-detail-image');
+  const titleEl = document.getElementById('album-detail-title');
   const descEl = document.getElementById('album-detail-desc');
   const tableEl = document.getElementById('album-exif-table');
   const counterEl = document.getElementById('album-detail-counter');
   if (img) img.src = '/api/public/original/' + id;
+  if (titleEl) titleEl.textContent = '';
   if (descEl) descEl.textContent = '';
   if (tableEl) tableEl.innerHTML = '';
   if (counterEl) counterEl.textContent = (forIdx + 1) + ' / ' + total;
@@ -592,7 +1193,17 @@ async function _albDetailRender(forIdx){
   ].filter(Boolean).join('  ·  ');
   const dateStr = _albFmtDate(m.takenAt);
   const timeStr = _albFmtTime(m.takenAt);
-  const camera = [m.make, m.model].filter(Boolean).join(' ').trim();
+  // Dedupe camera: many cameras' EXIF Model already starts with the Make
+  // (e.g. Make="OLYMPUS IMAGING CORP", Model="Olympus OM-2S Program"). If the
+  // first word matches, use Model alone; otherwise concatenate.
+  const camera = (() => {
+    if (!m.make && !m.model) return '';
+    if (!m.make) return m.model;
+    if (!m.model) return m.make;
+    const mkFirst = m.make.split(/\s+/)[0].toLowerCase();
+    const mdFirst = m.model.split(/\s+/)[0].toLowerCase();
+    return (mkFirst && mkFirst === mdFirst) ? m.model : `${m.make} ${m.model}`;
+  })().trim();
   const location = [m.city, m.state].filter(Boolean).join(', ');
   // Library-style EXIF rows: only render rows that have data.
   const row = (icon, label, value, sub) => `
@@ -606,6 +1217,7 @@ async function _albDetailRender(forIdx){
   if (camera) rows.push(row('📷', 'Camera', camera, exposure || ''));
   if (m.lens) rows.push(row('🔭', 'Lens', m.lens, ''));
   if (location) rows.push(row('📍', 'Location', location, m.country || ''));
+  if (titleEl) titleEl.textContent = m.title || '';
   if (descEl) descEl.textContent = m.description || '';
   if (tableEl) tableEl.innerHTML = rows.join('');
 }

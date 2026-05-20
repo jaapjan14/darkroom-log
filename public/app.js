@@ -938,24 +938,21 @@ async function renderRecentDetail(assetId, navGen) {
             <button class="btn btn-ghost btn-sm" data-action="openAddToAlbumModal" data-id="${assetId}">+ Album</button>
             ${state.viewingFromAlbum ? `<button class="btn btn-ghost btn-sm" data-action="removeFromAlbum" data-id="${assetId}">− Remove</button>` : ''}
             ${state.previousView === 'immich-album-view' && !state.viewingArchived && !state.viewingTrash ? `<button class="btn btn-ghost btn-sm" data-action="removeFromImmichAlbumDetail" data-id="${assetId}">− Remove</button>` : ''}
-            <button class="btn btn-ghost btn-sm" data-action="downloadRecent" data-id="${assetId}" data-filename="${meta.filename}">↓ DL</button>
-            <button class="btn btn-ghost btn-sm" data-action="copyEmbedUrl" data-id="${assetId}" title="Copy forum [img] BBCode (1024px)">⧉ Embed</button>
-          </div>
-          <div style="display:flex;gap:0.4rem">
             ${state.viewingTrash ? `
               <button class="btn btn-ghost btn-sm" data-action="restoreFromTrashDetail" data-id="${assetId}">Restore</button>
               <button class="btn btn-danger btn-sm" data-action="permanentDeleteDetail" data-id="${assetId}" data-filename="${meta.filename}">🗑 Delete Forever</button>
             ` : `
-              <span class="share-size-group" style="display:inline-flex;gap:0.25rem">
-                <button class="btn btn-ghost btn-sm" data-action="shareRecent" data-size="small" data-id="${assetId}" data-filename="${meta.filename}" data-desc="${(meta.description||'').replace(/'/g, '&apos;')}" title="Share small (300–500 KB)">↑ S</button>
-                <button class="btn btn-ghost btn-sm" data-action="shareRecent" data-size="medium" data-id="${assetId}" data-filename="${meta.filename}" data-desc="${(meta.description||'').replace(/'/g, '&apos;')}" title="Share medium (1.0–1.5 MB, SMS friendly)">↑ M</button>
-                <button class="btn btn-ghost btn-sm" data-action="shareRecent" data-size="large" data-id="${assetId}" data-filename="${meta.filename}" data-desc="${(meta.description||'').replace(/'/g, '&apos;')}" title="Share large (2.0–2.7 MB, Leica forum)">↑ L</button>
-                <button class="btn btn-ghost btn-sm" data-action="shareRecent" data-size="xlarge" data-id="${assetId}" data-filename="${meta.filename}" data-desc="${(meta.description||'').replace(/'/g, '&apos;')}" title="Share x-large (full Q100 original ~9.7 MB)">↑ XL</button>
-              </span>
               <button class="${meta.isArchived ? 'btn btn-ghost btn-sm' : 'btn btn-danger btn-sm'}" data-action="${meta.isArchived ? 'restoreFromDetail' : 'archiveFromDetail'}" data-id="${assetId}">${meta.isArchived ? 'Restore' : 'Archive'}</button>
               <button class="btn btn-danger btn-sm" data-action="deleteImmichAsset" data-id="${assetId}" data-filename="${meta.filename}">🗑</button>
             `}
           </div>
+          ${!state.viewingTrash ? `
+          <div style="display:flex;gap:0.4rem;align-items:center;flex-wrap:wrap">
+            <select id="share-size" class="btn btn-ghost btn-sm" title="Share size — S=300-500KB · M=1-1.5MB SMS · L=2-2.7MB Leica · XL=full original ~9.7MB"><option value="small">S</option><option value="medium" selected>M</option><option value="large">L</option><option value="xlarge">XL</option></select>
+            <button class="btn btn-ghost btn-sm" data-action="shareSelected" data-id="${assetId}" data-filename="${meta.filename}" data-desc="${(meta.description||'').replace(/'/g, '&apos;')}" title="Share at selected size">↑ Share</button>
+            <select id="embed-size" class="btn btn-ghost btn-sm" title="Embed width (px)"><option value="1024">1024</option><option value="1200">1200</option><option value="1280">1280</option><option value="1400" selected>1400</option><option value="1600">1600</option><option value="2048">2048</option><option value="2400">2400</option></select>
+            <button class="btn btn-ghost btn-sm" data-action="copyEmbedUrl" data-id="${assetId}" title="Copy forum [img] BBCode at selected width">⧉ Embed</button>
+          </div>` : ''}
         </div>
         <div class="detail-meta">
           ${meta.title ? `<div class="detail-title" style="margin-bottom:0.5rem;font-weight:600;color:var(--text);font-size:18px;line-height:1.3">${meta.title}</div>` : ''}
@@ -1217,17 +1214,10 @@ async function deleteImmichAsset(assetId, filename) {
   }
 }
 
-async function downloadRecent(assetId, filename) {
-  const fname = filename || assetId + '.jpg';
-  const r = await fetch('/api/immich/original/' + assetId);
-  const blob = await r.blob();
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = fname;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(a.href);
+function shareSelected(assetId, filename, description) {
+  const sel = document.getElementById('share-size');
+  const size = sel ? sel.value : 'medium';
+  return shareRecent(assetId, filename, description, size);
 }
 
 function enablePinchZoom() {
@@ -2012,7 +2002,9 @@ function copyShareLink(url) {
 }
 
 function copyEmbedUrl(assetId) {
-  const url = `${location.origin}/embed/${assetId}-1024.jpg`;
+  const sel = document.getElementById('embed-size');
+  const width = sel ? sel.value : 1400;
+  const url = `${location.origin}/embed/${assetId}-${width}.jpg`;
   navigator.clipboard.writeText(url).then(() => {
     alert('Embed URL copied:\n' + url);
   }).catch(() => {
@@ -4449,7 +4441,7 @@ document.addEventListener('click', (e) => {
     case 'removeFromImmichAlbumDetail': removeFromImmichAlbum(id); break;
     case 'archiveFromDetail': archiveImmichAssets(id); break;
     case 'restoreFromDetail': restoreImmichAssets(id); break;
-case 'downloadRecent': downloadRecent(id, el.dataset.filename); break;
+case 'shareSelected': shareSelected(id, el.dataset.filename, el.dataset.desc); break;
     case 'copyEmbedUrl': copyEmbedUrl(id); break;
     case 'deleteImmichAsset': deleteImmichAsset(id, el.dataset.filename); break;
     case 'shareRecent': shareRecent(id, el.dataset.filename, el.dataset.desc, el.dataset.size); break;

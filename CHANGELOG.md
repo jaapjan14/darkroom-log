@@ -1,5 +1,159 @@
 # Changelog
 
+## v1.5.54 (2026-05-19)
+
+### Embed slideshow stuck on slide 1 — fixed re-entry on startSlideshow
+- **Bug**: Slideshow embedded via `<DarkroomBanner>` on lakatua.me sat on the first photo forever despite the music playing and beats detecting normally. Standalone `/album/<slug>` URL was unaffected.
+- **Root cause**: The embed-hero play button had **four stacked click triggers**:
+  1. `embed-hero` click via `w()` helper (album.js:980)
+  2. `.embed-hero-overlay` click (album.js:984)
+  3. `embed-hero` click via direct addEventListener (album.js:989)
+  4. Document-level data-action delegator catching `data-action="startSlideshow"` (album.js:1009)
+
+  A single tap fired all four `startSlideshow()` calls. Each one re-ran `openSlideshow(0)` → re-called `scheduleNext` with a non-null `ssBeatIdx` from the previous call, stepping it forward by 16 beats every time. The last call (4×) scheduled slide 2 for ~31 seconds out instead of the intended ~7.2 sec (16 beats at 132.8 BPM). Each subsequent slide compounded similarly — slideshow appeared frozen.
+- **Fix**: One-line re-entry guard at the top of `startSlideshow()`:
+  ```js
+  if(document.getElementById('ss-overlay').classList.contains('active')) return;
+  ```
+  `openSlideshow` adds `.active` to `#ss-overlay` synchronously on its first line, so duplicate calls #2/#3/#4 see it's already active and bail. Standalone path unaffected — that flow uses `openSlideshowPaused`'s dynamically-created title-card play button which has only one handler.
+- **How it was found**: Reproduced headlessly via Playwright on this Mac; needed DNS override (`--host-resolver-rules=MAP darkroom.jjlnas.com <CF-edge-IP>`) to bypass Chromium's Private Network Access block, since this Mac's local DNS resolves darkroom.jjlnas.com to the LAN IP. Added `console.log` instrumentation to `scheduleNext`, observed 4 rapid calls with `ssBeatIdx` stepping 32 → 48 → 64 → 80, traced back to handler duplication.
+- Verified fix: counter advances 1 → 2 → 3 → 4 at ~7-9 sec intervals as expected.
+- Cache-bust album.js v=52 → v=53.
+
+## v1.5.53 (2026-05-19)
+
+### Android gallery taps fixed after slideshow close
+- **Bug**: On Android Chrome (and any Blink-based mobile browser), closing the slideshow returned the user to a visually-correct gallery grid that silently refused to respond to thumbnail taps. iOS was unaffected.
+- **Root cause**: `openSlideshowPaused`'s play-button handler calls `ss-overlay.requestFullscreen()` on touch-primary devices (album.js:160–166). Android Chrome honors that on `<div>` elements; iOS WebKit rejects it (only `<video>` can go fullscreen on iOS). On Android, `ss-overlay` becomes `document.fullscreenElement`. When `ssClose()` removed the `.active` class, CSS hid the overlay via `display:none` — but Android kept the element as the fullscreen-priority input target, swallowing all gallery taps below.
+- **Fix**: `ssClose()` now calls `document.exitFullscreen()` (or the webkit-prefixed variant) when a fullscreen element exists. One block, gated so iOS is a no-op (fullscreenElement is never set there).
+- Cache-bust album.js v=50 → v=51.
+
+### How to verify
+- Open any public album on Android: `https://darkroom.jjlnas.com/album/<slug>`
+- Tap ▶ to start slideshow → enters Android fullscreen
+- Tap ✕ to close → URL bar reappears (sign that fullscreen exited)
+- Tap any thumbnail in the grid → detail view opens normally
+
+## v1.5.52 (2026-05-19)
+
+### Detail toolbar collapsed from 3 rows to 2
+- **Share buttons consolidated**: the `↑ S / ↑ M / ↑ L / ↑ XL` four-button row collapsed into a single `<select>` size picker + one `↑ Share` button. Default is M (1–1.5MB SMS-friendly). Tooltip on the picker preserves the original per-size hints (S/M/L file ranges, XL = original).
+- **`↓ DL` button absorbed into XL**: `downloadRecent()` deleted. On desktop, XL share has always taken the same `/api/immich/original` → `<a download>` path that DL used — they were the same action. On mobile, XL routes through `navigator.share` as before. Net: one fewer button, identical behavior on desktop, share-sheet path on mobile.
+- **Archive + Trash promoted to row 1**: now sit next to + Album / − Remove / nav arrows, leaving row 2 for export controls only (share picker + share button + embed picker + embed button).
+- **Trash mode still has just Restore + Delete Forever** (no export row).
+- Cache-bust app.js v=240 → v=241.
+
+### Why
+The embed picker added in v1.5.51 made the existing top row wrap unexpectedly on the narrow detail panel viewport. Rather than chase that one wrap, restructured the whole detail toolbar so all export actions share a row, all state actions share another, and total height drops from three wrapping rows to two clean rows.
+
+## v1.5.51 (2026-05-19)
+
+### Embed size picker + max-USM tier for low-res renders
+- **UI**: replaced the single ⧉ Embed button with an inline `<select>` size picker (1024 / 1200 / 1280 / 1400 / 1600 / 2048 / 2400) + copy button. Defaults to 1400, no localStorage — always resets per session.
+- **Server**: split sharpening into three tiers instead of two.
+  - `width ≤ 1200` → max USM `sigma=0.9, m1=0, m2=3` (closest LR analog: Sharpen for Screen Standard). Rescues 1024 & 1200 which were soft after the prior Flickr-mild pass at 5.7–6.6× downscales.
+  - `1200 < width ≤ 1280` → unchanged Flickr-mild USM `sigma=0.5, m1=0, m2=2`.
+  - `width > 1280` → no USM (unchanged).
+- **Picked sigma=0.9 over 1.0** after side-by-side on an a49a191a Leica M7 frame: 1.0 nudged into "processed" territory on hard edges; 0.9 holds.
+- Existing 1024 URLs in forum posts re-render with the new max-USM recipe. No URL changes; only the image bytes differ.
+- Compression unchanged across all sizes: q95 / mozjpeg / 4:4:4 / sRGB ICC.
+- Cache-bust app.js v=239 → v=240.
+
+## v1.5.50 (2026-05-19)
+
+### Embed default width 1600 → 1400
+Dropped the default copy-embed URL one tier to give Fred Miranda posts a
+slightly smaller intrinsic render (FM does not CSS-cap, so source size ==
+display size). Proxy still supports any width via filename suffix or ?w=.
+
+## v1.5.49 (2026-05-19)
+
+### Forum embed quality overhaul — natural sharpness via larger output size
+Final pipeline for `/embed/<assetId>-<size>.jpg`:
+- **Source**: pulls Immich `/assets/{id}/original` (not the preview thumbnail
+  it was using before — the old path double-resampled an already-lossy
+  ~1440px JPEG down to 1024 and visibly softened the result)
+- **Resize**: single lanczos3 downscale to the requested width
+- **Size-conditional output sharpening**:
+  - `width ≤ 1280` (1024 and below): subtle Flickr-style USM applied —
+    `sharpen({ sigma: 0.5, m1: 0, m2: 2 })`. m1=0 means flat areas (skies,
+    out-of-focus foliage) are not sharpened at all, so no grain crunch.
+    This is the same recipe Flickr uses on its `_b` 1024 size: visible
+    edge improvement, no halos. At ratios ≥5× the resize takes out enough
+    detail that a light USM pass is the right call.
+  - `width > 1280` (1600 default, 2048): no USM. The downscale ratio
+    drops below 4.3×; lanczos3 produces clean edges naturally. Any USM
+    pass past this point reads as "processed" rather than sharp.
+- **Encoding**: JPEG quality 95 + mozjpeg + `chromaSubsampling: '4:4:4'`
+  (no chroma blur on color edges). sRGB ICC profile preserved via
+  `withMetadata({ icc: 'srgb' })`.
+- **Default size bumped 1024 → 1600.** When the URL has no width suffix
+  (`<id>.jpg`), the response is 1600px wide. Explicit suffixes still work
+  (`<id>-1024.jpg`, `<id>-2048.jpg`, etc., capped at 2400). Math context:
+  Flickr's old `_b` 1024 came from a 2048px LR export (2× downscale, almost
+  no detail loss). Our pipeline pulls full 6800px originals, so 1024 means a
+  6.7× downscale that no amount of post-processing can fully recover; 1600
+  brings the ratio down to ~4.3× and looks naturally crisp.
+
+**Recommendation**: use `<id>.jpg` or `<id>-1600.jpg` for new forum posts.
+Existing `<id>-1024.jpg` embeds still work and look better than before
+(real original source + 4:4:4 + ICC + q95), just not as crisp as 1600.
+
+Client-side: the **Copy Embed URL** action in the Darkroom Log lightbox now
+generates `<id>-1600.jpg` URLs (was `<id>-1024.jpg`). Anyone copying a fresh
+embed link from the app gets the better default automatically. `app.js`
+bumped to `?v=238`, SW shell cache bumped to `darkroom-v110`.
+
+Cache: existing Cache-Control unchanged (24h fresh + 7d stale-while-revalidate).
+URLs unchanged. Forum posts upgrade automatically as edge caches expire;
+CF cache purge accelerates that to instant.
+
+File sizes at q95: 1024 ~315KB, 1600 ~670KB, 2048 ~1MB. All cached at the
+CDN after first hit per asset.
+
+Files: `server.js` (`/embed/:filename` handler).
+
+---
+
+## v1.5.48 (2026-05-19)
+
+### Title sync from LR plugin — closes the metadata-only-PATCH title gap
+- New endpoint `POST /api/lr-title` accepts `{ assetId, title }` from the
+  lr-immich Lightroom plugin during its metadata-only PATCH path. Auth is the
+  caller's Immich API key (read from `x-api-key`), validated by forwarding to
+  Immich's `/users/me` and cached in-process for 5 minutes so a publish batch
+  of N photos only pays one round-trip.
+- Title index entries now carry a `source` field (`'lr'` or `'scan'`). LR
+  pushes are authoritative: the 6-hour background JPEG-byte scanner skips
+  entries with `source: 'lr'` so it can't clobber a title that was synced via
+  the API. New scan entries are tagged `'scan'`.
+- Motivation: lr-immich v0.5.0+'s metadata-only PATCH path (caption/GPS/date)
+  doesn't touch JPEG bytes. Immich's asset model has no native `title` field,
+  so LR title-only edits previously had no way to land in Darkroom without
+  forcing a full JPEG re-render. Now they ride along on the same fast PATCH
+  publish — title shows up within ~1s, no re-render.
+- Existing photos that already have title baked into JPEG IPTC bytes are
+  untouched: scanner still reads them, fallback works for non-LR uploads.
+- Files: `server.js` (+45 lines: validation helper, backfill guard, new
+  endpoint). No client-facing JS, no SW bump needed. Restart container.
+
+### Title sync — lightbox detail endpoint patched
+- Follow-up: the single-photo endpoint `GET /api/immich/photo/:id` (which
+  powers the lightbox / photo detail view) was bypassing `_titleIndex`
+  entirely — it called `fetchAssetTitle()` directly, which re-reads JPEG
+  bytes via a Range request to Immich. So a title pushed via
+  `POST /api/lr-title` would land in titles.json (and show in search
+  results), but the lightbox view kept reading JPEG bytes and showed
+  nothing.
+- Fix: lightbox endpoint now checks `_titleIndex` first. If an entry
+  exists with `source: 'lr'` it's used directly (authoritative). Otherwise
+  falls back to the JPEG-byte scan (preserves existing behavior for
+  non-LR uploads and older photos that never got pushed).
+- Files: `server.js` (~5 lines in the `/api/immich/photo/:id` handler).
+  Restart container.
+
+---
+
 ## v1.5.47 (2026-05-17)
 
 ### Library — Full Sweep upload button regenerated (face-recognition refresh wired in)
