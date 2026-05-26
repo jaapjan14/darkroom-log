@@ -9,6 +9,43 @@ let ssBeatIdx=null,ssBeatPtnIdx=null,ssSlidesShown=0;
 let ssZoom={scale:1,tx:0,ty:0}; // pinch-zoom inside the slideshow overlay
 let _embedExpanded=false; // true when the parent page has expanded our iframe in-place via postMessage
 
+// Adaptive image sizing for the slideshow body. Slideshow uses
+// /api/public/display/:id?w=<ssDisplayWidth>, which server.js downscales via
+// sharp. Originals (full 6800+px) are reserved for lightbox/zoom and the
+// /api/public/original/:id route. Width picked at startup from the Network
+// Information API where available; then narrowed by measuring actual load
+// times on the first few slides (works on all browsers including iOS Safari,
+// which doesn't expose navigator.connection).
+let ssDisplayWidth=1920;
+let ssSlowLoadCount=0;
+function _pickInitialDisplayWidth(){
+  try{
+    const c=navigator.connection;
+    if(!c)return 1920;
+    if(c.saveData)return 960;
+    const et=c.effectiveType||'';
+    if(et==='slow-2g'||et==='2g')return 960;
+    if(et==='3g')return 1280;
+    if(typeof c.downlink==='number'&&c.downlink<1.5)return 1280;
+    return 1920;
+  }catch(e){return 1920;}
+}
+function _measureAndAdapt(ms){
+  // Slow load = downgrade after two consecutive slow slides. Fast load = decay
+  // the counter so a brief stall doesn't permanently lock us at low res.
+  if(ms>3500){
+    ssSlowLoadCount++;
+    if(ssSlowLoadCount>=2&&ssDisplayWidth>960){
+      const prev=ssDisplayWidth;
+      ssDisplayWidth=(ssDisplayWidth>=1920)?1280:960;
+      ssSlowLoadCount=0;
+      console.log('[ss] adaptive downgrade '+prev+' → '+ssDisplayWidth+' (last load '+Math.round(ms)+'ms)');
+    }
+  }else if(ms<800){
+    ssSlowLoadCount=Math.max(0,ssSlowLoadCount-1);
+  }
+}
+
 function isZoomed(){return ssZoom.scale>1.001;}
 function applyZoomTransform(){
   const img=document.getElementById('ss-img-'+ssActiveSlot);
@@ -42,6 +79,7 @@ const KB=[
 const KB_NONE=[{s:'scale(1) translate(0,0)',e:'scale(1) translate(0,0)'}];
 
 async function init(){
+  ssDisplayWidth=_pickInitialDisplayWidth();
   const r=await fetch('/api/public/album/'+slug);
   if(!r.ok){document.getElementById('photo-grid').innerHTML='<div class="loading" style="grid-column:1/-1">Album not found.</div>';return;}
   album=await r.json();
@@ -110,7 +148,7 @@ async function init(){
 function renderGrid(){
   const g=document.getElementById('photo-grid');
   if(!album.assets.length){g.innerHTML='<div class="loading" style="grid-column:1/-1">No photos.</div>';return;}
-  g.innerHTML=album.assets.map((id,i)=>`<div class="photo-item" data-action="openPhoto" data-idx="${i}"><img src="/api/public/thumb/${id}" loading="lazy"></div>`).join('');
+  g.innerHTML=album.assets.map((id,i)=>`<div class="photo-item" data-action="openPhoto" data-idx="${i}"><img src="/api/public/thumb/${id}?size=thumbnail" loading="lazy" decoding="async" width="300" height="300"></div>`).join('');
 }
 
 async function openSlideshow(idx){
@@ -300,13 +338,60 @@ function prepareSlot(ns, idx){
   const img=document.getElementById('ss-img-'+ns);
   const bg=document.getElementById('ss-bg-'+ns);
   bg.style.backgroundImage=`url('/api/public/thumb/${id}')`;
-  if(!img.src.endsWith('/api/public/original/'+id)){
-    img.src='/api/public/original/'+id;
+  // Slideshow body uses the display variant (server-resized via sharp). Width
+  // is adaptive (ssDisplayWidth). Track per-asset so a width change mid-album
+  // doesn't re-trigger an in-flight load for the same id.
+  if(img.dataset.loadedId!==id){
+    img.dataset.loadedId=id;
+    img._loadStart=performance.now();
+    // One-shot performance listener (separate from preset show() onload/onerror
+    // handlers so we don't fight over the handler property).
+    const onMeasure=()=>{
+      img.removeEventListener('load',onMeasure);
+      if(img._loadStart){
+        _measureAndAdapt(performance.now()-img._loadStart);
+        img._loadStart=null;
+      }
+    };
+    img.addEventListener('load',onMeasure);
+    // Filename form (not ?w=) so Cloudflare edge-caches by extension.
+    img.src=`/api/public/display/${id}-${ssDisplayWidth}.jpg`;
   }
   if(!assetMeta[id]){
     fetch('/api/public/photo/'+id).then(r=>r.json()).then(m=>{assetMeta[id]=m;}).catch(()=>{});
   }
   return img;
+}
+
+// Hidden image preload for look-ahead slides (N+2, N+3). Browser HTTP cache
+// keeps the result so the real prepareSlot() call doesn't re-fetch. Tolerates
+// errors silently — this is opportunistic only.
+function _preloadAhead(idx){
+  if(!album||!album.assets||!album.assets.length)return;
+  for(const off of [2,3]){
+    const k=(idx+off)%album.assets.length;
+    const id=album.assets[k];
+    if(!id)continue;
+    const pre=new Image();
+    pre.src=`/api/public/display/${id}-${ssDisplayWidth}.jpg`;
+  }
+}
+
+// Attach load/error handlers for a slide image with a graceful fallback chain.
+// Replaces the old `img.onerror=show` pattern that transitioned to a broken
+// <img> on network failure (cause of the "black slide" reports on poor wifi).
+// On load failure: swap to the thumbnail proxy URL (smaller, more likely to
+// succeed). If the thumb also fails, show() anyway — the slot's background-
+// image is the last-resort thumb fallback already painted by prepareSlot.
+function _attachSlideImgHandlers(img, id, show){
+  if(img.complete && img.naturalWidth>0){ show(); return; }
+  let fellBack=false;
+  img.onload=show;
+  img.onerror=()=>{
+    if(fellBack){ show(); return; }
+    fellBack=true;
+    img.src='/api/public/thumb/'+id;
+  };
 }
 
 // Returns the CURRENT slide's hold duration, including the actual
@@ -486,10 +571,11 @@ function showKBSlide(idx, direction){
       ssActiveSlot=ns;
       ssCleanupTimers=ssCleanupTimers.filter(t=>t!==t1&&t!==t2);
       prepareSlot(ns==='a'?'b':'a', (idx+1)%album.assets.length);
+      _preloadAhead(idx);
     },crossfadeMs*2+500);
     ssCleanupTimers.push(t1,t2);
   };
-  if(img.complete && img.naturalWidth>0)show();else{img.onload=show;img.onerror=show;}
+  _attachSlideImgHandlers(img, id, show);
 }
 
 // QUICK preset (slide-horizontal, no Ken Burns). Fully isolated from
@@ -529,10 +615,11 @@ function showSlideSlide(idx, direction){
       ssActiveSlot=ns;
       ssCleanupTimers=ssCleanupTimers.filter(t=>t!==t2);
       prepareSlot(ns==='a'?'b':'a', (idx+1)%album.assets.length);
+      _preloadAhead(idx);
     }, 1900);
     ssCleanupTimers.push(t2);
   };
-  if(img.complete && img.naturalWidth>0)show();else{img.onload=show;img.onerror=show;}
+  _attachSlideImgHandlers(img, id, show);
 }
 
 // BEAT FADE preset — same beat-aligned scheduler as Beat preset, but no Ken
@@ -564,14 +651,20 @@ function showSlideBeatFade(idx){
       cur.classList.remove('ss-visible');
     }));
     if(!ssPausedState) scheduleNext();
+    // Cleanup timer bumped from 500 → 1500ms so it runs after the fade
+    // (now 1400ms via .ss-fade-quick) fully completes.
     const t1=setTimeout(()=>{
       cur.style.zIndex=1;
       ssActiveSlot=ns;
       ssCleanupTimers=ssCleanupTimers.filter(t=>t!==t1);
-    },500);
+      // BeatFade was missing the N+1 preload that Classic/Quick already do.
+      // Adding it here puts BeatFade on parity for poor-network loading.
+      prepareSlot(ns==='a'?'b':'a', (idx+1)%album.assets.length);
+      _preloadAhead(idx);
+    },1500);
     ssCleanupTimers.push(t1);
   };
-  if(img.complete && img.naturalWidth>0)show();else{img.onload=show;img.onerror=show;}
+  _attachSlideImgHandlers(img, id, show);
 }
 
 // Slide hold duration. With per-photo title enabled, use 12s (gives
@@ -1045,6 +1138,17 @@ document.addEventListener('click', (e) => {
 //      a clean view of the image. Closing returns to the detail view underneath.
 // Slideshow path (cross-fade Ken Burns ▶ button) is independent and unchanged.
 let albFs = { idx: 0 };
+// Shared nav throttle — drop a 2nd prev/next within 350ms so a ghost-click,
+// finger jitter, or arrow-key auto-repeat advances exactly one photo (mirrors
+// the library's navigateRecent guard). Detail and fullscreen never navigate at
+// the same time, so one timestamp covers both.
+let _albNavLastAt = 0;
+function _albNavThrottled(){
+  const now = Date.now();
+  if (now - _albNavLastAt < 350) return true;
+  _albNavLastAt = now;
+  return false;
+}
 // Bounce-guard + deferred-click timer for the album fullscreen viewer.
 //   _albFsJustOpenedAt: stamped when albumFsOpen activates the overlay; the
 //     overlay click handler ignores clicks within ALB_FS_GUARD_MS of it (those
@@ -1067,21 +1171,50 @@ function _albFsResetZoom(){ if (_albFsZoomer) _albFsZoomer.reset(); }
 // initial-decode bitmap at layout size and zoomed views look soft no matter
 // how high-res the source. Setting src twice (preview, then original) forces
 // Safari to re-decode at the natural resolution.
+// Coarse-pointer / small-screen / mobile-UA → treat as mobile.
+function _albIsMobile(){
+  if (/iPad|iPhone|iPod|Android/i.test(navigator.userAgent)) return true;
+  if (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) return true;
+  if (window.innerWidth < 900) return true;
+  return false;
+}
 function _albFsLoadProgressive(id){
   const img = document.getElementById('album-fs-img');
   if (!img) return;
-  const previewUrl = '/api/public/thumb/' + id;     // ~1440px, fast-decoding JPEG
-  const originalUrl = '/api/public/original/' + id; // full-res
-  img.src = previewUrl;
-  const preloader = new Image();
-  const swap = () => {
-    if (img && document.getElementById('album-fs-overlay')?.classList.contains('active')) {
-      img.src = originalUrl;
-    }
+  const originalUrl = '/api/public/original/' + id; // full-res for zoom
+  // Only swap if this id is still the one on screen — a slow load mustn't
+  // clobber the image after the user has navigated on.
+  const current = () => !!album && album.assets[albFs.idx] === id &&
+    document.getElementById('album-fs-overlay')?.classList.contains('active');
+  const loadOriginal = () => {
+    const orig = new Image();
+    const swap = () => { if (current() && img) img.src = originalUrl; };
+    orig.onload = swap; orig.onerror = swap;
+    orig.src = originalUrl;
   };
-  preloader.onload = swap;
-  preloader.onerror = swap;
-  preloader.src = originalUrl;
+  if (_albIsMobile()) {
+    // Mobile/cellular: lead with the adaptive display variant. It's light
+    // (~200-300 KB) AND ≥ the device width, so it paints full-screen fast for
+    // quick nav feedback without the small-then-grow "jump" a tiny thumbnail
+    // caused. Preload neighbors so the next tap is instant.
+    img.src = `/api/public/display/${id}-${ssDisplayWidth}.jpg`;
+    _albFsPreloadNeighbors();
+  } else {
+    // Desktop: fast connection — plain ~1440px preview then original (the
+    // display variant can be narrower than a big monitor → visible grow).
+    img.src = '/api/public/thumb/' + id;
+  }
+  loadOriginal();
+}
+// Mobile only: prefetch the adjacent photos' display variants so the
+// first-paint stage is already cached on the next prev/next tap.
+function _albFsPreloadNeighbors(){
+  if (!album || !album.assets || !album.assets.length) return;
+  const n = album.assets.length;
+  [1, -1].forEach(d => {
+    const pre = new Image();
+    pre.src = `/api/public/display/${album.assets[(albFs.idx + d + n) % n]}-${ssDisplayWidth}.jpg`;
+  });
 }
 function _albFsAttachZoomer(){
   if (_albFsZoomer || typeof window.makeZoomer !== 'function') return;
@@ -1116,6 +1249,7 @@ function albumFsClose(){
 }
 function albumFsNavigate(dir){
   if (!album || !album.assets || !album.assets.length) return;
+  if (_albNavThrottled()) return;
   // Reset zoom before src swap so the new image starts centered at 1×. The
   // zoomer survives navigate (same <img> element) — cheaper than destroy +
   // reattach on every prev/next.
@@ -1159,6 +1293,7 @@ function albumDetailClose(){
 }
 function albumDetailNavigate(dir){
   if (!album || !album.assets || !album.assets.length) return;
+  if (_albNavThrottled()) return;
   albFs.idx = (albFs.idx + dir + album.assets.length) % album.assets.length;
   _albDetailRender(albFs.idx);
 }
@@ -1171,7 +1306,16 @@ async function _albDetailRender(forIdx){
   const descEl = document.getElementById('album-detail-desc');
   const tableEl = document.getElementById('album-exif-table');
   const counterEl = document.getElementById('album-detail-counter');
-  if (img) img.src = '/api/public/original/' + id;
+  // Detail view uses the lightweight display variant (sharp-resized, same path
+  // the slideshow uses) so nav repaints fast on cellular. Tapping the image
+  // opens true fullscreen, which still loads the full original progressively.
+  // Fall back to the original if the display variant errors. (onerror set as a
+  // JS property — CSP blocks inline HTML handlers, not property assigns — and
+  // overwriting it each nav avoids listener buildup.)
+  if (img) {
+    img.onerror = () => { img.onerror = null; img.src = '/api/public/original/' + id; };
+    img.src = `/api/public/display/${id}-${ssDisplayWidth}.jpg`;
+  }
   if (titleEl) titleEl.textContent = '';
   if (descEl) descEl.textContent = '';
   if (tableEl) tableEl.innerHTML = '';

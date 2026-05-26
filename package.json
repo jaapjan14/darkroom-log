@@ -1,6 +1,6 @@
 {
   "name": "darkroom-log",
-  "version": "1.5.43",
+  "version": "1.5.44",
   "description": "Darkroom print log with Immich integration",
   "main": "server.js",
   "scripts": {
@@ -8,9 +8,12 @@
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
+    "exifr": "^7.1.3",
     "express": "^4.18.2",
     "express-session": "^1.17.3",
     "multer": "^2.1.1",
+    "mpg123-decoder": "^1.0.3",
+    "music-tempo": "^1.0.3",
     "node-fetch": "^2.7.0",
     "sharp": "^0.33.5"
   }

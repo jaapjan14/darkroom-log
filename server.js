@@ -1274,7 +1274,12 @@ app.get('/api/public/album/:slug', (req, res) => {
 // PUBLIC thumbnail proxy (no auth) - needed for public album view
 app.get('/api/public/thumb/:id', async (req, res) => {
   try {
-    const r = await fetch(`${IMMICH_URL}/assets/${req.params.id}/thumbnail?size=preview`, {
+    // Grid cells request ?size=thumbnail (small WebP, ~10-40 KB) so the shared
+    // album view doesn't pull ~600 KB previews per cell on cellular. Default
+    // stays preview — the slideshow bg, lightbox preview stage and embed-hero
+    // all rely on the larger ~1440px image.
+    const size = req.query.size === 'thumbnail' ? 'thumbnail' : 'preview';
+    const r = await fetch(`${IMMICH_URL}/assets/${req.params.id}/thumbnail?size=${size}`, {
       headers: { 'x-api-key': IMMICH_KEY }
     });
     res.set('Content-Type', r.headers.get('content-type') || 'image/jpeg');
@@ -1354,6 +1359,51 @@ app.get('/api/public/original/:id', async (req, res) => {
     res.set('Content-Type', r.headers.get('content-type') || 'image/jpeg');
     r.body.pipe(res);
   } catch(e) { res.status(500).end(); }
+});
+
+// PUBLIC display-sized variant (no auth) — for slideshow body. Pulls the
+// Immich original and downscales via sharp. Default 1920px; width can be
+// encoded in the filename as <uuid>-<width>.jpg (preferred — keeps the URL
+// extension `.jpg` so Cloudflare edge-caches it) or as ?w= query (fallback).
+// Slideshow JS adapts width to network conditions, so good wifi → 1920
+// (~600KB), poor wifi → 1280 or 960 (~150-300KB). Originals stay on
+// /api/public/original/:id for the lightbox + zoom view where pixel-peeping
+// matters.
+//
+// Cache-key matters here: Cloudflare's default cacheable-asset rules key off
+// file extension. A path like /api/public/display/<uuid>-1920.jpg gets a CF
+// edge HIT after the first viewer warms it; /api/public/display/<uuid>?w=
+// would bypass CF cache and re-run sharp on every request.
+//
+// Quality/chroma tuned slightly looser than /embed (q88, 4:2:0) since slide
+// duration is too short for pixel-peeping and bytes-on-wire is the constraint.
+app.get('/api/public/display/:filename', async (req, res) => {
+  const m = req.params.filename.match(/^([0-9a-f-]{32,36})(?:-(\d{3,4}))?\.jpe?g$/i);
+  if (!m) return res.status(400).send('bad filename');
+  const id = m[1];
+  let width = parseInt(m[2] || req.query.w, 10);
+  if (!Number.isFinite(width) || width < 480 || width > 2400) width = 1920;
+  try {
+    const r = await fetch(`${IMMICH_URL}/assets/${id}/original`, {
+      headers: { 'x-api-key': IMMICH_KEY }
+    });
+    if (!r.ok) return res.status(r.status).end();
+    const buf = Buffer.from(await r.arrayBuffer());
+    let pipeline = sharp(buf, { failOn: 'none' })
+      .resize({ width, withoutEnlargement: true, kernel: 'lanczos3' });
+    if (width <= 1200) {
+      pipeline = pipeline.sharpen({ sigma: 0.8, m1: 0, m2: 3 });
+    } else if (width <= 1600) {
+      pipeline = pipeline.sharpen({ sigma: 0.5, m1: 0, m2: 2 });
+    }
+    const out = await pipeline
+      .withMetadata({ icc: 'srgb' })
+      .jpeg({ quality: 88, mozjpeg: true, chromaSubsampling: '4:2:0' })
+      .toBuffer();
+    res.set('Content-Type', 'image/jpeg');
+    res.set('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
+    res.end(out);
+  } catch(e) { res.status(502).end(); }
 });
 
 // PUBLIC photo metadata (no auth) - for public album description display

@@ -1,5 +1,81 @@
 # Changelog
 
+## v1.5.60 (2026-05-26)
+
+### Fullscreen instant-feedback now mobile-only + no "size jump"
+- **Issue with v1.5.59**: The tiny thumbnail (`?size=thumbnail`, ~250px) used as the instant first-paint stage rendered at its *small intrinsic size* — the fullscreen `<img>` is `max-width/height:100%` (sized to the image so `zoom.js` clamping works), so the photo appeared **small-centered then grew to full** on each nav ("jumps back then forward"). Couldn't fix with `width:100%` because `zoom.js` reads `img.clientWidth` as the rendered image size.
+- **Fix**: First-paint stage is now the **adaptive display variant** (`/api/public/display/<id>-<ssDisplayWidth>.jpg` / `_dispUrl`) instead of the tiny thumbnail. It's light (~200–300 KB) *and* ≥ the device width, so on a phone it paints **full-screen** immediately — fast feedback, no shrink-then-grow. Then the full original streams in for zoom.
+- **Mobile-only** (`_isMobileUA()` / new `_albIsMobile()`): desktop reverts to plain ~1440px preview → original. On a large monitor the display variant can be narrower than the screen (slight grow), and desktop connections are fast enough not to need the feedback stage.
+- Neighbor prefetch now warms the adjacent **display variants** (mobile only) so the next prev/next tap is instant.
+- Applied to both viewers (`album.js` `_albFsLoadProgressive`, `app.js` `_fsLoadProgressive`).
+- Cache-bust app.js v=246 → v=247, album.js v=59 → v=60; SHELL_CACHE v114 → v115.
+
+## v1.5.59 (2026-05-26)
+
+### Fullscreen viewer — instant nav feedback on 5G (album + library)
+- **Why**: After v1.5.58, the album still "skipped 3–4 photos on a tap" on 5G. Verified the throttle was live (checked the Cloudflare-served file, not just origin) and that one physical tap mechanically = one advance. The real cause: in the **fullscreen** viewer, nav loaded a ~670 KB preview then the ~20 MB original, so the on-screen image didn't visibly change for a second-plus — the tap felt dead, the user re-tapped, and each tap advanced. The 350 ms throttle only catches accidental double-fires, not deliberate re-taps ~700 ms apart. (v1.5.58's display-variant speed-up went into the two-column detail view, not the fullscreen viewer being navigated.)
+- **Fix (both `album.js` `_albFsLoadProgressive` and `app.js` `_fsLoadProgressive`)**: 3-stage progressive load — **tiny thumbnail (`?size=thumbnail`, ~16 KB, paints almost instantly) → sharp preview → full original**. The thumbnail gives immediate visual confirmation the tap registered, so you stop re-tapping. Stages are chained (order guaranteed) and each swap is gated on the photo still being current (gen/id guard), so a slow load can't clobber the image after you've navigated on.
+- **Neighbor prefetch**: each viewer now prefetches the adjacent photos' tiny thumbnails (`_albFsPreloadNeighbors` / `_fsPreloadNeighbors`), so the instant-paint stage is already cached on the next prev/next tap.
+- Applied to both the public album viewer and the main library fullscreen for uniformity.
+- Cache-bust app.js v=245 → v=246, album.js v=58 → v=59; SHELL_CACHE v113 → v114.
+
+## v1.5.58 (2026-05-26)
+
+### Public album nav — stop the "jumps two photos" + faster repaint on 5G
+- **Bug**: In the shared album view, clicking/tapping prev or next sometimes advanced two photos. Worse on 5G.
+- **Root cause (mechanical)**: `albumDetailNavigate` and `albumFsNavigate` (`album.js`) had **no throttle** — unlike the library's `navigateRecent` (400ms guard). A ghost-click, finger jitter, or key auto-repeat incremented the index twice. The existing stale-render guard (`if (albFs.idx !== forIdx) return`) only blocks stale *metadata* from painting; it doesn't stop the double-increment.
+- **Root cause (5G aggravator)**: The detail view set `img.src` straight to `/api/public/original/<id>` — a multi-MB Z8 original per nav step. On cellular the image went blank for seconds, so a tap felt dead and you re-tapped (often >400ms later, so a throttle alone wouldn't catch it).
+- **Fix**:
+  1. Added a shared 350ms nav throttle (`_albNavThrottled`) guarding both `albumDetailNavigate` and `albumFsNavigate` → one tap = one photo, absorbing ghost-clicks/jitter/key-repeat.
+  2. Detail-view nav now loads the lightweight **display variant** (`/api/public/display/<id>-<ssDisplayWidth>.jpg`, the same sharp-resized path the slideshow uses) instead of the full original, with a CSP-safe `onerror` fallback to the original. Repaints in well under a second on 5G, so taps feel responsive and you stop re-tapping. Tapping the image still opens true fullscreen, which loads the full original progressively — no loss for pixel-peeping.
+- Cache-bust album.js v=57 → v=58.
+
+## v1.5.57 (2026-05-26)
+
+### Sorting a filtered library view no longer empties the grid
+- **Bug**: In the Library tab, applying a tile/chip filter (e.g. a lens model) and then clicking **Upload date**, **Date taken**, or the newest/oldest direction toggle showed **"No photos."**
+- **Root cause**: Immich's `/search/metadata` endpoint (used by `combined-search`) **does not return `exifInfo`** — confirmed by direct query. So `mapAssetWithMeta` (`server.js`) emits empty `lens`/`model`/`city` for every filtered result. Clicking a chip renders the server results directly (fine), but the sort toggles (`setLibrarySort` / `toggleLibrarySortDir` / `toggleRecentMode`) reset state, refetched the **unfiltered** `/api/immich/recent`, and then ran `applyRecentFilters()` — a **client-side substring re-filter** that tests the active chip against `recentMeta`. With `lens`/`model`/`city` blank, the only non-empty field was the filename, so `chips.every(c => searchable.includes(c))` failed for every item → empty grid. Hits the film/manual-lens library hardest (no auto-EXIF lens; lens names are curated separately).
+- **Fix (Option B — client-side sort)**: When a chip/person filter is active, the sort toggles now skip the unfiltered `/recent` refetch + re-filter entirely and instead re-sort the already-loaded `state.recentSmartResults` client-side, using fields that **are** present in the search response (`createdAt` for upload, `takenAt`/`localDateTime`/`fileCreatedAt` for taken). New helpers `isRecentFilterActive` / `sortRecentResults` / `resortActiveFilterIfPresent` in `app.js`. The tile path (`runMultiChipSearch`) also applies the current sort on initial render and on "load more" so order stays consistent across pages.
+- **Not done (deferred)**: Option A — re-querying the server with the new sort so the ordering spans result pages not yet loaded — only matters if a single filter returns >250 results. `combined-search` would need to accept `sort`/`dir`, and Immich's `order` can't cleanly express upload-vs-taken. Documented for future revisit.
+- Cache-bust app.js v=244 → v=245; SHELL_CACHE v112 → v113.
+
+## v1.5.56 (2026-05-26)
+
+### Prints detail view — same image-first fix as the library
+- Applied the v1.5.55 two-phase fix to the Prints-tab detail view (`showDetail`), which had the identical pattern: it `await`ed `/api/immich/photo/:id` (10s abort) — and sometimes `/api/albums` — before writing the `<img>`, so on a cold/slow connection the print couldn't start loading until the JSON returned, and a timeout showed "Failed to load print."
+- **Fix**: Phase 1 paints the image immediately with a "Loading details…" placeholder (title/sessions/tags are local `print` data; only EXIF comes from `meta`); Phase 2 fetches metadata in parallel (abort 10s → 15s) and patches only the right-hand panel via `outerHTML`. A metadata failure now costs just the EXIF sidebar, not the print, and navigation keeps working.
+- Done for uniformity with the library detail view — same code shape in both paths, no divergence to guess about later. (Usually masked on Prints by warm cache since it's a small stable set; this covers the cold-open case.)
+- Cache-bust app.js v=243 → v=244; SHELL_CACHE v111 → v112.
+
+## v1.5.55 (2026-05-26)
+
+### Cellular performance — shared-album grid + library detail view
+Two independent fixes after slow/janky loading was reported on a 5G phone connection (shared album link **and** native library).
+
+**1. Shared-album grid pulled full previews instead of thumbnails**
+- **Problem**: The public album grid (`album.js`) loaded `/api/public/thumb/<id>`, which `server.js` hardcoded to Immich's `size=preview` (~1440px, ~600–670 KB per cell). A 30-photo album = ~18 MB of grid thumbnails on cellular. No `decoding="async"` and no `width`/`height` meant each large JPEG decoded on the main thread and reflowed the grid as it landed — the "janky/glitchy" scroll.
+- **Fix**:
+  - `server.js` `/api/public/thumb/:id` now honors `?size=thumbnail` (passes through Immich's small WebP, ~10–40 KB). Default stays `preview` so the slideshow background, lightbox preview stage and embed-hero are untouched.
+  - `album.js` grid now requests `?size=thumbnail` and adds `decoding="async"` + `width="300" height="300"` — parity with the native library grid (`app.js:770`).
+- Net: grid bytes on the shared link drop ~20–30×, no main-thread decode stall, no reflow.
+- Cache-bust album.js v=56 → v=57.
+
+**2. Library detail view blocked the image behind the metadata fetch**
+- **Problem**: `renderRecentDetail` (`app.js`) `await`ed `/api/immich/photo/:id` (10s abort) — and *then* a second serial `/api/albums` fetch — **before** the `<img>` was ever written to the DOM. On slow 5G the photo couldn't start downloading until the JSON round-tripped, and if it exceeded the 10s abort the user got "Failed to load photo. Check connection and try again." even though the image itself was fine.
+- **Fix**: Split into two phases. Phase 1 paints the image immediately (it only needs the assetId) with a "Loading details…" placeholder panel. Phase 2 fetches metadata in parallel (abort raised to 15s) and patches **only** the right-hand info panel via `outerHTML`, leaving the already-loading image untouched. A metadata failure now costs just the EXIF sidebar, not the photo — the image stays viewable and navigation still works.
+- Cache-bust app.js v=242 → v=243; SHELL_CACHE v110 → v111 (re-caches `/` so the new app.js version ref ships).
+- **Note / possible follow-up**: the Prints-tab detail view (`renderPrintDetail`) still uses the old gated pattern. Left untouched this pass (out of the reported "library" scope); same fix would apply if Prints browsing on cellular feels slow.
+
+## v1.5.54.1 (2026-05-21) — Slideshow display variant [backfilled 2026-05-26]
+_Shipped to the NAS on 2026-05-21 but never logged or synced to the repo; documented retroactively during the v1.5.55–60 sync. Today's display-variant work (v1.5.58+) builds on this._
+
+### Black-frame fix on poor wifi — server-resized slideshow images
+- **Bug**: The slideshow loaded the full Immich original (6800+px, 5–22 MB) for every slide. On a slow connection a slide could fail to decode and fade out to a broken `<img>` — a visible black frame.
+- **Server** (`server.js`): new `GET /api/public/display/:filename` — accepts `<uuid>-<width>.jpg` (preferred, keeps the `.jpg` extension so Cloudflare edge-caches it) or `<uuid>.jpg?w=<n>`. Width clamped 480–2400, default 1920. Sharp pipeline: lanczos3 resize, tiered unsharp mask (≤1200 / ≤1600 / none), q88 mozjpeg, 4:2:0 chroma, sRGB ICC. `Cache-Control: public, max-age=86400, stale-while-revalidate=604800`. Originals stay on `/api/public/original/:id` for the lightbox/zoom.
+- **Client** (`album.js`): `ssDisplayWidth` chosen at startup from `navigator.connection` (saveData/2g → 960, 3g or downlink <1.5 Mbps → 1280, else 1920); `_measureAndAdapt` steps the ladder down after slow loads; `_preloadAhead` prefetches upcoming slides; `_attachSlideImgHandlers` falls back to the thumbnail proxy on error instead of a black frame.
+- Bytes-on-wire (one frame): original 21.9 MB → display@1920 661 KB / @1280 289 KB / @960 202 KB.
+- Cache-bust album.js v=53 → v=55.
+
 ## v1.5.54 (2026-05-19)
 
 ### Embed slideshow stuck on slide 1 — fixed re-entry on startSlideshow

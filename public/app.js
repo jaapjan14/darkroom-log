@@ -113,15 +113,52 @@ function switchTab(tab) {
 
 // RECENT UPLOADS
 
+// When a tile/chip or person filter is active, the filtered results live in
+// state.recentSmartResults (server-side combined-search). Those items come from
+// Immich's /search/metadata, which omits exifInfo — so a client-side chip
+// re-filter can't match lens/model/city and would wipe the grid ("no photos").
+// So the sort toggles re-sort the already-loaded results client-side (Option B)
+// instead of refetching the unfiltered /recent endpoint + re-filtering. See the
+// darkroom CHANGELOG v1.5.57 write-up.
+function isRecentFilterActive() {
+  const q = (document.getElementById('recent-search')?.value || '').trim();
+  return !!(state.recentSmartResults?.length && (q || state.recentActiveChips.size || state.recentActivePerson));
+}
+
+// Sort asset objects by the current library sort/dir using fields that ARE
+// present in /search/metadata responses: createdAt (upload time) and
+// takenAt/localDateTime/fileCreatedAt (capture time).
+function sortRecentResults(arr) {
+  const useUpload = state.librarySort === 'upload';
+  const dir = state.librarySortDir === 'asc' ? 1 : -1;
+  const ts = a => {
+    const v = useUpload ? (a.createdAt || a.fileCreatedAt)
+                        : (a.takenAt || a.localDateTime || a.fileCreatedAt || a.createdAt);
+    const t = v ? new Date(v).getTime() : 0;
+    return Number.isNaN(t) ? 0 : t;
+  };
+  return arr.slice().sort((x, y) => (ts(x) - ts(y)) * dir);
+}
+
+// If a filter is active, re-sort the loaded results client-side and render;
+// returns true so callers skip the unfiltered /recent refetch.
+function resortActiveFilterIfPresent() {
+  if (!isRecentFilterActive()) return false;
+  state.recentSmartResults = sortRecentResults(state.recentSmartResults);
+  renderRecentGrid(state.recentSmartResults);
+  return true;
+}
+
 function setLibrarySort(sort) {
   state.librarySort = sort;
   // Only clear `active` from actual sort buttons (upload/taken). lib-sort-mode
   // and lib-sort-dir are toggle buttons with their own visual state, not sorts.
   document.querySelectorAll('#lib-sort-upload, #lib-sort-taken').forEach(b => b.classList.remove('active'));
   document.getElementById('lib-sort-' + sort).classList.add('active');
+  if (typeof updateRecentModeButton === 'function') updateRecentModeButton();
+  if (resortActiveFilterIfPresent()) return;
   state.recentPage = 1;
   state.recentItems = [];
-  if (typeof updateRecentModeButton === 'function') updateRecentModeButton();
   fetchRecentPage();
 }
 
@@ -129,6 +166,7 @@ function toggleLibrarySortDir() {
   state.librarySortDir = state.librarySortDir === 'desc' ? 'asc' : 'desc';
   const btn = document.getElementById('lib-sort-dir');
   if (btn) btn.textContent = state.librarySortDir === 'desc' ? '↓ Newest' : '↑ Oldest';
+  if (resortActiveFilterIfPresent()) return;
   state.recentPage = 1;
   state.recentItems = [];
   fetchRecentPage();
@@ -145,15 +183,19 @@ function toggleLibrarySortDir() {
 function toggleRecentMode() {
   state.recentMode = state.recentMode === 'window' ? 'full' : 'window';
   updateRecentModeButton();
-  state.recentPage = 1;
-  state.recentItems = [];
-  fetchRecentPage();
   // Fire-and-forget: pull fresh face tags from Immich. Don't await — the
-  // grid reload above shouldn't wait on this.
+  // grid reload below shouldn't wait on this. Fires regardless of the filtered
+  // path so newly-tagged faces still surface in the people filter.
   fetch('/api/filters/refresh-people', { method: 'POST' })
     .then(r => r.json())
     .then(d => { if (d && d.ok) console.log('People refreshed:', d.count); })
     .catch(() => {});
+  // window/full only affects the unfiltered upload fetch; with a filter active
+  // there's nothing to refetch, so just re-sort the current results in place.
+  if (resortActiveFilterIfPresent()) return;
+  state.recentPage = 1;
+  state.recentItems = [];
+  fetchRecentPage();
 }
 
 function updateRecentModeButton() {
@@ -378,10 +420,13 @@ async function runMultiChipSearch(chips, personId = null) {
     });
     const data = await r.json();
     const items = data.assets || [];
-    state.recentSmartResults = items;
-    state.searchPage = 1;
     absorbAssetMeta(items);
-    renderRecentGrid(items);
+    // Sort the filtered set by the current library sort/dir so the chosen sort
+    // applies to filtered views too (Option B — these items lack exifInfo, so
+    // we sort on createdAt/takenAt which are present).
+    state.recentSmartResults = sortRecentResults(items);
+    state.searchPage = 1;
+    renderRecentGrid(state.recentSmartResults);
     loadRecentMetaBatch(items.map(a => a.id));
     const loadMoreBtn = document.getElementById('load-more-btn');
     if (loadMoreBtn) {
@@ -394,7 +439,9 @@ async function runMultiChipSearch(chips, personId = null) {
           body: JSON.stringify({ cameras, lenses, cities, personId, size: 250, page: state.searchPage })
         });
         const d2 = await r2.json();
-        state.recentSmartResults = [...state.recentSmartResults, ...(d2.assets || [])];
+        absorbAssetMeta(d2.assets || []);
+        // Keep the active sort consistent as more pages append.
+        state.recentSmartResults = sortRecentResults([...state.recentSmartResults, ...(d2.assets || [])]);
         renderRecentGrid(state.recentSmartResults);
         loadMoreBtn.style.display = (d2.assets || []).length === 250 ? 'block' : 'none';
       };
@@ -841,68 +888,13 @@ async function renderRecentDetail(assetId, navGen) {
   const myGen = navGen != null ? navGen : _navGen;
   const content = document.getElementById('recent-detail-content');
 
-  // Loading state: if there's already a detail-image in place (we're navigating
-  // between photos), dim it instead of replacing with "Loading…" text. Keeps
-  // the user oriented during slow fetches and reassures them something is
-  // happening (so they don't keep tapping past the cooldown).
-  const existingImg = content.querySelector('.detail-image');
-  if (existingImg) {
-    existingImg.style.transition = 'opacity 0.15s';
-    existingImg.style.opacity = '0.35';
-  } else {
-    content.innerHTML = '<div class="loading">Loading...</div>';
-  }
-
-  // Meta fetch with 10s timeout — a stalled connection used to zombie the nav.
-  let meta = {};
-  let metaFailed = false;
-  try {
-    const ac = new AbortController();
-    const tid = setTimeout(() => ac.abort(), 10000);
-    const r = await fetch(`/api/immich/photo/${assetId}`, { signal: ac.signal });
-    clearTimeout(tid);
-    meta = await r.json();
-  } catch(e) {
-    metaFailed = true;
-  }
-
-  // Stale-result guard: a newer nav has already happened, drop this result.
-  if (myGen !== _navGen) return;
-
-  if (metaFailed) {
-    content.innerHTML = '<div class="loading">Failed to load photo. Check connection and try again.</div>';
-    return;
-  }
-
-  // Lazy-load Darkroom albums so the "In albums" row works even when the
-  // user opened Recent first and never visited the Albums tab.
-  if (!Array.isArray(state.albums)) {
-    try {
-      const ac = new AbortController();
-      const tid = setTimeout(() => ac.abort(), 10000);
-      const r = await fetch('/api/albums', { signal: ac.signal });
-      clearTimeout(tid);
-      const data = await r.json();
-      if (Array.isArray(data)) state.albums = data;
-    } catch (e) { /* leave for other loaders */ }
-    if (myGen !== _navGen) return; // stale-result guard
-  }
-  const assetAlbums = (state.albums || []).filter(a => (a.assets || []).includes(assetId));
-
+  // Nav position needs no metadata — compute it up front so the image can paint
+  // immediately, in parallel with (not gated behind) the metadata fetch.
   const idx = state.currentRecentIndex;
   const displayedItems = state.displayedItems || state.recentItems;
   const total = displayedItems.length;
   const hasPrev = idx > 0;
   const hasNext = idx < total - 1;
-
-  // Format date
-  const takenDate = meta.takenAt ? new Date(meta.takenAt).toLocaleDateString('en-US', {weekday:'short', year:'numeric', month:'short', day:'numeric'}) : '';
-  const takenTime = meta.takenAt ? new Date(meta.takenAt).toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit'}) : '';
-
-  // Map
-  const hasGPS = meta.latitude && meta.longitude;
-  const mapUrl = hasGPS ? `https://www.openstreetmap.org/export/embed.html?bbox=${meta.longitude-0.01},${meta.latitude-0.01},${meta.longitude+0.01},${meta.latitude+0.01}&layer=mapnik&marker=${meta.latitude},${meta.longitude}` : '';
-  const immichLocation = [meta.city, meta.state].filter(Boolean).join(', ');
 
   // Attach load/error handlers AFTER innerHTML write — CSP (script-src 'self')
   // blocks inline `onload=""` / `onerror=""` attributes silently.
@@ -915,6 +907,12 @@ async function renderRecentDetail(assetId, navGen) {
     else dimg.addEventListener('load', onLoad);
   };
 
+  // Phase 1 — paint the image immediately with a placeholder info panel. The
+  // photo now starts downloading right away instead of waiting on the metadata
+  // JSON; on slow 5G it's viewable in parallel and a metadata stall no longer
+  // blanks or fails the photo. (Previously the <img> wasn't written to the DOM
+  // until /api/immich/photo returned, so a slow or timed-out meta fetch showed
+  // "Failed to load photo" even though the image itself was fine.)
   content.innerHTML = `
     <div class="detail-layout">
       <div class="detail-left">
@@ -922,13 +920,70 @@ async function renderRecentDetail(assetId, navGen) {
           <img class="detail-image"
                src="/api/immich/thumb/${assetId}?size=${_isMobileUA() ? 'thumbnail' : 'preview'}"
                ${_isMobileUA() ? `data-next="/api/immich/thumb/${assetId}?size=preview"` : ''}
-               alt="${meta.filename || ''}"
+               alt=""
                data-action="openFullscreen" data-url="/api/immich/original/${assetId}"
                style="cursor:zoom-in;background:#1a1a1a;min-height:200px">
           <div data-action="navPrev" style="position:absolute;left:0;top:0;width:25%;height:100%;cursor:pointer;z-index:10"></div>
           <div data-action="navNext" style="position:absolute;right:0;top:0;width:25%;height:100%;cursor:pointer;z-index:10"></div>
         </div>
       </div>
+      <div class="detail-right"><div class="loading" style="padding:1.5rem;font-size:12px">Loading details…</div></div>
+    </div>`;
+  _attachDetailImgHandlers();
+
+  // Phase 2 — fetch metadata in parallel and patch only the info panel when it
+  // lands; the (already loading) image element is left untouched. 15s abort —
+  // a stalled connection no longer zombies the nav, and now a meta failure only
+  // costs the EXIF sidebar, not the photo.
+  let meta = {};
+  let metaFailed = false;
+  try {
+    const ac = new AbortController();
+    const tid = setTimeout(() => ac.abort(), 15000);
+    const r = await fetch(`/api/immich/photo/${assetId}`, { signal: ac.signal });
+    clearTimeout(tid);
+    meta = await r.json();
+  } catch(e) {
+    metaFailed = true;
+  }
+
+  // Stale-result guard: a newer nav has already happened, drop this result.
+  if (myGen !== _navGen) return;
+
+  if (metaFailed) {
+    const rp = content.querySelector('.detail-right');
+    if (rp) rp.innerHTML = '<div class="loading" style="padding:1.5rem;font-size:12px">Details unavailable — connection is slow. The photo above is still viewable; navigate or reopen to retry.</div>';
+    return;
+  }
+
+  // Lazy-load Darkroom albums so the "In albums" row works even when the
+  // user opened Recent first and never visited the Albums tab.
+  if (!Array.isArray(state.albums)) {
+    try {
+      const ac = new AbortController();
+      const tid = setTimeout(() => ac.abort(), 15000);
+      const r = await fetch('/api/albums', { signal: ac.signal });
+      clearTimeout(tid);
+      const data = await r.json();
+      if (Array.isArray(data)) state.albums = data;
+    } catch (e) { /* leave for other loaders */ }
+    if (myGen !== _navGen) return; // stale-result guard
+  }
+  const assetAlbums = (state.albums || []).filter(a => (a.assets || []).includes(assetId));
+
+  // Format date
+  const takenDate = meta.takenAt ? new Date(meta.takenAt).toLocaleDateString('en-US', {weekday:'short', year:'numeric', month:'short', day:'numeric'}) : '';
+  const takenTime = meta.takenAt ? new Date(meta.takenAt).toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit'}) : '';
+
+  // Map
+  const hasGPS = meta.latitude && meta.longitude;
+  const mapUrl = hasGPS ? `https://www.openstreetmap.org/export/embed.html?bbox=${meta.longitude-0.01},${meta.latitude-0.01},${meta.longitude+0.01},${meta.latitude+0.01}&layer=mapnik&marker=${meta.latitude},${meta.longitude}` : '';
+  const immichLocation = [meta.city, meta.state].filter(Boolean).join(', ');
+
+  // Patch only the right-hand info panel; the image element keeps loading.
+  const rightPanel = content.querySelector('.detail-right');
+  if (!rightPanel) return;
+  rightPanel.outerHTML = `
       <div class="detail-right">
         <div style="padding:0.5rem 1rem;display:flex;flex-direction:column;gap:0.4rem;border-bottom:1px solid var(--border)">
           <div style="display:flex;gap:0.4rem;align-items:center;flex-wrap:wrap">
@@ -1016,9 +1071,7 @@ async function renderRecentDetail(assetId, navGen) {
           </div>
         </div>
       </div>
-    </div>
   `;
-  _attachDetailImgHandlers();
 }
 
 // Downscale a JPEG/PNG blob via canvas, returning a JPEG blob with longest edge ≤ maxPx.
@@ -1320,32 +1373,46 @@ function _fsIsZoomed() { return _fsZoomer ? _fsZoomer.isZoomed() : false; }
 // matching ContactSheet's behavior. Also adds a visible "sharpening" cue
 // as the high-res tier swaps in.
 function _fsLoadProgressive(originalUrl, navGen) {
-  // Gen guard: if a newer nav has happened by the time stage-2 finishes, don't
-  // swap in the now-stale original — would render the wrong image after a
-  // slow connection's preload finally lands.
+  // Gen guard: if a newer nav has happened by the time a stage finishes, don't
+  // swap in the now-stale image — would render the wrong photo after a slow
+  // connection's preload finally lands.
   const myGen = navGen != null ? navGen : _navGen;
   const img = document.getElementById('fullscreen-img');
   const m = originalUrl.match(/\/immich\/original\/([0-9a-f-]+)/i);
   if (!m) { img.src = originalUrl; return; }
-  const previewUrl = '/api/immich/thumb/' + m[1] + '?size=preview';
-  // Stage 1: lightweight preview (~2K) renders almost instantly
-  img.src = previewUrl;
-  // Stage 2: preload the full original; once cached, re-set img.src to
-  // trigger a fresh decode at the natural resolution
-  const preloader = new Image();
-  preloader.onload = () => {
-    if (myGen !== _navGen) return;
-    if (img && document.getElementById('fullscreen-overlay').classList.contains('active')) {
-      img.src = originalUrl;
-    }
+  const id = m[1];
+  const current = () => myGen === _navGen && img &&
+    document.getElementById('fullscreen-overlay').classList.contains('active');
+  const loadOriginal = () => {
+    const orig = new Image();
+    const swap = () => { if (current()) img.src = originalUrl; };
+    orig.onload = swap; orig.onerror = swap;
+    orig.src = originalUrl;
   };
-  preloader.onerror = () => {
-    if (myGen !== _navGen) return;
-    if (img && document.getElementById('fullscreen-overlay').classList.contains('active')) {
-      img.src = originalUrl;
-    }
-  };
-  preloader.src = originalUrl;
+  if (_isMobileUA()) {
+    // Mobile/cellular: lead with the adaptive display variant — light
+    // (~200-300 KB) AND ≥ the device width, so it paints full-screen fast for
+    // quick nav feedback without the small-then-grow "jump". Preload neighbors
+    // so the next tap is instant.
+    img.src = _dispUrl(id);
+    _fsPreloadNeighbors();
+  } else {
+    // Desktop: fast connection — plain ~1440px preview then original (the
+    // display variant can be narrower than a big monitor → visible grow).
+    img.src = '/api/immich/thumb/' + id + '?size=preview';
+  }
+  loadOriginal();
+}
+// Mobile only: prefetch adjacent photos' display variants so the first-paint
+// stage is already cached on the next prev/next tap (recent/library fullscreen).
+function _fsPreloadNeighbors() {
+  const items = state.displayedItems || state.recentItems;
+  const i = state.currentRecentIndex;
+  if (!Array.isArray(items) || typeof i !== 'number') return;
+  [1, -1].forEach(d => {
+    const it = items[i + d];
+    if (it && it.id) { const pre = new Image(); pre.src = _dispUrl(it.id); }
+  });
 }
 
 function openFullscreen(src) {
@@ -2341,6 +2408,78 @@ const KB_MOVES = [
 let ssActiveSlot = 'a';
 let ssCleanupTimers = [];
 
+// Adaptive image sizing for slideshow body — mirrors album.js so the admin
+// preview matches the public album view exactly. Slideshow uses the resized
+// display variant (/api/public/display/<id>-<w>.jpg) instead of the full
+// Immich original; full-res stays on /api/immich/original/:id for the
+// lightbox + recent-detail view where pixel-peeping matters.
+let ssDisplayWidth = 1920;
+let ssSlowLoadCount = 0;
+function _pickInitialDisplayWidth() {
+  try {
+    const c = navigator.connection;
+    if (!c) return 1920;
+    if (c.saveData) return 960;
+    const et = c.effectiveType || '';
+    if (et === 'slow-2g' || et === '2g') return 960;
+    if (et === '3g') return 1280;
+    if (typeof c.downlink === 'number' && c.downlink < 1.5) return 1280;
+    return 1920;
+  } catch (e) { return 1920; }
+}
+function _measureAndAdapt(ms) {
+  if (ms > 3500) {
+    ssSlowLoadCount++;
+    if (ssSlowLoadCount >= 2 && ssDisplayWidth > 960) {
+      const prev = ssDisplayWidth;
+      ssDisplayWidth = (ssDisplayWidth >= 1920) ? 1280 : 960;
+      ssSlowLoadCount = 0;
+      console.log('[ss] adaptive downgrade ' + prev + ' → ' + ssDisplayWidth + ' (last load ' + Math.round(ms) + 'ms)');
+    }
+  } else if (ms < 800) {
+    ssSlowLoadCount = Math.max(0, ssSlowLoadCount - 1);
+  }
+}
+function _dispUrl(id) {
+  return '/api/public/display/' + id + '-' + ssDisplayWidth + '.jpg';
+}
+// Attach load/error handlers for a slide image with graceful fallback to the
+// Immich thumb URL on failure. If thumb also fails, show() runs anyway — the
+// slot's bg-image is the last-resort visual fallback.
+function _attachSlideImgHandlers(img, id, show) {
+  if (img.complete && img.naturalWidth > 0) { show(); return; }
+  let fellBack = false;
+  const measureStart = performance.now();
+  const onMeasureOnce = () => {
+    img.removeEventListener('load', onMeasureOnce);
+    _measureAndAdapt(performance.now() - measureStart);
+  };
+  img.addEventListener('load', onMeasureOnce);
+  img.onload = show;
+  img.onerror = () => {
+    if (fellBack) { show(); return; }
+    fellBack = true;
+    img.src = '/api/public/thumb/' + id;
+  };
+}
+// Hidden image preload for look-ahead slides (N+2, N+3). Browser HTTP cache
+// keeps the result so the actual slide render hits cache.
+function _preloadAhead(idx) {
+  const album = state.currentAlbum;
+  if (!album || !album.assets || !album.assets.length) return;
+  for (const off of [2, 3]) {
+    const k = (idx + off) % album.assets.length;
+    const id = album.assets[k];
+    if (!id) continue;
+    const pre = new Image();
+    pre.src = _dispUrl(id);
+  }
+}
+
+// Pick initial width at module load — re-evaluated by _measureAndAdapt as
+// slides go by.
+ssDisplayWidth = _pickInitialDisplayWidth();
+
 function cancelSlideCleanup() {
   ssCleanupTimers.forEach(t => clearTimeout(t));
   ssCleanupTimers = [];
@@ -2560,8 +2699,8 @@ function showSlide(idx, direction) {
   const nextSlot = ssActiveSlot === 'a' ? 'b' : 'a';
   const currentEl = document.getElementById('slideshow-slide-' + ssActiveSlot);
   const nextEl = document.getElementById('slideshow-slide-' + nextSlot);
-  const url = '/api/immich/original/' + album.assets[idx];
-  const thumbUrl = '/api/immich/thumb/' + album.assets[idx];
+  const url = _dispUrl(album.assets[idx]);
+  const thumbUrl = '/api/public/thumb/' + album.assets[idx];
 
   // Adaptive crossfade duration. The default CSS 1.5s opacity transition
   // is longer than fast beat-pattern slides (e.g. 2 beats @ 94 BPM = 1.28s),
@@ -2607,13 +2746,13 @@ function showSlide(idx, direction) {
     ssCleanupTimers.push(t1, t2);
   };
 
-  if (img.complete && img.naturalWidth > 0) { show(); }
-  else { img.onload = show; img.onerror = show; }
+  _attachSlideImgHandlers(img, album.assets[idx], show);
 
-  // Preload next image
+  // Preload next image + look-ahead (N+2, N+3)
   const preloadIdx = (idx + 1) % album.assets.length;
   const pre = new Image();
-  pre.src = '/api/immich/original/' + album.assets[preloadIdx];
+  pre.src = _dispUrl(album.assets[preloadIdx]);
+  _preloadAhead(idx);
 }
 
 // QUICK preset (slide-horizontal, no Ken Burns). Fully isolated from
@@ -2629,8 +2768,8 @@ function showSlideSlide(idx, direction) {
   _renderPerPhotoOverlay(idx);
 
   const assetId = album.assets[idx];
-  const url = '/api/immich/original/' + assetId;
-  const thumbUrl = '/api/immich/thumb/' + assetId;
+  const url = _dispUrl(assetId);
+  const thumbUrl = '/api/public/thumb/' + assetId;
   const nextSlot = ssActiveSlot === 'a' ? 'b' : 'a';
   const currentEl = document.getElementById('slideshow-slide-' + ssActiveSlot);
   const nextEl = document.getElementById('slideshow-slide-' + nextSlot);
@@ -2670,13 +2809,13 @@ function showSlideSlide(idx, direction) {
     }, 1900);
     ssCleanupTimers.push(t2);
   };
-  if (img.complete && img.naturalWidth > 0) { show(); }
-  else { img.onload = show; img.onerror = show; }
+  _attachSlideImgHandlers(img, assetId, show);
 
-  // Preload next image
+  // Preload next image + look-ahead
   const preloadIdx = (idx + 1) % album.assets.length;
   const pre = new Image();
-  pre.src = '/api/immich/original/' + album.assets[preloadIdx];
+  pre.src = _dispUrl(album.assets[preloadIdx]);
+  _preloadAhead(idx);
 }
 
 // BEAT FADE preset — same scheduler + engine as Beat, but no Ken Burns
@@ -2692,8 +2831,8 @@ function showSlideBeatFade(idx) {
   _renderPerPhotoOverlay(idx);
 
   const assetId = album.assets[idx];
-  const url = '/api/immich/original/' + assetId;
-  const thumbUrl = '/api/immich/thumb/' + assetId;
+  const url = _dispUrl(assetId);
+  const thumbUrl = '/api/public/thumb/' + assetId;
   const nextSlot = ssActiveSlot === 'a' ? 'b' : 'a';
   const currentEl = document.getElementById('slideshow-slide-' + ssActiveSlot);
   const nextEl = document.getElementById('slideshow-slide-' + nextSlot);
@@ -2727,20 +2866,22 @@ function showSlideBeatFade(idx) {
       currentEl.classList.remove('ss-visible');
     }));
     if (!state.slideshow.paused) scheduleNext();
+    // Cleanup timer bumped from 500 → 1500ms so it runs after the fade
+    // (now 1400ms via .ss-fade-quick) fully completes.
     const t1 = setTimeout(() => {
       currentEl.style.zIndex = 1;
       ssActiveSlot = nextSlot;
       ssCleanupTimers = ssCleanupTimers.filter(t => t !== t1);
-    }, 500);
+    }, 1500);
     ssCleanupTimers.push(t1);
   };
-  if (img.complete && img.naturalWidth > 0) { show(); }
-  else { img.onload = show; img.onerror = show; }
+  _attachSlideImgHandlers(img, assetId, show);
 
-  // Preload next image
+  // Preload next image + look-ahead
   const preloadIdx = (idx + 1) % album.assets.length;
   const pre = new Image();
-  pre.src = '/api/immich/original/' + album.assets[preloadIdx];
+  pre.src = _dispUrl(album.assets[preloadIdx]);
+  _preloadAhead(idx);
 }
 
 let ssHideTimer = null;
@@ -3262,21 +3403,44 @@ async function showDetail(printId, navGen) {
   document.getElementById('header-title').textContent = print.title;
 
   const content = document.getElementById('detail-content');
-  // Dim the existing image instead of "Loading…" wipe when navigating between
-  // prints — preserves visual context on slow connections.
-  const existingImg = content.querySelector('.detail-image');
-  if (existingImg) {
-    existingImg.style.transition = 'opacity 0.15s';
-    existingImg.style.opacity = '0.35';
-  } else {
-    content.innerHTML = '<div class="loading">Loading...</div>';
-  }
 
+  // Attach load/error handlers AFTER innerHTML write — CSP (script-src 'self')
+  // blocks inline `onload=""` / `onerror=""` attributes silently.
+  const _attachDetailImgHandlers = () => {
+    const dimg = content.querySelector('.detail-image');
+    if (!dimg) return;
+    dimg.addEventListener('error', () => { dimg.style.opacity = '0.2'; dimg.alt = 'Image unavailable'; });
+    const onLoad = () => scheduleDetailUpgrade(dimg);
+    if (dimg.complete && dimg.naturalWidth > 0) onLoad();
+    else dimg.addEventListener('load', onLoad);
+  };
+
+  // Phase 1 — paint the image immediately with a placeholder info panel, so the
+  // print starts downloading in parallel with (not gated behind) the metadata
+  // fetch. Mirrors the library detail view (renderRecentDetail) for uniformity:
+  // on slow 5G the print is viewable right away and a metadata stall no longer
+  // blanks or fails it.
+  content.innerHTML = `
+    <div class="detail-layout">
+      <div class="detail-left">
+        <div style="position:relative;width:100%;height:100%;display:flex;align-items:flex-start;justify-content:center">
+          <img class="detail-image" src="/api/immich/thumb/${print.immichId}?size=${_isMobileUA() ? 'thumbnail' : 'preview'}" ${_isMobileUA() ? `data-next="/api/immich/thumb/${print.immichId}?size=preview"` : ''} alt="${print.title}" data-action="openFullscreen" data-url="/api/immich/original/${print.immichId}" style="cursor:zoom-in;touch-action:manipulation;background:#1a1a1a;min-height:200px">
+          <div data-action="printNavPrev" style="position:absolute;left:0;top:0;width:25%;height:100%;cursor:pointer;z-index:10;touch-action:manipulation"></div>
+          <div data-action="printNavNext" style="position:absolute;right:0;top:0;width:25%;height:100%;cursor:pointer;z-index:10;touch-action:manipulation"></div>
+        </div>
+      </div>
+      <div class="detail-right"><div class="loading" style="padding:1.5rem;font-size:12px">Loading details…</div></div>
+    </div>`;
+  _attachDetailImgHandlers();
+
+  // Phase 2 — fetch metadata in parallel and patch only the info panel when it
+  // lands; the (already loading) image element is left untouched. 15s abort —
+  // a meta failure now costs just the EXIF sidebar, not the print.
   let meta = {};
   let metaFailed = false;
   try {
     const ac = new AbortController();
-    const tid = setTimeout(() => ac.abort(), 10000);
+    const tid = setTimeout(() => ac.abort(), 15000);
     const r = await fetch(`/api/immich/photo/${print.immichId}`, { signal: ac.signal });
     clearTimeout(tid);
     meta = await r.json();
@@ -3288,7 +3452,8 @@ async function showDetail(printId, navGen) {
   if (myGen !== _navGen) return;
 
   if (metaFailed) {
-    content.innerHTML = '<div class="loading">Failed to load print. Check connection and try again.</div>';
+    const rp = content.querySelector('.detail-right');
+    if (rp) rp.innerHTML = '<div class="loading" style="padding:1.5rem;font-size:12px">Details unavailable — connection is slow. The print above is still viewable; navigate or reopen to retry.</div>';
     return;
   }
 
@@ -3298,7 +3463,7 @@ async function showDetail(printId, navGen) {
   if (!Array.isArray(state.albums)) {
     try {
       const ac = new AbortController();
-      const tid = setTimeout(() => ac.abort(), 10000);
+      const tid = setTimeout(() => ac.abort(), 15000);
       const r = await fetch('/api/albums', { signal: ac.signal });
       clearTimeout(tid);
       const data = await r.json();
@@ -3309,15 +3474,11 @@ async function showDetail(printId, navGen) {
   // Albums this print belongs to — looked up by Immich asset ID against the
   // already-loaded state.albums.
   const printAlbums = (state.albums || []).filter(a => (a.assets || []).includes(print.immichId));
-  content.innerHTML = `
-    <div class="detail-layout">
-      <div class="detail-left">
-        <div style="position:relative;width:100%;height:100%;display:flex;align-items:flex-start;justify-content:center">
-          <img class="detail-image" src="/api/immich/thumb/${print.immichId}?size=${_isMobileUA() ? 'thumbnail' : 'preview'}" ${_isMobileUA() ? `data-next="/api/immich/thumb/${print.immichId}?size=preview"` : ''} alt="${print.title}" data-action="openFullscreen" data-url="/api/immich/original/${print.immichId}" style="cursor:zoom-in;touch-action:manipulation;background:#1a1a1a;min-height:200px">
-          <div data-action="printNavPrev" style="position:absolute;left:0;top:0;width:25%;height:100%;cursor:pointer;z-index:10;touch-action:manipulation"></div>
-          <div data-action="printNavNext" style="position:absolute;right:0;top:0;width:25%;height:100%;cursor:pointer;z-index:10;touch-action:manipulation"></div>
-        </div>
-      </div>
+
+  // Patch only the right-hand info panel; the image element keeps loading.
+  const rightPanel = content.querySelector('.detail-right');
+  if (!rightPanel) return;
+  rightPanel.outerHTML = `
       <div class="detail-right">
     <div style="display:flex;align-items:center;justify-content:space-between;padding:0.5rem 1rem;border-bottom:1px solid var(--border)">
       ${printIdx > 0 ? `<button class="nav-arrow" data-action="printNavPrev">&#8249;</button>` : `<div style="width:36px"></div>`}
@@ -3393,16 +3554,7 @@ async function showDetail(printId, navGen) {
       </div>
     `}).join('')}
       </div>
-    </div>
   `;
-  // CSP-safe: attach load/error to .detail-image after innerHTML write.
-  const _pdimg = content.querySelector('.detail-image');
-  if (_pdimg) {
-    _pdimg.addEventListener('error', () => { _pdimg.style.opacity = '0.2'; _pdimg.alt = 'Image unavailable'; });
-    const _pOnLoad = () => scheduleDetailUpgrade(_pdimg);
-    if (_pdimg.complete && _pdimg.naturalWidth > 0) _pOnLoad();
-    else _pdimg.addEventListener('load', _pOnLoad);
-  }
 }
 
 function closePrintDetail() {

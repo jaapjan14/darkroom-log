@@ -185,7 +185,7 @@
   .slideshow-slide { position: absolute; inset: 0; overflow: hidden; opacity: 0; transition: opacity 1.5s ease-in-out; will-change: opacity; }
   .slideshow-slide.ss-visible { opacity: 1; }
   /* Beat Fade preset — clean opacity crossfade, no ken-burns */
-  .slideshow-slide.ss-fade-quick { transition: opacity 700ms ease-in-out; }
+  .slideshow-slide.ss-fade-quick { transition: opacity 1400ms ease-in-out; }
   /* Quick preset (slide-horizontal). Only takes effect when JS adds .ss-slide-h. */
   .slideshow-slide.ss-slide-h { opacity: 1; transition: transform 1.8s cubic-bezier(0.4, 0, 0.2, 1); will-change: transform; }
   .slideshow-slide.ss-slide-h.ss-slide-h-from-right { transform: translateX(100%); }
@@ -763,7 +763,7 @@
 
 <script src="/zoom.js?v=2" defer></script>
 <script src="/audio-engine.js?v=10" defer></script>
-<script src="/app.js?v=241" defer></script>
+<script src="/app.js?v=247" defer></script>
 <script>
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.getRegistrations().then(regs => regs.forEach(r => r.unregister()));
