@@ -9,6 +9,7 @@
 - Neighbor prefetch now warms the adjacent **display variants** (mobile only) so the next prev/next tap is instant.
 - Applied to both viewers (`album.js` `_albFsLoadProgressive`, `app.js` `_fsLoadProgressive`).
 - Cache-bust app.js v=246 → v=247, album.js v=59 → v=60; SHELL_CACHE v114 → v115.
+- **Release housekeeping**: `package.json` version aligned 1.5.44 → 1.5.60 (had drifted behind the app). Repo re-synced from the NAS (source of truth) and pushed to GitHub — this also backfilled v1.5.54.1 (the May 21 slideshow display variant) and the previously-uncommitted beat-detection libs (`audio-engine.js`, `essentia-*`). Multi-arch image (linux/amd64 + linux/arm64) republished to Docker Hub `:1.5.60` / `:latest`, and the Hub overview refreshed.
 
 ## v1.5.59 (2026-05-26)
 
