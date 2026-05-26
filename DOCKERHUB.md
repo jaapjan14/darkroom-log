@@ -17,21 +17,15 @@ header, optional slideshow, and pinch-zoom on every photo. No login required for
 
 **Source:** https://github.com/jaapjan14/darkroom-log
 
-## What's new in v1.5.54
+## What's new in v1.5.60
 
-- **Forum embed pipeline rebuilt** — `/embed/<assetId>-<width>.jpg` now pulls the Immich original (not the already-resampled preview), does a single lanczos3 downscale, and applies size-conditional unsharp mask:
-  - **≤1200 px** (1024 / 1200): max USM (sigma 0.9) — closest LR analog to "Sharpen for Screen — Standard". Rescues low-res renders that used to look soft after 5×+ downscale.
-  - **1280 px**: Flickr-style mild USM (sigma 0.5).
-  - **>1280 px** (1400 / 1600 / 2048 / 2400): no USM — lanczos3 carries the edges naturally.
+A focused pass on **mobile / cellular performance** — browsing the library and public album galleries on a phone (5G) is now fast and smooth, with no dead taps or skipped photos.
 
-  Output is JPEG quality 95, mozjpeg, 4:4:4 chroma, sRGB ICC. Same URL pattern, just better bytes; existing forum embed links upgrade automatically as CDN cache expires.
-- **Inline embed-size picker** in the detail toolbar — pick any of 7 widths (1024–2400) from a dropdown, hit ⧉ Embed to copy the BBCode-ready URL.
-- **Detail toolbar collapsed from 3 rows to 2** — the four `↑ S/M/L/XL` share buttons are now a single size picker + one ↑ Share button. The standalone ↓ DL was redundant with XL (same `/api/immich/original` path on desktop) and got merged in. Archive + Trash moved to row 1 so all export controls share row 2.
-- **Public album taps no longer break on Android** — closing the slideshow now calls `document.exitFullscreen()`, so the (now-invisible) overlay stops capturing input. Without this, Android Chrome silently kept the overlay as the fullscreen element and swallowed every gallery thumbnail tap. iOS was unaffected (WebKit rejects `requestFullscreen` on `<div>` to begin with).
-- **Embedded slideshows actually cycle** — fixed a four-way duplicate-handler stack on the embed-hero play button that caused `scheduleNext` to be called four times in rapid succession, scheduling slide 2 ~31 seconds out instead of ~7. A single re-entry guard on `startSlideshow` blocks the duplicate calls; cross-origin iframe embeds now advance on the beat as intended.
-- **Lightroom title sync** — new `POST /api/lr-title` endpoint accepts authoritative title pushes from the lr-immich plugin during its metadata-only PATCH path. Title shows up in search + lightbox within a second, no JPEG re-render needed. Background JPEG-byte scanner skips entries marked `source: 'lr'` so it can't clobber a plugin-synced title.
-- **Slideshow Web Audio engine** — added a sample-accurate music clock with auto-tempo detection so beat-driven presets (Beat / Beat Fade) lock slide changes to the music. Four preset transitions (Classic Ken Burns, Quick slide-horizontal, Beat, Beat Fade), per-photo title + description overlays, optional title card with byline / location / date range / photo count, "Fade out at end" toggle. Safari quota leak fixed (offline audio contexts now close after analysis).
-- **Library Full Sweep button restored** — the "Last 7d · Full sweep →" toggle next to the upload-date sort works again; toggling to Full Sweep also refreshes the face-recognition People filter so newly-tagged faces from Immich appear without a manual filter-cache rebuild.
+- **Instant photo viewing on slow connections** — the library detail view, Prints detail, and public album viewers now paint a lightweight, screen-sized image immediately and stream the full-resolution original in behind it, instead of blocking on a multi-megabyte download. Opening or paging through photos no longer feels dead on cellular, and a slow metadata fetch can no longer blank or "fail" the photo.
+- **Fullscreen prev/next, no jump** — on mobile the fullscreen viewer leads with a connection-adaptive display variant (fills the screen right away, then sharpens) and prefetches the neighbouring photos, so prev/next is instant. A 350 ms nav guard means one tap advances exactly one photo (no more ghost-click skipping). Desktop keeps the plain high-res path.
+- **Public album grids ~20–30× lighter** — gallery thumbnails now load Immich's small thumbnail (~16 KB) instead of the ~600 KB preview, so a shared album opens fast on mobile data.
+- **Filtered-library sorting fixed** — applying a tile filter (e.g. a lens model) and then switching Upload date / Date taken no longer empties the grid; the filtered results sort client-side instead of falling back to a broken re-filter.
+- **Slideshow display variant** — slideshow images are server-resized via sharp at a connection-adaptive width (960 / 1280 / 1920 px), fixing black frames on poor wifi where the full original used to fail to decode. Originals still power the lightbox + pinch-zoom.
 
 ## What's new in v1.5
 
