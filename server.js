@@ -503,7 +503,7 @@ app.get('/api/immich/recent', requireAuth, async (req, res) => {
       const r = await fetch(`${IMMICH_URL}/search/metadata`, {
         method: 'POST',
         headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ size, page, order, visibility: 'timeline' })
+        body: JSON.stringify({ size, page, order, visibility: 'timeline', type: 'IMAGE' })
       });
       const data = await r.json();
       const items = (data.assets && data.assets.items) || [];
@@ -1003,7 +1003,7 @@ app.post('/api/immich/combined-search', requireAuth, async (req, res) => {
     for (const cam of cameraList) {
       for (const lens of lensList) {
         for (const city of cityList) {
-          const body = { size, page };
+          const body = { size, page, type: 'IMAGE' };
           if (cam) body.model = cam;
           if (lens) body.lensModel = lens;
           if (city) body.city = city;

@@ -885,7 +885,9 @@ async function showRecentDetail(assetId) {
 }
 
 async function renderRecentDetail(assetId, navGen) {
-  const myGen = navGen != null ? navGen : _navGen;
+  // Bump the nav generation on a fresh open (no navGen passed) so any in-flight
+  // render from a prior photo is invalidated — matches showDetail (prints).
+  const myGen = navGen != null ? navGen : ++_navGen;
   const content = document.getElementById('recent-detail-content');
 
   // Nav position needs no metadata — compute it up front so the image can paint
@@ -927,7 +929,14 @@ async function renderRecentDetail(assetId, navGen) {
           <div data-action="navNext" style="position:absolute;right:0;top:0;width:25%;height:100%;cursor:pointer;z-index:10"></div>
         </div>
       </div>
-      <div class="detail-right"><div class="loading" style="padding:1.5rem;font-size:12px">Loading details…</div></div>
+      <div class="detail-right">
+        <div style="padding:0.5rem 1rem;display:flex;gap:0.4rem;align-items:center;border-bottom:1px solid var(--border)">
+          ${hasPrev ? `<button class="nav-arrow" data-action="navPrev">‹</button>` : `<div style="width:28px"></div>`}
+          ${hasNext ? `<button class="nav-arrow" data-action="navNext">›</button>` : ''}
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--text-dim)">${idx+1} / ${total}</div>
+        </div>
+        <div class="loading" style="padding:1.5rem;font-size:12px">Loading details…</div>
+      </div>
     </div>`;
   _attachDetailImgHandlers();
 
@@ -1383,19 +1392,25 @@ function _fsLoadProgressive(originalUrl, navGen) {
   const id = m[1];
   const current = () => myGen === _navGen && img &&
     document.getElementById('fullscreen-overlay').classList.contains('active');
+  // Type-agnostic fallback: the mobile first-paint uses the sharp-based display
+  // endpoint, which 502s on video / RAW / TIFF originals. Immich's own thumb
+  // renders a frame for any asset type, so fall back to it if the first paint
+  // errors. (onerror as a JS property — CSP allows property assigns.)
+  img.onerror = () => { img.onerror = null; if (current()) img.src = '/api/immich/thumb/' + id + '?size=preview'; };
   const loadOriginal = () => {
     const orig = new Image();
-    const swap = () => { if (current()) img.src = originalUrl; };
-    orig.onload = swap; orig.onerror = swap;
+    // Only swap once the original actually decodes as an image — a video/RAW
+    // original must not replace a good first paint with a broken <img>. Defer
+    // neighbour prefetch until it lands so the prefetch doesn't compete with
+    // the current photo's load on weak 5G.
+    orig.onload = () => { if (current()) { img.onerror = null; img.src = originalUrl; if (_isMobileUA()) _fsPreloadNeighbors(); } };
     orig.src = originalUrl;
   };
   if (_isMobileUA()) {
     // Mobile/cellular: lead with the adaptive display variant — light
     // (~200-300 KB) AND ≥ the device width, so it paints full-screen fast for
-    // quick nav feedback without the small-then-grow "jump". Preload neighbors
-    // so the next tap is instant.
+    // quick nav feedback without the small-then-grow "jump".
     img.src = _dispUrl(id);
-    _fsPreloadNeighbors();
   } else {
     // Desktop: fast connection — plain ~1440px preview then original (the
     // display variant can be narrower than a big monitor → visible grow).
@@ -3429,7 +3444,14 @@ async function showDetail(printId, navGen) {
           <div data-action="printNavNext" style="position:absolute;right:0;top:0;width:25%;height:100%;cursor:pointer;z-index:10;touch-action:manipulation"></div>
         </div>
       </div>
-      <div class="detail-right"><div class="loading" style="padding:1.5rem;font-size:12px">Loading details…</div></div>
+      <div class="detail-right">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:0.5rem 1rem;border-bottom:1px solid var(--border)">
+          ${printIdx > 0 ? `<button class="nav-arrow" data-action="printNavPrev">&#8249;</button>` : `<div style="width:36px"></div>`}
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--text-dim)">${printIdx + 1} / ${displayedPrints.length}</div>
+          ${printIdx < displayedPrints.length - 1 ? `<button class="nav-arrow" data-action="printNavNext">&#8250;</button>` : `<div style="width:36px"></div>`}
+        </div>
+        <div class="loading" style="padding:1.5rem;font-size:12px">Loading details…</div>
+      </div>
     </div>`;
   _attachDetailImgHandlers();
 

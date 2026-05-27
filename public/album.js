@@ -1186,19 +1186,24 @@ function _albFsLoadProgressive(id){
   // clobber the image after the user has navigated on.
   const current = () => !!album && album.assets[albFs.idx] === id &&
     document.getElementById('album-fs-overlay')?.classList.contains('active');
+  // Type-agnostic fallback: the mobile first-paint is the sharp-based display
+  // endpoint, which 502s on non-raster originals. Immich's thumb renders any
+  // type, so fall back to it on error.
+  img.onerror = () => { img.onerror = null; if (current() && img) img.src = '/api/public/thumb/' + id; };
   const loadOriginal = () => {
     const orig = new Image();
-    const swap = () => { if (current() && img) img.src = originalUrl; };
-    orig.onload = swap; orig.onerror = swap;
+    // Only swap once the original decodes as an image — a broken original must
+    // not clobber a good first paint. Defer neighbour prefetch until it lands
+    // so it doesn't compete with the current photo on weak 5G.
+    orig.onload = () => { if (current() && img) { img.onerror = null; img.src = originalUrl; if (_albIsMobile()) _albFsPreloadNeighbors(); } };
     orig.src = originalUrl;
   };
   if (_albIsMobile()) {
     // Mobile/cellular: lead with the adaptive display variant. It's light
     // (~200-300 KB) AND ≥ the device width, so it paints full-screen fast for
     // quick nav feedback without the small-then-grow "jump" a tiny thumbnail
-    // caused. Preload neighbors so the next tap is instant.
+    // caused.
     img.src = `/api/public/display/${id}-${ssDisplayWidth}.jpg`;
-    _albFsPreloadNeighbors();
   } else {
     // Desktop: fast connection — plain ~1440px preview then original (the
     // display variant can be narrower than a big monitor → visible grow).

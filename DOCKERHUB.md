@@ -17,9 +17,9 @@ header, optional slideshow, and pinch-zoom on every photo. No login required for
 
 **Source:** https://github.com/jaapjan14/darkroom-log
 
-## What's new in v1.5.60
+## What's new in v1.5.60–61
 
-A focused pass on **mobile / cellular performance** — browsing the library and public album galleries on a phone (5G) is now fast and smooth, with no dead taps or skipped photos.
+A focused pass on **mobile / cellular performance** — browsing the library and public album galleries on a phone (5G) is now fast and smooth, with no dead taps or skipped photos. (v1.5.61 adds post-release hardening: a type-agnostic fallback so the fullscreen viewer never breaks on video/RAW originals, library queries filtered to images, and a few nav-feedback refinements.)
 
 - **Instant photo viewing on slow connections** — the library detail view, Prints detail, and public album viewers now paint a lightweight, screen-sized image immediately and stream the full-resolution original in behind it, instead of blocking on a multi-megabyte download. Opening or paging through photos no longer feels dead on cellular, and a slow metadata fetch can no longer blank or "fail" the photo.
 - **Fullscreen prev/next, no jump** — on mobile the fullscreen viewer leads with a connection-adaptive display variant (fills the screen right away, then sharpens) and prefetches the neighbouring photos, so prev/next is instant. A 350 ms nav guard means one tap advances exactly one photo (no more ghost-click skipping). Desktop keeps the plain high-res path.

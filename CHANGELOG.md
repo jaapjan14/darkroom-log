@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.5.61 (2026-05-26)
+
+### Post-release audit fixes (5 items)
+A focused audit of the v1.5.55–60 cellular/perf work turned up one robustness gap and several minor items; all fixed here.
+
+1. **Fullscreen viewer: type-agnostic error fallback** (`_fsLoadProgressive` / `_albFsLoadProgressive`). The mobile first-paint uses the sharp-based `/api/public/display` endpoint, which 502s on non-raster originals (video / RAW / TIFF). Added an `img.onerror` fallback to Immich's own thumbnail (renders a frame for any asset type). Also hardened the original-swap: it now swaps **only on `onload`** (a broken original can no longer clobber a good first paint — previously `onerror` also swapped, which would render a video/RAW original into the `<img>`).
+2. **Library queries filtered to `type:'IMAGE'`** (`server.js`): the date-taken sort and combined-search `search/metadata` bodies now exclude videos, so they can't leak into the grid/sort in the first place. (The upload sweep already filtered.)
+3. **Detail-view nav arrows during load**: `renderRecentDetail` and `showDetail` now render the prev/next arrows + counter in **phase 1** (they need no metadata), so the visible arrows are present immediately instead of appearing only after the metadata fetch resolves.
+4. **Neighbour prefetch deferred**: `_fsPreloadNeighbors` / `_albFsPreloadNeighbors` now fire **after the current original lands** (in its `onload`) instead of immediately, so the prefetch can't compete with the current photo's load on weak 5G.
+5. **Nav-gen consistency**: `renderRecentDetail` now defaults `myGen` to `++_navGen` on a fresh open (matching `showDetail`), so an in-flight render from a prior photo is properly invalidated.
+- Cache-bust app.js v=247 → v=248, album.js v=60 → v=61; SHELL_CACHE v115 → v116; package.json → 1.5.61.
+
 ## v1.5.60 (2026-05-26)
 
 ### Fullscreen instant-feedback now mobile-only + no "size jump"
