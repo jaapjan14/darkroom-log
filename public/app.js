@@ -806,6 +806,62 @@ function clearRecentSearch() {
   applyRecentFilters();
 }
 
+// --- Thumbnail URL builder + manual refresh ------------------------------
+// Darkroom proxies Immich's thumbnails verbatim, so it inherits whatever
+// Immich generated — and stale ones linger behind the 24h browser cache and
+// the SW's stale-while-revalidate (darkroom-thumbs-v1). We version the URL to
+// beat that:
+//   • `v`  = the asset's Immich updatedAt → a republish/replace auto-busts it.
+//   • `_r` = a session epoch set by the "⟳ Thumbnails" button → forces a full
+//            refetch across every view (covers prints/albums that have no `v`).
+let _thumbEpoch = '';
+function thumbSrc(id, opts = {}) {
+  const p = new URLSearchParams();
+  if (opts.size) p.set('size', opts.size);
+  if (opts.ver) p.set('v', String(opts.ver).replace(/[-:.TZ]/g, ''));
+  if (_thumbEpoch) p.set('_r', _thumbEpoch);
+  const qs = p.toString();
+  return '/api/immich/thumb/' + id + (qs ? '?' + qs : '');
+}
+async function refreshThumbnails(btn) {
+  const label = btn ? btn.textContent : null;
+  if (btn) { btn.disabled = true; btn.textContent = '⟳ …'; }
+  _thumbEpoch = String(Date.now());
+  let cleared = 0;
+  try {
+    // Drop the service-worker thumb cache so SWR refetches from the network.
+    if (window.caches) {
+      const names = (await caches.keys()).filter(n => /thumb/i.test(n));
+      for (const n of names) {
+        try { cleared += (await (await caches.open(n)).keys()).length; } catch (e) {}
+      }
+      await Promise.all(names.map(n => caches.delete(n)));
+    }
+  } catch (e) { /* non-fatal */ }
+  // Re-point every on-screen thumbnail at the busted URL (later renders pick up
+  // _thumbEpoch automatically via thumbSrc()). Briefly dim them so the refetch
+  // is visible even when the new bytes are identical to the old.
+  const imgs = document.querySelectorAll('img[src*="/api/immich/thumb/"]');
+  imgs.forEach(img => {
+    try {
+      const u = new URL(img.getAttribute('src'), location.origin);
+      u.searchParams.set('_r', _thumbEpoch);
+      img.style.transition = 'opacity 0.15s';
+      img.style.opacity = '0.35';
+      img.addEventListener('load', () => { img.style.opacity = '1'; }, { once: true });
+      img.src = u.pathname + u.search;
+    } catch (e) {}
+  });
+  console.log(`[darkroom] thumbnail refresh: re-fetched ${imgs.length} on-screen, cleared ${cleared} SW-cached`);
+  // Transient confirmation so it's obvious the click did something — even when
+  // there were no wonky thumbnails to visibly change.
+  if (btn) {
+    btn.disabled = false;
+    btn.textContent = imgs.length ? `✓ ${imgs.length} refreshed` : '✓ cache cleared';
+    setTimeout(() => { btn.textContent = label; }, 1800);
+  }
+}
+
 function renderRecentGrid(items) {
   state.displayedItems = items; // track what's currently shown for navigation
   const grid = document.getElementById('recent-grid');
@@ -814,7 +870,7 @@ function renderRecentGrid(items) {
     <div class="gallery-item ${state.selectMode ? 'selectable' : ''} ${state.selectedAssets && state.selectedAssets.has(a.id) ? 'selected' : ''}"
          id="sel-${a.id}"
          data-action="recentItemClick" data-id="${a.id}">
-      <img src="/api/immich/thumb/${a.id}" alt="${a.originalFileName}" loading="lazy" decoding="async" fetchpriority="low" width="300" height="300" onerror="this.style.background='#1a1a1a'">
+      <img src="${thumbSrc(a.id, {ver:a.updatedAt})}" alt="${a.originalFileName}" loading="lazy" decoding="async" fetchpriority="low" width="300" height="300" onerror="this.style.background='#1a1a1a'">
       ${state.selectMode ? `<div class="select-check ${state.selectedAssets && state.selectedAssets.has(a.id) ? 'checked' : ''}">✓</div>` : ''}
     </div>
   `;
@@ -920,8 +976,8 @@ async function renderRecentDetail(assetId, navGen) {
       <div class="detail-left">
         <div style="position:relative;width:100%;height:100%;display:flex;align-items:flex-start;justify-content:center">
           <img class="detail-image"
-               src="/api/immich/thumb/${assetId}?size=${_isMobileUA() ? 'thumbnail' : 'preview'}"
-               ${_isMobileUA() ? `data-next="/api/immich/thumb/${assetId}?size=preview"` : ''}
+               src="${thumbSrc(assetId, {size:_isMobileUA() ? 'thumbnail' : 'preview'})}"
+               ${_isMobileUA() ? `data-next="${thumbSrc(assetId, {size:'preview'})}"` : ''}
                alt=""
                data-action="openFullscreen" data-url="/api/immich/original/${assetId}"
                style="cursor:zoom-in;background:#1a1a1a;min-height:200px">
@@ -1396,7 +1452,7 @@ function _fsLoadProgressive(originalUrl, navGen) {
   // endpoint, which 502s on video / RAW / TIFF originals. Immich's own thumb
   // renders a frame for any asset type, so fall back to it if the first paint
   // errors. (onerror as a JS property — CSP allows property assigns.)
-  img.onerror = () => { img.onerror = null; if (current()) img.src = '/api/immich/thumb/' + id + '?size=preview'; };
+  img.onerror = () => { img.onerror = null; if (current()) img.src = thumbSrc(id, {size:'preview'}); };
   const loadOriginal = () => {
     const orig = new Image();
     // Only swap once the original actually decodes as an image — a video/RAW
@@ -1414,7 +1470,7 @@ function _fsLoadProgressive(originalUrl, navGen) {
   } else {
     // Desktop: fast connection — plain ~1440px preview then original (the
     // display variant can be narrower than a big monitor → visible grow).
-    img.src = '/api/immich/thumb/' + id + '?size=preview';
+    img.src = thumbSrc(id, {size:'preview'});
   }
   loadOriginal();
 }
@@ -1589,7 +1645,7 @@ function renderAlbumsGrid() {
   }
   grid.innerHTML = state.albums.map(a => `
     <div class="album-item" data-action="openAlbum" data-id="${a.id}">
-      ${a.assets.length ? `<img src="/api/immich/thumb/${a.assets[0]}" loading="lazy" onerror="this.style.background='#1a1a1a'">` : '<div class="album-item-empty" style="width:100%;height:100%"></div>'}
+      ${a.assets.length ? `<img src="${thumbSrc(a.assets[0])}" loading="lazy" onerror="this.style.background='#1a1a1a'">` : '<div class="album-item-empty" style="width:100%;height:100%"></div>'}
       <div class="album-item-info">
         <div class="album-item-title">${a.title}</div>
         <div class="album-item-count">${a.assets.length} photo${a.assets.length !== 1 ? 's' : ''}</div>
@@ -1662,7 +1718,7 @@ function renderAlbumDetail() {
          draggable="${editMode}"
          data-drag-idx="${idx}"
          data-action="albumPhotoClick" data-id="${assetId}" data-idx="${idx}">
-      <img src="/api/immich/thumb/${assetId}" loading="lazy" onerror="this.style.background='#1a1a1a'" style="cursor:pointer">
+      <img src="${thumbSrc(assetId)}" loading="lazy" onerror="this.style.background='#1a1a1a'" style="cursor:pointer">
       ${editMode ? `<button class="album-photo-remove" data-action="removeFromAlbum" data-id="${assetId}">×</button>` : ''}
       ${inSelectMode ? `<div class="select-check${selected.has(assetId) ? ' active' : ''}"></div>` : ''}
       ${!editMode && !inSelectMode ? `<button class="btn btn-ghost btn-sm" style="position:absolute;bottom:0.4rem;right:0.4rem;opacity:0;transition:opacity 0.2s;font-size:10px" data-action="openAlbumSlideshow" data-idx="${idx}">▶</button>` : ''}
@@ -2128,9 +2184,12 @@ async function openAlbumSlideshow(startIdx) {
   await showTitleCard(album);
   // beatIdx tracks the last-scheduled beat index for tempo presets; null
   // means "re-anchor on next scheduleNext call". beatPtnIdx cycles through
-  // the beat-step pattern (e.g. [8,4,8,4,...]).
+  // the beat-step pattern (e.g. [8,4,8,4,...]). ssUrlPin is cleared so a new
+  // run re-picks the display width before pinning per-slide URLs.
   state.slideshow.beatIdx = null;
   state.slideshow.beatPtnIdx = null;
+  ssUrlPin = {};
+  _stopPaceBadge();
   showSlide(startIdx);
   // showSlide's image-load callback calls scheduleNext — single source of
   // truth, prevents the historical double-scheduling bug
@@ -2162,6 +2221,7 @@ function openSlideshowSettings() {
   ssSetToggle('ss-show-photo-description',
     settings.showPhotoDescription === true);
   ssSetToggle('ss-fade-out-end', settings.fadeOutAtEnd === true);
+  ssSetToggle('ss-show-pace', settings.showPaceReadout === true);
   const presetEl = document.getElementById('ss-preset');
   if (presetEl) presetEl.value = settings.preset || 'classic';
   // Custom pace slider: BPM (40-120), default 60. Slide duration = 8 beats.
@@ -2297,6 +2357,7 @@ async function saveSlideshowSettingsAndStart() {
     paceBpmOverride: Number(document.getElementById('ss-beat-bpm-override')?.value) || 0,
     paceBpmOverrideEnabled: ssToggleVal('ss-beat-override-enabled'),
     fadeOutAtEnd: ssToggleVal('ss-fade-out-end'),
+    showPaceReadout: ssToggleVal('ss-show-pace'),
     musicFile: document.getElementById('ss-music-select').value || null,
   };
   album.slideshowSettings = settings;
@@ -2458,6 +2519,20 @@ function _measureAndAdapt(ms) {
 function _dispUrl(id) {
   return '/api/public/display/' + id + '-' + ssDisplayWidth + '.jpg';
 }
+// Per-run pin of each slide's display URL (idx → url). The width ladder
+// (ssDisplayWidth) can move mid-show; without pinning, look-ahead preloads
+// land in the browser cache under one width while the render then requests
+// another — a guaranteed cache miss that re-runs the sharp pipeline server-
+// side and makes the photo arrive seconds late (the uneven-pace bug).
+// First reference wins: whoever touches a slide first (preload or render)
+// fixes its URL for the run. Cleared in startSlideshow.
+let ssUrlPin = {};
+function _ssUrlFor(idx) {
+  const album = state.currentAlbum;
+  if (!album || !album.assets || !album.assets[idx]) return '';
+  if (ssUrlPin[idx] == null) ssUrlPin[idx] = _dispUrl(album.assets[idx]);
+  return ssUrlPin[idx];
+}
 // Attach load/error handlers for a slide image with graceful fallback to the
 // Immich thumb URL on failure. If thumb also fails, show() runs anyway — the
 // slot's bg-image is the last-resort visual fallback.
@@ -2487,7 +2562,7 @@ function _preloadAhead(idx) {
     const id = album.assets[k];
     if (!id) continue;
     const pre = new Image();
-    pre.src = _dispUrl(id);
+    pre.src = _ssUrlFor(k);
   }
 }
 
@@ -2538,9 +2613,46 @@ function _currentSlideHoldMs() {
 // so 8/4/2-beat slides each get appropriate fade-in/out windows. Titles
 // are skipped entirely on slides shorter than ~1.5s (can't surface before
 // the next slide arrives).
+// Pace readout badge (Slideshow Settings → Custom pane → "Show pace
+// readout"). IN-APP ONLY — album.js never reads showPaceReadout, so the
+// public album page is untouched. Live-ticking elapsed counter for the
+// current slide (0.0 → target), plus the measured duration of the previous
+// slide. Driven by its own 100ms display interval — reads the clock and
+// writes textContent only, never touches slideshow timers or animation.
+let _paceBadgeLastTs = null;
+let _paceBadgeLastDelta = null;
+let _paceBadgeTicker = null;
+function _stopPaceBadge() {
+  if (_paceBadgeTicker) { clearInterval(_paceBadgeTicker); _paceBadgeTicker = null; }
+  _paceBadgeLastTs = null;
+  _paceBadgeLastDelta = null;
+  const el = document.getElementById('slideshow-pace-badge');
+  if (el) el.style.display = 'none';
+}
+function _updatePaceBadge() {
+  const el = document.getElementById('slideshow-pace-badge');
+  if (!el) return;
+  const settings = (state.currentAlbum && state.currentAlbum.slideshowSettings) || {};
+  if (settings.showPaceReadout !== true) { _stopPaceBadge(); return; }
+  const now = performance.now();
+  if (_paceBadgeLastTs != null) _paceBadgeLastDelta = now - _paceBadgeLastTs;
+  _paceBadgeLastTs = now;
+  const tgt = (_currentSlideHoldMs() / 1000).toFixed(1);
+  const render = () => {
+    const elapsed = (performance.now() - _paceBadgeLastTs) / 1000;
+    el.textContent = `${elapsed.toFixed(1)}s / ${tgt}s`
+      + (_paceBadgeLastDelta != null ? ` · last slide ${(_paceBadgeLastDelta / 1000).toFixed(2)}s` : '');
+  };
+  el.style.display = 'block';
+  render();
+  if (_paceBadgeTicker) clearInterval(_paceBadgeTicker);
+  _paceBadgeTicker = setInterval(render, 100);
+}
+
 function _renderPerPhotoOverlay(idx) {
   const album = state.currentAlbum;
   if (!album) return;
+  _updatePaceBadge();
   const ssSettings = album.slideshowSettings || {};
   const wantTitle = ssSettings.showPhotoTitle === true;
   const wantDesc  = ssSettings.showPhotoDescription === true;
@@ -2714,7 +2826,7 @@ function showSlide(idx, direction) {
   const nextSlot = ssActiveSlot === 'a' ? 'b' : 'a';
   const currentEl = document.getElementById('slideshow-slide-' + ssActiveSlot);
   const nextEl = document.getElementById('slideshow-slide-' + nextSlot);
-  const url = _dispUrl(album.assets[idx]);
+  const url = _ssUrlFor(idx);
   const thumbUrl = '/api/public/thumb/' + album.assets[idx];
 
   // Adaptive crossfade duration. The default CSS 1.5s opacity transition
@@ -2766,7 +2878,7 @@ function showSlide(idx, direction) {
   // Preload next image + look-ahead (N+2, N+3)
   const preloadIdx = (idx + 1) % album.assets.length;
   const pre = new Image();
-  pre.src = _dispUrl(album.assets[preloadIdx]);
+  pre.src = _ssUrlFor(preloadIdx);
   _preloadAhead(idx);
 }
 
@@ -2783,7 +2895,7 @@ function showSlideSlide(idx, direction) {
   _renderPerPhotoOverlay(idx);
 
   const assetId = album.assets[idx];
-  const url = _dispUrl(assetId);
+  const url = _ssUrlFor(idx);
   const thumbUrl = '/api/public/thumb/' + assetId;
   const nextSlot = ssActiveSlot === 'a' ? 'b' : 'a';
   const currentEl = document.getElementById('slideshow-slide-' + ssActiveSlot);
@@ -2829,7 +2941,7 @@ function showSlideSlide(idx, direction) {
   // Preload next image + look-ahead
   const preloadIdx = (idx + 1) % album.assets.length;
   const pre = new Image();
-  pre.src = _dispUrl(album.assets[preloadIdx]);
+  pre.src = _ssUrlFor(preloadIdx);
   _preloadAhead(idx);
 }
 
@@ -2846,7 +2958,7 @@ function showSlideBeatFade(idx) {
   _renderPerPhotoOverlay(idx);
 
   const assetId = album.assets[idx];
-  const url = _dispUrl(assetId);
+  const url = _ssUrlFor(idx);
   const thumbUrl = '/api/public/thumb/' + assetId;
   const nextSlot = ssActiveSlot === 'a' ? 'b' : 'a';
   const currentEl = document.getElementById('slideshow-slide-' + ssActiveSlot);
@@ -2895,7 +3007,7 @@ function showSlideBeatFade(idx) {
   // Preload next image + look-ahead
   const preloadIdx = (idx + 1) % album.assets.length;
   const pre = new Image();
-  pre.src = _dispUrl(album.assets[preloadIdx]);
+  pre.src = _ssUrlFor(preloadIdx);
   _preloadAhead(idx);
 }
 
@@ -2987,6 +3099,12 @@ function scheduleNext() {
   const dur = _slideDurationMs();
   let delay = dur;
   const settings = (state.currentAlbum && state.currentAlbum.slideshowSettings) || {};
+  // Custom preset note (v1.5.66): delay stays a plain `dur` counted from the
+  // slide's APPEARANCE (this runs from img.onload). v1.5.65 tried subtracting
+  // the incoming image's load latency to keep the change-grid even, but that
+  // SHORTENS a slide whenever the previous load was slow — worse than the
+  // original symptom. Even pacing is achieved instead by pinning preload
+  // URLs (_ssUrlFor) so renders hit the browser cache and latency ≈ 0.
   if ((settings.preset === 'beat' || settings.preset === 'beatfade')
       && window.DarkroomAudio
       && DarkroomAudio.isMusicPlaying()) {
@@ -3176,6 +3294,7 @@ function toggleSlideshow() {
 function closeSlideshow() {
   if (state.slideshow.timer) clearTimeout(state.slideshow.timer);
   cancelSlideCleanup();
+  _stopPaceBadge();
   state.slideshow = { active: false, index: 0, timer: null, paused: false, beatIdx: null, beatPtnIdx: null, slidesShown: 0 };
   document.getElementById('slideshow-overlay').classList.remove('active');
   const card = document.getElementById('ss-title-card');
@@ -3395,7 +3514,7 @@ function renderGallery(prints) {
   if (!prints.length) { grid.innerHTML = '<div class="gallery-empty">No prints yet.<br>Tap + Print to add one.</div>'; return; }
   grid.innerHTML = prints.map(p => `
     <div class="gallery-item" data-action="showDetail" data-id="${p.id}">
-      <img src="/api/immich/thumb/${p.immichId}" alt="${p.title}" loading="lazy" onerror="this.style.background='#1a1a1a'">
+      <img src="${thumbSrc(p.immichId)}" alt="${p.title}" loading="lazy" onerror="this.style.background='#1a1a1a'">
       <div class="gallery-item-info">
         <div class="gallery-item-title">${p.title}</div>
         <div class="gallery-item-count">${p.sessions?.length || 0} session${(p.sessions?.length || 0) !== 1 ? 's' : ''}</div>
@@ -3439,7 +3558,7 @@ async function showDetail(printId, navGen) {
     <div class="detail-layout">
       <div class="detail-left">
         <div style="position:relative;width:100%;height:100%;display:flex;align-items:flex-start;justify-content:center">
-          <img class="detail-image" src="/api/immich/thumb/${print.immichId}?size=${_isMobileUA() ? 'thumbnail' : 'preview'}" ${_isMobileUA() ? `data-next="/api/immich/thumb/${print.immichId}?size=preview"` : ''} alt="${print.title}" data-action="openFullscreen" data-url="/api/immich/original/${print.immichId}" style="cursor:zoom-in;touch-action:manipulation;background:#1a1a1a;min-height:200px">
+          <img class="detail-image" src="${thumbSrc(print.immichId, {size:_isMobileUA() ? 'thumbnail' : 'preview'})}" ${_isMobileUA() ? `data-next="${thumbSrc(print.immichId, {size:'preview'})}"` : ''} alt="${print.title}" data-action="openFullscreen" data-url="/api/immich/original/${print.immichId}" style="cursor:zoom-in;touch-action:manipulation;background:#1a1a1a;min-height:200px">
           <div data-action="printNavPrev" style="position:absolute;left:0;top:0;width:25%;height:100%;cursor:pointer;z-index:10;touch-action:manipulation"></div>
           <div data-action="printNavNext" style="position:absolute;right:0;top:0;width:25%;height:100%;cursor:pointer;z-index:10;touch-action:manipulation"></div>
         </div>
@@ -3893,7 +4012,7 @@ function renderImmichAlbumGrid() {
     return;
   }
   grid.innerHTML = '<div class="gallery-grid">' + state.immichAlbums.map(album => {
-    const thumb = album.albumThumbnailAssetId ? `/api/immich/thumb/${album.albumThumbnailAssetId}` : '';
+    const thumb = album.albumThumbnailAssetId ? thumbSrc(album.albumThumbnailAssetId) : '';
     const count = album.assetCount || (album.assets || []).length;
     const name = (album.albumName || 'Untitled').replace(/"/g, '&quot;');
     return `<div class="gallery-item" data-action="openImmichAlbum" data-id="${album.id}" data-name="${name}" style="cursor:pointer;position:relative">
@@ -4180,7 +4299,7 @@ function renderImmichGallery(assets) {
   gallery.innerHTML = '<div class="gallery-grid">' + assets.map((a, idx) => `
     <div class="gallery-item ${state.immichSelectMode ? 'selectable' : ''} ${state.immichSelected.has(a.id) ? 'selected' : ''}"
          data-action="${action}" data-id="${a.id}" data-idx="${idx}">
-      <img src="/api/immich/thumb/${a.id}" loading="lazy" style="width:100%;height:100%;object-fit:cover">
+      <img src="${thumbSrc(a.id, {ver:a.updatedAt})}" loading="lazy" style="width:100%;height:100%;object-fit:cover">
       ${state.immichSelectMode ? `<div class="select-check${state.immichSelected.has(a.id) ? ' active' : ''}"></div>` : ''}
     </div>
   `).join('') + '</div>';
@@ -4307,7 +4426,7 @@ async function openImmichSettings() {
     const configured = new Set(configuredIds);
     list.innerHTML = (allAlbums || []).map(album => {
       const thumb = album.albumThumbnailAssetId
-        ? `<img src="/api/immich/thumb/${album.albumThumbnailAssetId}" style="width:40px;height:40px;object-fit:cover;border-radius:3px;flex-shrink:0">`
+        ? `<img src="${thumbSrc(album.albumThumbnailAssetId)}" style="width:40px;height:40px;object-fit:cover;border-radius:3px;flex-shrink:0">`
         : '<div style="width:40px;height:40px;background:var(--surface2);border-radius:3px;flex-shrink:0"></div>';
       return `<label style="display:flex;align-items:center;gap:0.75rem;padding:0.5rem 0;border-bottom:1px solid var(--border);cursor:pointer">
         <input type="checkbox" data-album-id="${album.id}" ${configured.has(album.id) ? 'checked' : ''} style="width:16px;height:16px;flex-shrink:0;accent-color:var(--safe)">
@@ -4380,6 +4499,7 @@ function wireListeners() {
 
   // Library
   w('recent-search', 'input', (e) => handleRecentSearch(e.target.value));
+  w('refresh-thumbs', 'click', (e) => refreshThumbnails(e.currentTarget));
   w('search-mode-text', 'click', () => setSearchMode('text'));
   w('search-mode-smart', 'click', () => setSearchMode('smart'));
   w('select-mode-btn', 'click', () => toggleSelectMode());
@@ -4441,6 +4561,7 @@ function wireListeners() {
   w('toggle-show-photo-title', 'click', () => ssToggle('ss-show-photo-title'));
   w('toggle-show-photo-description', 'click', () => ssToggle('ss-show-photo-description'));
   w('toggle-ss-fade-out-end', 'click', () => ssToggle('ss-fade-out-end'));
+  w('toggle-ss-show-pace', 'click', () => ssToggle('ss-show-pace'));
   w('btn-ss-start', 'click', () => saveSlideshowSettingsAndStart());
   // Live: show/hide the pace slider when preset toggles to/from Custom
   w('ss-preset', 'change', (e) => {

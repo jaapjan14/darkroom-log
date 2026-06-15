@@ -11,6 +11,7 @@ const musicStorage = multer.diskStorage({
 const uploadMusic = multer({ storage: musicStorage, limits: { fileSize: 50 * 1024 * 1024 } });
 const session = require('express-session');
 const bcrypt = require('bcryptjs');
+const compression = require('compression');
 const fetch = require('node-fetch');
 const fs = require('fs');
 const path = require('path');
@@ -69,6 +70,9 @@ async function fetchAssetTitle(assetId, updatedAt) {
 }
 
 const app = express();
+// gzip/brotli compression for all responses — added v1.5.62 (app.js + index.html
+// + sw.js + grid thumb JSON were shipping uncompressed).
+app.use(compression());
 const PORT = process.env.PORT || 3000;
 const PASSWORD_HASH = process.env.PASSWORD_HASH || bcrypt.hashSync(process.env.APP_PASSWORD || 'darkroom', 10);
 const IMMICH_URL = process.env.IMMICH_URL || 'http://192.168.0.199:2283/api';
@@ -447,7 +451,11 @@ function mapAssetWithMeta(a) {
     // would be way too expensive for a 500-item grid. Title is fetched
     // lazily in /api/immich/photo/:id (detail view) where the cost is fine.
     tags: Array.isArray(a.tags) ? a.tags.map(t => t.name).filter(Boolean) : [],
-    isArchived: a.isArchived || false
+    isArchived: a.isArchived || false,
+    // Forwarded so the client can version thumbnail URLs (?v=updatedAt) — a
+    // republish/replace bumps updatedAt, which auto-busts stale browser/SW
+    // thumbnail caches. See thumbSrc() in app.js.
+    updatedAt: a.updatedAt || ''
   };
 }
 
@@ -1377,33 +1385,86 @@ app.get('/api/public/original/:id', async (req, res) => {
 //
 // Quality/chroma tuned slightly looser than /embed (q88, 4:2:0) since slide
 // duration is too short for pixel-peeping and bytes-on-wire is the constraint.
+//
+// v1.5.70: in-memory LRU variant cache + in-flight dedupe. Without it, every
+// cache-missing client (new browser, CF edge miss, incognito) paid the full
+// original-fetch + sharp resize (~1.1s solo, ~3.5s when the slideshow's
+// look-ahead preloads run concurrently) PER IMAGE — first-pass slideshows
+// looked lumpy because each swap arrived late by a different amount. Now the
+// pipeline runs once per id+width per 24h; everyone else gets buffer replay.
+const _dispCache = new Map();      // key "id-width" -> { buf, ts } (Map = insertion-ordered, oldest first)
+const _dispInFlight = new Map();   // key -> Promise<Buffer> (dedupes concurrent generation)
+let _dispCacheBytes = 0;
+const DISP_CACHE_MAX_BYTES = 128 * 1024 * 1024;  // ~200 variants at 1920px
+const DISP_CACHE_TTL_MS = 24 * 60 * 60 * 1000;   // matches Cache-Control max-age
+
+function _dispCacheGet(key) {
+  const e = _dispCache.get(key);
+  if (!e) return null;
+  if (Date.now() - e.ts > DISP_CACHE_TTL_MS) {
+    _dispCache.delete(key);
+    _dispCacheBytes -= e.buf.length;
+    return null;
+  }
+  // LRU bump: re-insert so eviction walks true least-recently-used order
+  _dispCache.delete(key);
+  _dispCache.set(key, e);
+  return e.buf;
+}
+function _dispCachePut(key, buf) {
+  const old = _dispCache.get(key);
+  if (old) { _dispCacheBytes -= old.buf.length; _dispCache.delete(key); }
+  _dispCache.set(key, { buf, ts: Date.now() });
+  _dispCacheBytes += buf.length;
+  while (_dispCacheBytes > DISP_CACHE_MAX_BYTES && _dispCache.size > 1) {
+    const k = _dispCache.keys().next().value;
+    _dispCacheBytes -= _dispCache.get(k).buf.length;
+    _dispCache.delete(k);
+  }
+}
+
 app.get('/api/public/display/:filename', async (req, res) => {
   const m = req.params.filename.match(/^([0-9a-f-]{32,36})(?:-(\d{3,4}))?\.jpe?g$/i);
   if (!m) return res.status(400).send('bad filename');
   const id = m[1];
   let width = parseInt(m[2] || req.query.w, 10);
   if (!Number.isFinite(width) || width < 480 || width > 2400) width = 1920;
+  const key = `${id}-${width}`;
   try {
-    const r = await fetch(`${IMMICH_URL}/assets/${id}/original`, {
-      headers: { 'x-api-key': IMMICH_KEY }
-    });
-    if (!r.ok) return res.status(r.status).end();
-    const buf = Buffer.from(await r.arrayBuffer());
-    let pipeline = sharp(buf, { failOn: 'none' })
-      .resize({ width, withoutEnlargement: true, kernel: 'lanczos3' });
-    if (width <= 1200) {
-      pipeline = pipeline.sharpen({ sigma: 0.8, m1: 0, m2: 3 });
-    } else if (width <= 1600) {
-      pipeline = pipeline.sharpen({ sigma: 0.5, m1: 0, m2: 2 });
+    let out = _dispCacheGet(key);
+    const hit = !!out;
+    if (!out) {
+      let p = _dispInFlight.get(key);
+      if (!p) {
+        p = (async () => {
+          const r = await fetch(`${IMMICH_URL}/assets/${id}/original`, {
+            headers: { 'x-api-key': IMMICH_KEY }
+          });
+          if (!r.ok) { const err = new Error('immich ' + r.status); err.status = r.status; throw err; }
+          const buf = Buffer.from(await r.arrayBuffer());
+          let pipeline = sharp(buf, { failOn: 'none' })
+            .resize({ width, withoutEnlargement: true, kernel: 'lanczos3' });
+          if (width <= 1200) {
+            pipeline = pipeline.sharpen({ sigma: 0.8, m1: 0, m2: 3 });
+          } else if (width <= 1600) {
+            pipeline = pipeline.sharpen({ sigma: 0.5, m1: 0, m2: 2 });
+          }
+          return pipeline
+            .withMetadata({ icc: 'srgb' })
+            .jpeg({ quality: 88, mozjpeg: true, chromaSubsampling: '4:2:0' })
+            .toBuffer();
+        })();
+        _dispInFlight.set(key, p);
+        p.finally(() => _dispInFlight.delete(key)).catch(() => {});
+      }
+      out = await p;
+      if (!_dispCache.has(key)) _dispCachePut(key, out);
     }
-    const out = await pipeline
-      .withMetadata({ icc: 'srgb' })
-      .jpeg({ quality: 88, mozjpeg: true, chromaSubsampling: '4:2:0' })
-      .toBuffer();
     res.set('Content-Type', 'image/jpeg');
     res.set('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
+    res.set('X-Disp-Cache', hit ? 'hit' : 'miss');
     res.end(out);
-  } catch(e) { res.status(502).end(); }
+  } catch(e) { res.status(e.status || 502).end(); }
 });
 
 // PUBLIC photo metadata (no auth) - for public album description display

@@ -336,6 +336,7 @@
 
       <button class="sort-btn" id="lib-sort-dir"  style="margin-left:0.5rem">↓ Newest</button>
       <button class="sort-btn" id="lib-sort-mode" style="margin-left:0.25rem;display:none" title="Switch between fast last-7-days and full sweep">Last 7d · Full sweep →</button>
+      <button class="sort-btn" id="refresh-thumbs" style="margin-left:auto" title="Re-fetch thumbnails from Immich — use after re-uploading or replacing photos if thumbnails look wrong">⟳ Thumbnails</button>
     </div>
     <div style="max-width:1200px;margin:0 auto;padding:0.25rem 1rem;display:flex;gap:0.5rem;align-items:center;position:relative">
       <button class="sort-btn" id="filters-btn"  style="font-size:10px">⊞ Filters</button>
@@ -391,6 +392,7 @@
     <div id="slideshow-slide-a" class="slideshow-slide"></div>
     <div id="slideshow-slide-b" class="slideshow-slide"></div>
     <div class="slideshow-counter" id="slideshow-counter"></div>
+    <div id="slideshow-pace-badge" style="display:none;position:fixed;bottom:1rem;left:1rem;font-family:'IBM Plex Mono',monospace;font-size:11px;color:rgba(255,255,255,0.5);z-index:401;pointer-events:none"></div>
     <div id="slideshow-photo-title" style="display:none;opacity:0;position:fixed;bottom:6rem;left:50%;transform:translateX(-50%);font-family:'IBM Plex Mono',monospace;font-size:16px;letter-spacing:0.05em;color:rgba(255,255,255,0.92);text-align:center;max-width:80vw;padding:0 2rem;z-index:401;transition:opacity 2.5s ease-in-out;pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></div>
     <div id="slideshow-description" style="position:fixed;bottom:4rem;left:50%;transform:translateX(-50%);font-family:'IBM Plex Mono',monospace;font-size:12px;color:rgba(255,255,255,0.7);text-align:center;max-width:80vw;padding:0 2rem;z-index:401;transition:opacity 0.5s;pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></div>
     <div class="slideshow-controls">
@@ -534,6 +536,10 @@
           <input type="range" id="ss-pace" min="40" max="200" step="1" value="60" style="flex:1">
           <span id="ss-pace-label" style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text-dim);min-width:11em;text-align:right">60 BPM · 8.0s/slide</span>
           <span id="ss-pace-pulse" title="Pulses at the chosen tempo" style="display:inline-block;width:22px;height:22px;border-radius:50%;background:var(--safe);opacity:.28;transform:scale(.55);transition:opacity .12s ease-out, transform .12s ease-out;box-shadow:0 0 12px rgba(200,97,26,.75);flex-shrink:0"></span>
+        </div>
+        <div class="ss-toggle" id="toggle-ss-show-pace" style="margin-top:0.5rem">
+          <div class="ss-toggle-box" id="ss-show-pace"></div>
+          <span class="ss-toggle-label">Show pace readout during slideshow (this app only)</span>
         </div>
       </div>
       <div id="ss-beat-pace" style="display:none;margin-bottom:0.5rem;padding-left:0.25rem">
@@ -763,10 +769,16 @@
 
 <script src="/zoom.js?v=2" defer></script>
 <script src="/audio-engine.js?v=10" defer></script>
-<script src="/app.js?v=248" defer></script>
+<script src="/app.js?v=257" defer></script>
 <script>
+// Service worker - registers sw.js for thumb stale-while-revalidate + shell
+// cache. Was actively unregistered v1.3.0 -> v1.5.61; re-enabled v1.5.62.
+// The forceRefresh() button in app.js still unregisters explicitly when the
+// user asks to clear cache.
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.getRegistrations().then(regs => regs.forEach(r => r.unregister()));
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(err => console.warn('SW register failed', err));
+  });
 }
 </script>
   <!-- Share preparation modal (two-step UX for Safari gesture-context fix) -->

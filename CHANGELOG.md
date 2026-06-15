@@ -1,5 +1,118 @@
 # Changelog
 
+## v1.5.72 (2026-06-14)
+
+### "⟳ Thumbnails" button — visible feedback
+- Follow-up to v1.5.71: the button felt inert because (a) with no wonky thumbnails, a refresh re-fetches identical bytes so nothing visibly changes, and (b) feedback was a sub-perceptible `⟳ …` flash.
+- `refreshThumbnails()` now: briefly dims on-screen thumbs to 0.35 opacity and fades them back as they reload (so the refetch is visible even when bytes are identical), shows a transient button confirmation (`✓ N refreshed`, or `✓ cache cleared` if no thumbs on screen, reverting after 1.8s), and logs `[darkroom] thumbnail refresh: …` to the console with counts.
+- Cache-bust: app.js v=256 → v=257; SHELL_CACHE v125 → v126; package.json 1.5.71 → 1.5.72. Client-only change.
+
+## v1.5.71 (2026-06-14)
+
+### Thumbnail cache-busting + manual refresh (post-upload stale-thumb fix)
+- **Problem:** after a bulk upload / lr-immich PUT-replace, thumbnails looked "wonky" in Darkroom. Root cause is Immich-side: thumbnail generation is async, so right after an upload (especially the UUID-stable replace path) Immich briefly serves half-baked thumbnails. Darkroom proxies Immich's thumbnails verbatim (`/api/immich/thumb/:id`), so it inherits them — and they then *linger* because the bare thumb URL has no version token, so the 24h browser cache + the SW's stale-while-revalidate (`darkroom-thumbs-v1`) keep showing the stale image until they happen to revalidate.
+- **A — auto cache-bust (server.js + app.js):** `mapAssetWithMeta` now forwards `updatedAt`; new `thumbSrc(id, {size, ver})` helper appends `?v=<updatedAt>` to thumbnail URLs. An Immich republish/replace bumps `updatedAt` → the URL changes → browser + SW fetch the fresh thumb automatically. All ~11 thumb call sites routed through the helper. Asset grids (recent uploads + Immich browse) carry the `v` token; prints/albums (no client-side `updatedAt`) rely on B.
+- **B — manual "⟳ Thumbnails" button (index.html + app.js):** added to the library sort toolbar. Sets a session epoch (`_thumbEpoch`), deletes the SW thumb cache, and re-points on-screen thumbnails at a busted URL; later renders inherit the epoch via `thumbSrc()`. Covers prints/albums and any pure-Immich regen that didn't bump `updatedAt`.
+- Server change is backward-compatible: `/api/immich/thumb/:id` ignores the extra `v`/`_r` query params (they're purely cache keys).
+- Cache-bust: app.js v=255 → v=256; SHELL_CACHE v124 → v125; package.json 1.5.70 → 1.5.71. Container restarted to load new server.js.
+
+## v1.5.70 (2026-06-03)
+
+### Server-side LRU cache for slideshow display variants (server.js only)
+- `/api/public/display/:filename` previously re-fetched the full Immich original and re-ran the sharp pipeline on EVERY request not covered by browser/CF cache — ~1.1s solo, ~3.5s under the slideshow's concurrent look-ahead preloads. First-pass slideshows looked lumpy for every new viewer because each swap arrived late by a different amount; Jacob: "you shouldn't have to watch the slideshow multiple times for it to play correctly."
+- Added an in-memory byte-capped LRU (`_dispCache`, 128 MB ≈ ~200 × 1920px variants, 24h TTL matching `Cache-Control: max-age=86400`) keyed `id-width`, plus an in-flight promise map (`_dispInFlight`) so concurrent requests for the same variant share one generation instead of stacking sharp jobs.
+- New `X-Disp-Cache: hit|miss` response header for debugging. Sharp pipeline itself unchanged (same resize/sharpen/q88 output). TTL also bounds staleness after an Immich re-upload replaces an asset's original in place.
+- Verified post-restart: first request `miss` ~1.1s, repeat `hit` in ~10-30ms.
+- package.json 1.5.69 → 1.5.70. No client files touched — no cache busts needed. Container restarted to load the new server.js.
+
+## v1.5.69 (2026-06-03)
+
+### Pace readout now live-ticks
+- Feedback on v1.5.68: badge only updated once per slide change ("flashes 8s") — Jacob wanted a running counter. `_updatePaceBadge` now runs its own 100ms display interval: `<elapsed>s / <target>s · last slide <measured>s`, counting up from 0.0 on every slide change. `_stopPaceBadge()` clears the ticker on slideshow close, start-reset, and toggle-off. Still in-app only, still DOM-text only.
+- Cache-bust app.js v=254 → v=255; SHELL_CACHE v123 → v124; package.json 1.5.68 → 1.5.69.
+
+## v1.5.68 (2026-06-03)
+
+### Pace readout toggle (in-app slideshow only)
+- New "Show pace readout during slideshow (this app only)" toggle in Slideshow Settings, inside the Custom-pace pane (`#ss-custom-pace`, so it appears when the Custom preset is selected). Saved per-album as `slideshowSettings.showPaceReadout` like every other toggle.
+- When on, the in-app slideshow shows a small IBM Plex Mono badge bottom-left (`#slideshow-pace-badge`): `Δ <measured>s · tgt <target>s`, updated once per slide change from `_updatePaceBadge()` (called at the top of `_renderPerPhotoOverlay`, the chokepoint all three preset render paths share). Δ = time between successive slide-change initiations; tgt = `_currentSlideHoldMs()`. First slide shows `tgt` only.
+- **Public album page untouched by design** — album.js never reads `showPaceReadout`, so the key is inert there even though it's saved in the album's settings. Jacob can verify his pace in-app, then untick.
+- DOM/text additions only — no timing, animation, or scheduling code involved.
+- Cache-bust app.js v=253 → v=254; SHELL_CACHE v122 → v123; package.json 1.5.67 → 1.5.68. album.js/album.html unchanged.
+
+## v1.5.67 (2026-06-03)
+
+### THE actual uneven-pace bug (public album page): stale onload re-fires show() mid-slide
+- Found via headless Playwright instrumentation (setTimeout shim) against `/album/westin-cylinders` (custom @ 74 BPM = 6486 ms): with all images browser-cached, slides still advanced every **9990 ms ≈ 3500 + 6486** — i.e. the schedule itself was being restarted 3.5 s into every slide. Long-standing; predates v1.5.65/66.
+- **Mechanism:** album.js recycles the two slot `<img>` elements. `_attachSlideImgHandlers` set `img.onload=show` and never cleared it. `showKBSlide`'s cleanup timer (crossfade×2+500 = 3500 ms) calls `prepareSlot(hiddenSlot, N+1)` to preload the next image **into that same recycled element** — when that preload landed, the PREVIOUS slide's `show()` re-fired: the hidden slot (already holding photo N+1) faded in over the live slide, ken-burns restarted, and `scheduleNext()` cleared + restarted the pace timer. Visually: photo appears → ~3.5 s later the next photo bleeds in → real timer change after that — "cycles at different rates" / "image only lasts a couple seconds". Cascades because the re-fired show() runs its own cleanup timer → another stale preload → another re-fire.
+- **Fix (loading path only, no animation code):** `_attachSlideImgHandlers` handlers are now one-shot (`fire()` nulls `img.onload`/`img.onerror` before calling `show()`); `prepareSlot` defensively nulls both before kicking off a preload. Plus a stall guard: if a preload already failed before handlers attach (`complete && naturalWidth===0`, previously "rescued" by the very stale-handler bug being removed), re-point at the thumb fallback immediately.
+- app.js is immune (rebuilds slide `<img>` via innerHTML each render) — unchanged this round (stays v=253).
+- Cache-bust album.js v=63 → v=64; SHELL_CACHE v121 → v122; package.json 1.5.66 → 1.5.67.
+
+## v1.5.66 (2026-06-03)
+
+### Custom pace round 2 — v1.5.65's anchor made slides SHORTER; replaced with preload-URL pinning
+- **Field report after v1.5.65:** "first image looks good... next image appears and then only lasts a couple seconds." Confirmed regression in the v1.5.65 approach: the wall-clock anchor kept *slide-change initiations* evenly spaced, but the user perceives *visible time* = pace + L(next) − L(this). When photo N loads slowly (large L), the anchor subtracts that lateness from photo N's own hold → a photo can now show for LESS than the configured pace. The old behavior only ever lengthened slides; shortening is worse. **Anchor logic removed** from both `scheduleNext()`s (`paceAnchor`/`ssPaceAnchor` gone); Custom is back to a plain `dur` countdown from the slide's appearance.
+- **Actual root cause of the load-latency variance attacked instead — preload-URL pinning.** `/api/public/display/` has no server-side variant cache: every miss = full original fetched from Immich + sharp resize, i.e. seconds. The slideshow does preload N+1/N+2/N+3, but URLs are built from the live `ssDisplayWidth`, and the adaptive ladder (1920→1280→960 after slow loads) moves mid-show — so preloads cached at one width while renders requested another: guaranteed misses, cascading. Re-runs stayed uneven because each run leaves a patchwork of widths in cache.
+- **Fix:** new `ssUrlPin` map (idx → url) + `_ssUrlFor(idx)` in both files — first reference (preload or render) pins a slide's display URL for the whole run; renders therefore always hit the browser cache from their own preload, load latency ≈ 0, visible time ≈ configured pace. Pin cleared at slideshow start (app.js `startSlideshow`, album.js `openSlideshow`/`openSlideshowPaused`) so each run re-picks the width. Converted call sites: app.js `showSlide`/`showSlideSlide`/`showSlideBeatFade` renders + N+1 preloads + `_preloadAhead`; album.js `prepareSlot` + `_preloadAhead`. The fullscreen viewer's `_dispUrl`/`ssDisplayWidth` uses (non-slideshow) are untouched, as is `_measureAndAdapt` itself.
+- **Kept from v1.5.65:** album.js `custom` branches in `_slideDurationMs()`/`_currentSlideHoldMs()` (public page no longer ignores paceBpm) — that fix was real.
+- **Not touched:** ken-burns/fade/transition code, Beat/Beat Fade/Quick/Classic scheduling.
+- *Deferred idea:* small in-memory LRU variant cache in server.js so cold first passes stop costing seconds per image for every client (would also help CF-miss WAN viewers).
+- Cache-bust app.js v=252 → v=253, album.js v=62 → v=63; SHELL_CACHE v120 → v121; package.json 1.5.65 → 1.5.66.
+
+## v1.5.65 (2026-06-03)
+
+### Custom preset: uneven slide pacing fixed (app.js + album.js)
+- **Symptom:** Custom (Ken Burns + Fade, choose-your-own-pace) cycled photos at visibly different rates even though the preset computes a constant `8 beats × 60000/BPM` duration (e.g. 74 BPM = 6.5 s/slide).
+- **Root cause 1 (both files):** `scheduleNext()` is only invoked from the incoming image's `onload` callback (`show()`), so each photo's real hold = configured pace **+ the next photo's load/decode latency**. That latency varies per photo — CF edge cache misses on the display variant, cold sharp resizes, the adaptive-width ladder invalidating look-ahead preloads, error→thumb fallback. The Beat preset never had this problem because its scheduler anchors to music time with catch-up logic; Custom inherited Classic's drifting timer instead.
+- **Fix:** new wall-clock anchor (`state.slideshow.paceAnchor` in app.js, `ssPaceAnchor` in album.js), stamped at advance-initiation time in `slideshowNext`/`slideshowPrev` (`ssNext`/`ssPrev`). The Custom branch in `scheduleNext()` computes `delay = anchor + dur − now`, subtracting the image-load latency so slide changes stay on an even grid. If a pathologically slow load eats the whole hold (`remaining < 1000 ms`), the photo gets a full `dur` instead of flashing — the grid re-anchors on the next advance. Anchor is reset to null at slideshow start, pause→resume, and slideshow open (album.js), matching the existing `beatIdx` reset points.
+- **Root cause 2 (album.js only):** `_slideDurationMs()` and `_currentSlideHoldMs()` had **no `custom` branch at all** — on the public album page the Custom preset fell through to the 7 s (or 12 s with titles) Classic default and `paceBpm` was silently ignored. Added the same 4-line branch app.js already had (8 × 60000/BPM, clamped 40–200, 8 s fallback), which also fixes the per-photo title/description overlay fade windows for Custom.
+- **Not touched:** ken-burns animation, crossfade timing, transitions, Beat/Beat Fade/Quick/Classic scheduling — scheduler-only change per the frozen-animation rule.
+- Cache-bust app.js v=251 → v=252, album.js v=61 → v=62; SHELL_CACHE v119 → v120; package.json 1.5.64 → 1.5.65.
+
+## v1.5.64 (2026-06-01)
+
+### Revert v1.5.63 client progressive on desktop
+- v1.5.63 dropped the `_isMobileUA()` gate so desktop also did `?size=thumbnail` → `?size=preview` upgrade, intending to mask Immich's 3-7 s cold-preview generation behind an instant tiny-thumb first paint. In practice, on a desktop monitor sitting next to the NAS this produced a visible **thumbnail-stretched → preview-pop** swap on every click — `scheduleDetailUpgrade`'s 400 ms hold timer made the gap noticeable even when the preview was warm (~50 ms). Worse UX than the pre-audit direct-to-preview path, which only stalled when an asset's preview was genuinely cold.
+- Restored the `_isMobileUA() ? 'thumbnail' : 'preview'` gate in `renderRecentDetail` (`app.js:923-924`) and `showDetail` (`app.js:3442`). Desktop is back to direct preview. The real fix is making sure all previews are warm — pre-warm completed in 7.5 min (3330 assets, 67 cold-generated, 3263 already warm, 0 errors) so direct-to-preview is now instant across the library.
+- Cache-bust app.js v=250 → v=251; SHELL_CACHE v118 → v119; package.json 1.5.63 → 1.5.64.
+
+### What stays from v1.5.63
+- `prewarm-preview.js` (in container at `/app/prewarm-preview.js`, host at `/share/ProgramData-vol5/Containers/darkroom/prewarm-preview.js`) — kept for re-runs after future Immich re-imports. Initial pass finished 2026-06-01 18:07 PT: 3330 assets, 67 cold-generated (~3-7 s each), 3263 already warm, 0 errors, 7.5 min total.
+- Mobile progressive pattern unchanged (it was always wanted there — the small thumbnail at full screen looks worse than a moment's thumb-stretch).
+
+## v1.5.63 (2026-06-01)
+
+### Detail-view "black screen for 1-2 sec" on first click — Immich cold preview thumb
+- **Root cause:** Immich generates `?size=thumbnail` (~25 KB WebP, used by the grid) eagerly at upload, but generates `?size=preview` (~600 KB JPEG, used by the detail view) **lazily on first request**. Cold preview = 3-7 seconds for sharp to read the original, resize, and disk-cache it. Once warm, <100 ms forever. The library grid was fine; clicking into the detail view stalled on a black `<img>` (`background:#1a1a1a`) until Immich produced the preview.
+- Verified from inside the container: cold `?size=preview` 2.9-6.7s TTFB; cold `?size=thumbnail` 22-65 ms. Same asset, hot preview = 9-23 ms.
+- Immich's `thumbnailGeneration` job (admin → jobs → "missing") only backfills the thumbnail-size hole, not the preview-size — so triggering it doesn't help.
+
+### Fix 1 — desktop detail view now uses the same progressive pattern mobile already had
+- `renderRecentDetail` (Library; `app.js:923`) and `showDetail` (Prints; `app.js:3442`) dropped the `_isMobileUA() ? ... : ...` gate. Both now do **`src="?size=thumbnail"` + `data-next="?size=preview"`** unconditionally. `scheduleDetailUpgrade` swaps to preview when it lands. First paint is instant from the eagerly-cached small WebP; preview swaps in behind it. Cold preview generation still takes 3-7 s, but the user sees something within 50 ms instead of staring at a black box.
+- Cache-bust app.js v=249 → v=250; SHELL_CACHE v117 → v118; package.json 1.5.62 → 1.5.63.
+
+### Fix 2 — one-time pre-warm of every asset's preview-size
+- New `prewarm-preview.js` script (lives at `/share/ProgramData-vol5/Containers/darkroom/prewarm-preview.js`, kept in the container path for re-runs). Walks every IMAGE asset via `/search/metadata` (visibility:'timeline', matching what Darkroom serves), then GETs `${IMMICH_URL}/assets/${id}/thumbnail?size=preview` for each at concurrency 2 with a 50 ms gap. Drains the body so Immich actually produces+caches the file. Logs `done / cold / warm / err` every 100 assets.
+- Run via `docker exec -d darkroom node /app/prewarm-preview.js` — runs detached, logs to `/app/prewarm-preview.log` (= `/share/ProgramData-vol5/Containers/darkroom/prewarm-preview.log` on host). Initial pass took 7.5 min for 3330 assets; re-run after future Immich re-imports / large LR publishes.
+
+### Notes
+- v1.5.61's `_isMobileUA()` gate was added on the assumption that desktop links are fast enough that the user wouldn't notice the cold-preview stall. With Z8 reimports + ongoing LR-Immich publishes adding new assets, the cold tail keeps refilling — so the progressive pattern is worth always-on. Mobile path is unchanged.
+
+## v1.5.62 (2026-06-01)
+
+### Two perf issues found in a sluggish-on-wifi audit
+
+**1. Express responses were shipping uncompressed.** `app.js` (215 KB), `album.js` (68 KB), `sw.js`, JSON API responses, etc. all served with no `content-encoding` header. nginx-proxy-manager was gzipping `text/html` only (its default gzip_types) and Express had no compression middleware. Verified with `curl -H "Accept-Encoding: gzip,br"`: same byte count as identity. On a flaky wifi link this is the single biggest contributor to perceived sluggishness; on the rare slideshow open it's 1.8 MB extra over the wire (essentia-wasm.umd.js 2.5 MB → ~700 KB).
+
+- Added `compression` npm dep (1.8.1) and `app.use(compression())` right after `const app = express();` in `server.js`. Covers every path — LAN/nginx-proxy-manager and the CF Tunnel ingress — since it lives in the app layer.
+- nginx-proxy-manager Advanced config also updated to gzip `application/javascript application/json application/wasm text/css` for belt-and-suspenders.
+
+**2. Service worker was actively unregistered on every page load.** `index.html` had `navigator.serviceWorker.getRegistrations().then(regs => regs.forEach(r => r.unregister()))` firing on every visit (since v1.3.0, Apr 16). Meanwhile `sw.js` is a fully-featured stale-while-revalidate cache for `/api/immich/thumb/*` + `/api/public/thumb/*` + shell assets, and nothing was ever calling `.register()`. Net effect: the library grid re-downloaded every thumbnail on every visit, the shell roundtripped on every navigation, and the `SHELL_CACHE` bumps v110 → v116 across v1.5.55–60 were dead code.
+
+- index.html: replaced the unregister block with `navigator.serviceWorker.register('/sw.js')` on `load`. The `forceRefresh()` button in `app.js` (the "Clear cache and reload?" confirm) still unregisters explicitly when the user asks — unchanged.
+- Cache-bust app.js v=248 → v=249; SHELL_CACHE v116 → v117 (now actually effective); package.json 1.5.61 → 1.5.62.
+
 ## v1.5.61 (2026-05-26)
 
 ### Post-release audit fixes (5 items)

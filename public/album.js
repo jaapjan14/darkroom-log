@@ -45,6 +45,17 @@ function _measureAndAdapt(ms){
     ssSlowLoadCount=Math.max(0,ssSlowLoadCount-1);
   }
 }
+// Per-run pin of each slide's display URL (idx → url). The width ladder can
+// move mid-show; without pinning, look-ahead preloads cache one width while
+// the render requests another — a guaranteed miss that re-runs the sharp
+// pipeline and makes the photo arrive seconds late (uneven pacing). First
+// reference wins. Cleared on slideshow open. Mirrors app.js.
+let ssUrlPin={};
+function _ssUrlFor(idx){
+  if(!album||!album.assets||!album.assets[idx])return '';
+  if(ssUrlPin[idx]==null) ssUrlPin[idx]=`/api/public/display/${album.assets[idx]}-${ssDisplayWidth}.jpg`;
+  return ssUrlPin[idx];
+}
 
 function isZoomed(){return ssZoom.scale>1.001;}
 function applyZoomTransform(){
@@ -159,7 +170,7 @@ async function openSlideshow(idx){
   // Reset beat-preset state; showKBSlide's image-load callback calls
   // scheduleNext (single source of truth — explicit calls here would cause
   // double-scheduling and inconsistent timing).
-  ssBeatIdx=null;ssBeatPtnIdx=null;ssSlidesShown=1;
+  ssBeatIdx=null;ssBeatPtnIdx=null;ssSlidesShown=1;ssUrlPin={};
   await showTitleCard();
   showKBSlide(idx);
   showSSControls();
@@ -209,7 +220,7 @@ async function openSlideshowPaused(idx){
     card.style.pointerEvents='none';
     ssPausedState=false;
     startMusic();
-    ssBeatIdx=null;ssBeatPtnIdx=null;ssSlidesShown=1;
+    ssBeatIdx=null;ssBeatPtnIdx=null;ssSlidesShown=1;ssUrlPin={};
     showKBSlide(idx);
     showSSControls();
   });
@@ -343,6 +354,10 @@ function prepareSlot(ns, idx){
   // doesn't re-trigger an in-flight load for the same id.
   if(img.dataset.loadedId!==id){
     img.dataset.loadedId=id;
+    // Defensive: detach any stale show() handlers from the slide that last
+    // lived in this slot before kicking off the preload (belt-and-suspenders
+    // with _attachSlideImgHandlers' one-shot fire()).
+    img.onload=null;img.onerror=null;
     img._loadStart=performance.now();
     // One-shot performance listener (separate from preset show() onload/onerror
     // handlers so we don't fight over the handler property).
@@ -354,8 +369,9 @@ function prepareSlot(ns, idx){
       }
     };
     img.addEventListener('load',onMeasure);
-    // Filename form (not ?w=) so Cloudflare edge-caches by extension.
-    img.src=`/api/public/display/${id}-${ssDisplayWidth}.jpg`;
+    // Filename form (not ?w=) so Cloudflare edge-caches by extension. URL is
+    // pinned per-run so it matches the preloaded one even if the width moved.
+    img.src=_ssUrlFor(idx);
   }
   if(!assetMeta[id]){
     fetch('/api/public/photo/'+id).then(r=>r.json()).then(m=>{assetMeta[id]=m;}).catch(()=>{});
@@ -373,7 +389,7 @@ function _preloadAhead(idx){
     const id=album.assets[k];
     if(!id)continue;
     const pre=new Image();
-    pre.src=`/api/public/display/${id}-${ssDisplayWidth}.jpg`;
+    pre.src=_ssUrlFor(k);
   }
 }
 
@@ -384,14 +400,24 @@ function _preloadAhead(idx){
 // succeed). If the thumb also fails, show() anyway — the slot's background-
 // image is the last-resort thumb fallback already painted by prepareSlot.
 function _attachSlideImgHandlers(img, id, show){
-  if(img.complete && img.naturalWidth>0){ show(); return; }
+  // One-shot semantics (v1.5.67): the slot <img> elements are RECYCLED
+  // between slides, so a handler left behind re-fires this slide's show()
+  // when prepareSlot later preloads the NEXT image into the same element —
+  // a spurious early transition + scheduleNext() reset ~3.5s into every
+  // slide (the long-standing "uneven pace" bug on the public album page).
+  const fire=()=>{ img.onload=null; img.onerror=null; show(); };
+  if(img.complete && img.naturalWidth>0){ fire(); return; }
   let fellBack=false;
-  img.onload=show;
+  img.onload=fire;
   img.onerror=()=>{
-    if(fellBack){ show(); return; }
+    if(fellBack){ fire(); return; }
     fellBack=true;
     img.src='/api/public/thumb/'+id;
   };
+  // Preload already failed before handlers attached (complete but broken):
+  // kick off the thumb fallback now — no load/error event would fire
+  // otherwise and the slideshow would stall on this slide.
+  if(img.complete && img.naturalWidth===0){ fellBack=true; img.src='/api/public/thumb/'+id; }
 }
 
 // Returns the CURRENT slide's hold duration, including the actual
@@ -400,6 +426,11 @@ function _attachSlideImgHandlers(img, id, show){
 function _currentSlideHoldMs(){
   const s=(album&&album.slideshowSettings)||{};
   if(s.preset==='quick') return 6000;
+  if(s.preset==='custom'){
+    const bpm=Number(s.paceBpm);
+    if(Number.isFinite(bpm)&&bpm>=40&&bpm<=200) return Math.round(8*60000/bpm);
+    return 8000;
+  }
   if(s.preset==='beat'||s.preset==='beatfade'){
     const pattern=_parseBeatPattern(s.paceBeatsEvery);
     const ptnIdx=(ssBeatPtnIdx==null)?0:(ssBeatPtnIdx%pattern.length);
@@ -678,6 +709,13 @@ function _parseBeatPattern(val){
 function _slideDurationMs(){
   const s=(album&&album.slideshowSettings)||{};
   if(s.preset==='quick') return 6000;
+  if(s.preset==='custom'){
+    // Was missing entirely — Custom fell through to the 7s/12s default and
+    // the user's paceBpm was ignored on the public album page.
+    const bpm=Number(s.paceBpm);
+    if(Number.isFinite(bpm)&&bpm>=40&&bpm<=200) return Math.round(8*60000/bpm);
+    return 8000;
+  }
   if(s.preset==='beat'||s.preset==='beatfade'){
     const pattern=_parseBeatPattern(s.paceBeatsEvery);
     const beats=pattern[0];
@@ -699,6 +737,9 @@ function scheduleNext(){
   const s=(album&&album.slideshowSettings)||{};
   const dur=_slideDurationMs();
   let delay=dur;
+  // Custom preset note (v1.5.66): delay stays a plain `dur` counted from the
+  // slide's appearance. Even pacing comes from pinning preload URLs
+  // (_ssUrlFor) so renders hit the browser cache — see app.js scheduleNext.
   if((s.preset==='beat'||s.preset==='beatfade')&&window.DarkroomAudio&&DarkroomAudio.isMusicPlaying()){
     const analysis=DarkroomAudio.getTrackAnalysis(s.musicFile);
     const useOverride=s.paceBpmOverrideEnabled===true;
