@@ -372,6 +372,13 @@
   <div class="view" id="albums-view">
     <div class="album-toolbar">
       <button class="btn btn-ghost btn-sm" id="btn-create-album" >+ Album</button>
+      <label for="album-sort" style="margin-left:auto;font-size:10px;color:var(--text-dim);font-family:'IBM Plex Mono',monospace">Sort</label>
+      <select id="album-sort" title="Sort albums" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:0.25rem 0.4rem;font-size:11px;font-family:'IBM Plex Mono',monospace">
+        <option value="updated">Recently updated</option>
+        <option value="created">Recently created</option>
+        <option value="name">Name (A–Z)</option>
+        <option value="count">Photo count</option>
+      </select>
     </div>
     <div class="albums-grid" id="albums-grid">
       <div class="loading">Loading...</div>
@@ -769,7 +776,7 @@
 
 <script src="/zoom.js?v=2" defer></script>
 <script src="/audio-engine.js?v=10" defer></script>
-<script src="/app.js?v=257" defer></script>
+<script src="/app.js?v=259" defer></script>
 <script>
 // Service worker - registers sw.js for thumb stale-while-revalidate + shell
 // cache. Was actively unregistered v1.3.0 -> v1.5.61; re-enabled v1.5.62.

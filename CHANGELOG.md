@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.5.74 (2026-06-14)
+
+### Album sorting
+- New **Sort** dropdown in the Albums tab toolbar: **Recently updated** (default), **Recently created**, **Name (A–Z)**, **Photo count**. Choice persists in `localStorage` (`albumSort`). Previously albums always rendered in creation order (oldest first), so new albums landed at the end.
+- **Album `updatedAt` tracking (server.js):** albums now carry `updatedAt`, stamped on create and bumped on every edit via `PUT /api/albums/:id` (rename, reorder, add/remove photos, slideshow settings). Pre-existing albums without `updatedAt` fall back to `createdAt` when sorting.
+- `sortAlbums()` (app.js) sorts a non-mutating copy for display; ISO timestamps compare lexicographically. Wired the dropdown to re-render on change.
+- Cache-bust: app.js v=258 → v=259; SHELL_CACHE v127 → v128; package.json 1.5.73 → 1.5.74.
+
+## v1.5.73 (2026-06-14)
+
+### Rename albums
+- New **✎ Rename** button in the album detail toolbar (next to Reorder/Delete). Prompts for a new name, then asks whether to also update the public URL.
+- **Slug decoupled from rename (server.js):** `PUT /api/albums/:id` previously regenerated `slug = slugify(title)` on every title change — which would silently change the album's `/album/<slug>` URL and break existing share links + the lakatua.me embed. Now the slug only changes when the caller passes `updateSlug: true` (with a uniqueness guard). Renames keep the URL stable by default.
+- `renameAlbum()` (app.js): prompt for name → confirm dialog to opt into a URL change (Cancel = keep URL, the safe default) → `PUT {title, updateSlug}` → updates header + grid + albums cache in place. Uses the app's existing native prompt/confirm pattern; CSP-safe data-action dispatch.
+- Cache-bust: app.js v=257 → v=258; SHELL_CACHE v126 → v127; package.json 1.5.72 → 1.5.73.
+
 ## v1.5.72 (2026-06-14)
 
 ### "⟳ Thumbnails" button — visible feedback

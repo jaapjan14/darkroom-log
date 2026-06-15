@@ -44,6 +44,7 @@ let state = {
   currentAlbum: null,
   viewingFromAlbum: false,
   albumEditMode: false,
+  albumSort: (() => { try { return localStorage.getItem('albumSort') || 'updated'; } catch (e) { return 'updated'; } })(),
   pendingAddAssetId: null,
   slideshow: { active: false, index: 0, timer: null, paused: false },
   immichAlbumsLoaded: false,
@@ -1637,13 +1638,29 @@ async function loadAlbumsTab() {
   renderAlbumsGrid();
 }
 
+// Sort albums for display (non-mutating — returns a sorted copy). ISO date
+// strings compare lexicographically = chronologically, so localeCompare works.
+function sortAlbums(albums, sort) {
+  const arr = albums.slice();
+  const name = a => (a.title || '').toLowerCase();
+  const upd = a => a.updatedAt || a.createdAt || '';
+  switch (sort) {
+    case 'created': arr.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || '')); break;
+    case 'name':    arr.sort((a, b) => name(a).localeCompare(name(b))); break;
+    case 'count':   arr.sort((a, b) => (b.assets?.length || 0) - (a.assets?.length || 0) || name(a).localeCompare(name(b))); break;
+    case 'updated':
+    default:        arr.sort((a, b) => upd(b).localeCompare(upd(a))); break;
+  }
+  return arr;
+}
+
 function renderAlbumsGrid() {
   const grid = document.getElementById('albums-grid');
   if (!state.albums.length) {
     grid.innerHTML = '<div class="album-empty" style="grid-column:1/-1">No albums yet.<br>Tap + Album to create one.</div>';
     return;
   }
-  grid.innerHTML = state.albums.map(a => `
+  grid.innerHTML = sortAlbums(state.albums, state.albumSort).map(a => `
     <div class="album-item" data-action="openAlbum" data-id="${a.id}">
       ${a.assets.length ? `<img src="${thumbSrc(a.assets[0])}" loading="lazy" onerror="this.style.background='#1a1a1a'">` : '<div class="album-item-empty" style="width:100%;height:100%"></div>'}
       <div class="album-item-info">
@@ -1690,6 +1707,7 @@ function renderAlbumDetail() {
     <div style="max-width:1200px;margin:0 auto;width:100%;display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
       <button class="btn btn-ghost btn-sm" data-action="openSlideshowSettings">▶ Slideshow</button>
       <button class="btn btn-ghost btn-sm" data-action="toggleAlbumEdit">${editMode ? '✓ Done' : '⇄ Reorder'}</button>
+      <button class="btn btn-ghost btn-sm" data-action="renameAlbum" data-id="${album.id}">✎ Rename</button>
       <button class="btn btn-danger btn-sm" data-action="deleteAlbum" data-id="${album.id}">Delete</button>
       <button class="btn btn-ghost btn-sm" data-action="toggleAlbumSelectMode">Select</button>
       <div style="flex:1"></div>
@@ -1790,6 +1808,45 @@ async function downloadSelectedAlbumPhotos() {
 function toggleAlbumEdit() {
   state.albumEditMode = !state.albumEditMode;
   renderAlbumDetail();
+}
+
+async function renameAlbum(albumId) {
+  const album = (state.currentAlbum && state.currentAlbum.id === albumId)
+    ? state.currentAlbum
+    : (state.albums || []).find(a => a.id === albumId);
+  if (!album) return;
+  const name = prompt('Rename album:', album.title);
+  if (name === null) return;               // cancelled
+  const title = name.trim();
+  if (!title || title === album.title) return;
+  // "Ask me each rename": let the user decide whether the public URL changes
+  // too. Default (Cancel) keeps the slug so existing share links + the
+  // lakatua.me embed don't break.
+  const updateSlug = confirm(
+    `Rename to "${title}".\n\n` +
+    `Also update the public URL to match the new name?\n\n` +
+    `OK = update URL  (⚠ breaks existing share links + lakatua.me embed)\n` +
+    `Cancel = keep current URL  /album/${album.slug}`
+  );
+  let r;
+  try {
+    r = await fetch('/api/albums/' + albumId, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, updateSlug })
+    });
+  } catch (e) { alert('Rename failed: ' + e.message); return; }
+  if (!r.ok) { alert('Rename failed (' + r.status + ')'); return; }
+  const updated = await r.json();
+  album.title = updated.title;
+  album.slug = updated.slug;
+  if (state.albums) {
+    state.albums = state.albums.map(a => a.id === albumId
+      ? { ...a, title: updated.title, slug: updated.slug } : a);
+  }
+  if (state.currentAlbum && state.currentAlbum.id === albumId) {
+    document.getElementById('header-title').textContent = updated.title;
+    renderAlbumDetail();
+  }
 }
 
 async function deleteAlbum(albumId) {
@@ -4525,6 +4582,15 @@ function wireListeners() {
 
   // Albums
   w('btn-create-album', 'click', () => openCreateAlbumModal());
+  const albumSortSel = document.getElementById('album-sort');
+  if (albumSortSel) {
+    albumSortSel.value = state.albumSort;
+    albumSortSel.addEventListener('change', () => {
+      state.albumSort = albumSortSel.value;
+      try { localStorage.setItem('albumSort', state.albumSort); } catch (e) {}
+      renderAlbumsGrid();
+    });
+  }
 
   // Album drag-to-reorder — CSP-safe delegated listeners
   const _albumGrid = document.getElementById('album-photo-grid');
@@ -4792,6 +4858,7 @@ case 'shareSelected': shareSelected(id, el.dataset.filename, el.dataset.desc); b
     case 'startEditTitle': startEditTitle(); break;
     case 'removeTag': removeTag(el.dataset.tag); break;
     case 'showTagInput': showTagInput(); break;
+    case 'renameAlbum': renameAlbum(id); break;
     case 'deleteAlbum': deleteAlbum(id); break;
     case 'deletePrint': deletePrint(); break;
     case 'editSession': editSession(id); break;

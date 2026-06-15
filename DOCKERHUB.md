@@ -17,6 +17,16 @@ header, optional slideshow, and pinch-zoom on every photo. No login required for
 
 **Source:** https://github.com/jaapjan14/darkroom-log
 
+## What's new in v1.5.62–74
+
+Album management and a fix for stale thumbnails after uploads, on top of a round of performance work.
+
+- **Rename albums** — a ✎ Rename button in the album toolbar. Renaming changes only the display name by default; you're asked per-rename whether to also update the public `/album/<slug>` URL, so existing share links and embeds don't break unless you choose to change them.
+- **Sort albums** — a Sort dropdown on the Albums tab: Recently updated (default), Recently created, Name (A–Z), or Photo count. Your choice is remembered. Albums now track a last-updated time, bumped on any edit.
+- **Thumbnail refresh** — thumbnail URLs are versioned by the asset's Immich `updatedAt`, so re-uploading or replacing a photo refreshes its thumbnail automatically instead of leaving a stale one cached. A ⟳ Thumbnails button manually forces a refetch when needed.
+- **Faster everywhere** — gzip/brotli compression on all responses (app shell, thumbnail JSON, and assets ship far smaller) and a server-side LRU cache for slideshow display variants, so repeat slideshow plays are smooth from the first viewing.
+- **Slideshow pace readout** — an optional in-app badge shows live elapsed/target timing while a slideshow plays.
+
 ## What's new in v1.5.60–61
 
 A focused pass on **mobile / cellular performance** — browsing the library and public album galleries on a phone (5G) is now fast and smooth, with no dead taps or skipped photos. (v1.5.61 adds post-release hardening: a type-agnostic fallback so the fullscreen viewer never breaks on video/RAW originals, library queries filtered to images, and a few nav-feedback refinements.)

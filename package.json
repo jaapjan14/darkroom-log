@@ -1,6 +1,6 @@
 {
   "name": "darkroom-log",
-  "version": "1.5.72",
+  "version": "1.5.74",
   "description": "Darkroom print log with Immich integration",
   "main": "server.js",
   "scripts": {

@@ -1210,7 +1210,8 @@ app.post('/api/albums', requireAuth, (req, res) => {
   let slug = slugify(title);
   // ensure unique slug
   if (albums.find(a => a.slug === slug)) slug = slug + '-' + id.slice(-4);
-  const album = { id, title, slug, assets: [], createdAt: new Date().toISOString() };
+  const now = new Date().toISOString();
+  const album = { id, title, slug, assets: [], createdAt: now, updatedAt: now };
   albums.push(album);
   saveAlbums(albums);
   res.json(album);
@@ -1221,13 +1222,23 @@ app.put('/api/albums/:id', requireAuth, (req, res) => {
   const albums = loadAlbums();
   const idx = albums.findIndex(a => a.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Not found' });
-  const { title, assets, slideshowSettings } = req.body;
+  const { title, assets, slideshowSettings, updateSlug } = req.body;
   if (title !== undefined) {
     albums[idx].title = title;
-    albums[idx].slug = slugify(title);
+    // The slug is the public /album/<slug> URL (also used by the lakatua.me
+    // embed), so a rename must NOT change it unless the caller explicitly opts
+    // in — otherwise existing share links/embeds silently 404.
+    if (updateSlug) {
+      let slug = slugify(title);
+      if (albums.find((a, i) => i !== idx && a.slug === slug)) slug = slug + '-' + req.params.id.slice(-4);
+      albums[idx].slug = slug;
+    }
   }
   if (assets !== undefined) albums[idx].assets = assets;
   if (slideshowSettings !== undefined) albums[idx].slideshowSettings = slideshowSettings;
+  // Bump updatedAt on any edit (rename, reorder, add/remove photos, slideshow
+  // settings) so the Albums tab can sort by "recently updated".
+  albums[idx].updatedAt = new Date().toISOString();
   saveAlbums(albums);
   res.json(albums[idx]);
 });
