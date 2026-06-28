@@ -17,6 +17,15 @@ header, optional slideshow, and pinch-zoom on every photo. No login required for
 
 **Source:** https://github.com/jaapjan14/darkroom-log
 
+## What's new in v1.5.76–79
+
+Reliability fixes for album browsing and the Library grid, plus a forum-friendly share size.
+
+- **Library grid no longer goes "wonky" after viewing an album** — returning to the Library from an album could occasionally show a stale or duplicated set of photos, most often while albums were being edited. Both the deterministic cause (the album lightbox overwriting the Library's dataset) and an intermittent async-render race (a slow fetch repainting the grid after you'd already navigated back) are now fixed, so the grid always reflects the real library on return.
+- **Add to Album dedupes by name** — typing the name of an existing album in the "+ Create" box now adds the photo into that album instead of silently spawning a duplicate.
+- **Leica Forum share size** — a new share preset caps the long edge at 2048 px (≤2.4 MB) so any aspect ratio, including full squares, stays under the forum's upload limits.
+- **Upload-date sort default restored** — the Library again defaults to Upload Date with a full sweep and a working Load More, instead of a narrow 7-day window.
+
 ## What's new in v1.5.62–74
 
 Album management and a fix for stale thumbnails after uploads, on top of a round of performance work.
