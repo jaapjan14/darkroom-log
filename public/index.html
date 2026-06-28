@@ -331,11 +331,11 @@
     </div>
     <div style="max-width:1200px;margin:0 auto;padding:0.4rem 1rem;display:flex;gap:0.4rem;align-items:center;border-bottom:1px solid var(--border)">
       <span class="sort-label">Sort</span>
-      <button class="sort-btn" id="lib-sort-upload" >Upload Date</button>
-      <button class="sort-btn active" id="lib-sort-taken" >Date Taken</button>
+      <button class="sort-btn active" id="lib-sort-upload" >Upload Date</button>
+      <button class="sort-btn" id="lib-sort-taken" >Date Taken</button>
 
       <button class="sort-btn" id="lib-sort-dir"  style="margin-left:0.5rem">↓ Newest</button>
-      <button class="sort-btn" id="lib-sort-mode" style="margin-left:0.25rem;display:none" title="Switch between fast last-7-days and full sweep">Last 7d · Full sweep →</button>
+      <button class="sort-btn" id="lib-sort-mode" style="margin-left:0.25rem" title="Switch between full sweep (all uploads) and fast last-7-days">Full sweep ✓ · Last 7d →</button>
       <button class="sort-btn" id="refresh-thumbs" style="margin-left:auto" title="Re-fetch thumbnails from Immich — use after re-uploading or replacing photos if thumbnails look wrong">⟳ Thumbnails</button>
     </div>
     <div style="max-width:1200px;margin:0 auto;padding:0.25rem 1rem;display:flex;gap:0.5rem;align-items:center;position:relative">
@@ -776,7 +776,7 @@
 
 <script src="/zoom.js?v=2" defer></script>
 <script src="/audio-engine.js?v=10" defer></script>
-<script src="/app.js?v=259" defer></script>
+<script src="/app.js?v=264" defer></script>
 <script>
 // Service worker - registers sw.js for thumb stale-while-revalidate + shell
 // cache. Was actively unregistered v1.3.0 -> v1.5.61; re-enabled v1.5.62.

@@ -671,6 +671,11 @@ const SHARE_TARGETS = {
   small:  { maxBytes:   500000, maxDim: 1200 },
   medium: { maxBytes:  1500000, maxDim: 2400 },
   large:  { maxBytes:  2700000, maxDim: 4200 },
+  // Leica Forum: the forum fits uploads to 2480px then rejects anything still
+  // over ~5 MP — so a full-size SQUARE (2480²=6.15 MP) fails while landscapes
+  // (~4 MP) pass. Capping the long edge at 2048px keeps a square at 2048²=4.2 MP,
+  // safely under that ceiling AND under the 2,500 kB size limit, for ANY aspect.
+  forum:  { maxBytes:  2400000, maxDim: 2048 },
 };
 
 app.get('/api/immich/download/:id', requireAuth, async (req, res) => {

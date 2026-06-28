@@ -17,14 +17,20 @@ let state = {
   recentPage: 1,
   recentItems: [],
   recentLoaded: false,
+  // Render-generation token. Bumped on any navigation away from the live Library
+  // grid (tab switch, opening an album, opening a photo detail). Async grid
+  // loaders capture it at call time and skip their repaint if it changed — so a
+  // slow fetch (e.g. during heavy concurrent album edits) can't paint a stale
+  // grid over the view you've since navigated back to. See `recentGen` guards.
+  recentGen: 0,
   currentRecentId: null,
   currentRecentIndex: -1,
   fullscreenOpen: false,
   recentMeta: {},
   filterOptions: null,
-  librarySort: 'taken',
+  librarySort: 'upload',
   librarySortDir: 'desc',
-  recentMode: 'window', // upload-sort: 'window' (last N days) | 'full' (sweep+cache)
+  recentMode: 'full', // upload-sort default: 'full' (all uploads, paginated w/ Load More) | 'window' (last N days, fast)
   recentWindowDays: 7,
   displayedItems: [],
   previousView: 'recent-view',
@@ -79,6 +85,7 @@ async function logout() { await fetch('/api/logout', {method:'POST'}); location.
 
 // TAB SWITCHING
 function switchTab(tab) {
+  state.recentGen++; // invalidate any in-flight Library grid loader for the prior view
   state.currentTab = tab;
   ['prints','recent','albums','immich'].forEach(t => {
     document.getElementById('tab-' + t).classList.toggle('active', t === tab);
@@ -207,7 +214,7 @@ function updateRecentModeButton() {
   if (!visible) return;
   btn.textContent = state.recentMode === 'window'
     ? `Last ${state.recentWindowDays}d · Full sweep →`
-    : `Full sweep ✓`;
+    : `Full sweep ✓ · Last ${state.recentWindowDays}d →`;
   btn.title = state.recentMode === 'window'
     ? `Showing uploads from the last ${state.recentWindowDays} days. Click for a full sweep of all uploads (slower, 5-min cache). Also refreshes face tags.`
     : 'Showing all uploads, sorted by upload date. Click to return to the fast window view.';
@@ -217,6 +224,9 @@ async function loadRecent() {
   state.recentPage = 1;
   state.recentItems = [];
   state.recentLoaded = true;
+  // Default sort is now 'upload' — make the window/full-sweep toggle reflect
+  // the initial mode on first load (it's otherwise only updated via setLibrarySort).
+  if (typeof updateRecentModeButton === 'function') updateRecentModeButton();
   await fetchRecentPage();
   fetchFilterOptions();
 }
@@ -267,6 +277,7 @@ function absorbAssetMeta(items) {
 }
 
 async function fetchRecentPage() {
+  const gen = state.recentGen; // skip the repaint below if the user navigates away mid-fetch
   // On Load More (page > 1) we want to keep the user's visual position. Three layers:
   //   1. Snapshot scrollTop on every plausible scroll container — Android Chrome may scroll
   //      the document while desktop scrolls #recent-view; we restore whichever moved.
@@ -301,6 +312,9 @@ async function fetchRecentPage() {
   const items = data.assets || [];
   absorbAssetMeta(items);
   state.recentItems = [...state.recentItems, ...items];
+  // Navigated away (album/detail/other tab) while this was in flight — keep the
+  // fetched data in recentItems but don't repaint; the grid self-heals on return.
+  if (state.recentGen !== gen) return;
   applyRecentFilters();
   if (isLoadMore) {
     // Defense in depth: with no client-side sort, the append-only fast path in
@@ -399,6 +413,7 @@ function handleRecentSearch(q) {
 }
 
 async function runMultiChipSearch(chips, personId = null) {
+  const gen = state.recentGen;
   const grid = document.getElementById('recent-grid');
   grid.innerHTML = '<div class="loading">Searching...</div>';
   try {
@@ -427,6 +442,7 @@ async function runMultiChipSearch(chips, personId = null) {
     // we sort on createdAt/takenAt which are present).
     state.recentSmartResults = sortRecentResults(items);
     state.searchPage = 1;
+    if (state.recentGen !== gen) return; // navigated away mid-search; don't repaint
     renderRecentGrid(state.recentSmartResults);
     loadRecentMetaBatch(items.map(a => a.id));
     const loadMoreBtn = document.getElementById('load-more-btn');
@@ -453,6 +469,7 @@ async function runMultiChipSearch(chips, personId = null) {
 }
 
 async function runTextSearch(q, append = false) {
+  const gen = state.recentGen;
   const grid = document.getElementById('recent-grid');
   if (!append) {
     state.searchPage = 1;
@@ -471,6 +488,7 @@ async function runTextSearch(q, append = false) {
     state.searchTotal = data.total || newItems.length;
     absorbAssetMeta(newItems);
     state.recentSmartResults = append ? [...state.recentSmartResults, ...newItems] : newItems;
+    if (state.recentGen !== gen) return; // navigated away mid-search; don't repaint
     renderRecentGrid(state.recentSmartResults);
     loadRecentMetaBatch(newItems.map(a => a.id));
     // Show load more if we got a full page (likely more results)
@@ -488,6 +506,7 @@ async function runTextSearch(q, append = false) {
 }
 
 async function runSmartSearch(q, append = false) {
+  const gen = state.recentGen;
   const grid = document.getElementById('recent-grid');
   if (!append) {
     state.searchPage = 1;
@@ -506,6 +525,7 @@ async function runSmartSearch(q, append = false) {
     state.searchTotal = data.total || newItems.length;
     absorbAssetMeta(newItems);
     state.recentSmartResults = append ? [...state.recentSmartResults, ...newItems] : newItems;
+    if (state.recentGen !== gen) return; // navigated away mid-search; don't repaint
     renderRecentGrid(state.recentSmartResults);
     loadRecentMetaBatch(newItems.map(a => a.id));
     const loadMoreBtn = document.getElementById('load-more-btn');
@@ -635,6 +655,9 @@ async function searchByImmichTag(tagName) {
 
   state.recentActiveImmichTag = tagName;
   state.searchPage = 1;
+  // Captured AFTER the switchTab('recent') above (which bumps recentGen) so the
+  // guard reflects navigation that happens during the fetch, not the tab switch.
+  const gen = state.recentGen;
 
   try {
     const r = await fetch('/api/immich/tag-search', {
@@ -646,6 +669,7 @@ async function searchByImmichTag(tagName) {
     const items = data.assets || [];
     state.recentSmartResults = items;
     absorbAssetMeta(items);
+    if (state.recentGen !== gen) return; // navigated away mid-search; don't repaint
     renderRecentGrid(items);
     loadRecentMetaBatch(items.map(a => a.id));
 
@@ -702,6 +726,7 @@ async function searchByPerson(personId, name) {
     runMultiChipSearch([...state.recentActiveChips], state.recentActivePerson);
     return;
   }
+  const gen = state.recentGen;
   const grid = document.getElementById('recent-grid');
   grid.innerHTML = '<div class="loading">Searching...</div>';
   try {
@@ -713,6 +738,7 @@ async function searchByPerson(personId, name) {
     const data = await r.json();
     state.recentSmartResults = data.assets || [];
     absorbAssetMeta(state.recentSmartResults);
+    if (state.recentGen !== gen) return; // navigated away mid-search; don't repaint
     renderRecentGrid(state.recentSmartResults);
     loadRecentMetaBatch(state.recentSmartResults.map(a => a.id));
     const loadMoreBtn = document.getElementById('load-more-btn');
@@ -922,6 +948,10 @@ function goBackFromDetail() {
 }
 
 async function showRecentDetail(assetId) {
+  // Opening the detail overlay pages via state.displayedItems; bump the gen so a
+  // pending Library fetch can't resolve underneath and clobber displayedItems
+  // (which would break prev/next) or repaint the hidden grid with a stale set.
+  state.recentGen++;
   state.currentRecentId = assetId;
   state.currentRecentIndex = (state.displayedItems || state.recentItems).findIndex(a => a.id === assetId);
 
@@ -1069,7 +1099,7 @@ async function renderRecentDetail(assetId, navGen) {
           </div>
           ${!state.viewingTrash ? `
           <div style="display:flex;gap:0.4rem;align-items:center;flex-wrap:wrap">
-            <select id="share-size" class="btn btn-ghost btn-sm" title="Share size — S=300-500KB · M=1-1.5MB SMS · L=2-2.7MB Leica · XL=full original ~9.7MB"><option value="small">S</option><option value="medium" selected>M</option><option value="large">L</option><option value="xlarge">XL</option></select>
+            <select id="share-size" class="btn btn-ghost btn-sm" title="Share size — S=300-500KB · M=1-1.5MB SMS · L=2-2.7MB · LeicaForum=2048px/≤2.4MB (forum-safe, any aspect) · XL=full original ~9.7MB"><option value="small">S</option><option value="medium" selected>M</option><option value="large">L</option><option value="forum">LeicaForum</option><option value="xlarge">XL</option></select>
             <button class="btn btn-ghost btn-sm" data-action="shareSelected" data-id="${assetId}" data-filename="${meta.filename}" data-desc="${(meta.description||'').replace(/'/g, '&apos;')}" title="Share at selected size">↑ Share</button>
             <select id="embed-size" class="btn btn-ghost btn-sm" title="Embed width (px)"><option value="1024">1024</option><option value="1200">1200</option><option value="1280">1280</option><option value="1400" selected>1400</option><option value="1600">1600</option><option value="2048">2048</option><option value="2400">2400</option></select>
             <button class="btn btn-ghost btn-sm" data-action="copyEmbedUrl" data-id="${assetId}" title="Copy forum [img] BBCode at selected width">⧉ Embed</button>
@@ -1175,6 +1205,7 @@ const SHARE_PRESETS = {
   small:  { url: 'download', size: 'small'  },
   medium: { url: 'download', size: 'medium' },
   large:  { url: 'download', size: 'large'  },
+  forum:  { url: 'download', size: 'forum'  },
   xlarge: { url: 'original' },
 };
 
@@ -1672,6 +1703,7 @@ function renderAlbumsGrid() {
 }
 
 function openAlbum(albumId) {
+  state.recentGen++; // leaving the live Library grid — stop stale loaders repainting it
   state.currentAlbum = state.albums.find(a => a.id === albumId);
   state.albumEditMode = false;
   state.albumSelectMode = false;
@@ -1748,8 +1780,12 @@ async function showAlbumPhotoDetail(assetId, idx) {
   state.previousView = 'album-detail-view';
   state.viewingFromAlbum = true;
   const album = state.currentAlbum;
-  state.recentItems = album.assets.map(id => ({ id, originalFileName: '', createdAt: '' }));
-  state.displayedItems = state.recentItems;
+  // Page the album lightbox via displayedItems ONLY. Do NOT overwrite
+  // state.recentItems (the Library tab's dataset) — otherwise after viewing an
+  // album photo, clicking LIBRARY renders the album's photos instead of the
+  // real library. All prev/next reads fall back as `displayedItems || recentItems`,
+  // and renderRecentGrid() resets displayedItems when the Library re-renders.
+  state.displayedItems = album.assets.map(id => ({ id, originalFileName: '', createdAt: '' }));
   await showRecentDetail(assetId);
 }
 
@@ -2176,6 +2212,15 @@ async function quickCreateAndAdd() {
   const title = document.getElementById('quick-album-name').value.trim();
   if (!title) return;
   try {
+    // Dedupe by title — if an album with this name already exists, add into it
+    // instead of spawning a duplicate. Refresh from the server first so a stale
+    // client list (e.g. one created on another device) can't slip a dupe through.
+    try {
+      const fresh = await fetch('/api/albums').then(r => r.json());
+      if (Array.isArray(fresh)) state.albums = fresh;
+    } catch (e) { /* fall back to in-memory list */ }
+    const existing = (state.albums || []).find(a => (a.title || '').trim().toLowerCase() === title.toLowerCase());
+    if (existing) { await addToAlbum(existing.id); return; }
     const r = await fetch('/api/albums', {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ title })

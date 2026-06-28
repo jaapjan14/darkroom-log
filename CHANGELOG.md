@@ -1,5 +1,46 @@
 # Changelog
 
+## v1.5.79 (2026-06-28)
+
+### Fix: intermittent "wonky" Library listing after album→library (stale async repaint race)
+- After v1.5.78 deterministically fixed the album-lightbox clobbering `state.recentItems`, an **intermittent** variant remained: the Library grid would occasionally show a stale/partial set after returning from an album, but only sporadically — notably while album data was being created/mutated server-side (the Glazers exhibition review), which slowed and overlapped backend requests.
+- **Root cause:** the async grid loaders (`fetchRecentPage`, `runMultiChipSearch`, `runTextSearch`, `runSmartSearch`, `searchByImmichTag`, `searchByPerson`) each did `fetch → await → renderRecentGrid()` with **no generation guard**. If a slow fetch was in flight when you ducked into an album/detail and came back, it would resolve *late* and repaint the Library grid (and clobber `state.displayedItems`) on top of the view you'd already navigated back to. The append-only fast path then keyed off a now-mismatched DOM → duplicated/stale tiles ("wonky listing"). The window only opened when requests were slow enough to outlive a navigation — hence the intermittency and the correlation with heavy concurrent album edits.
+- **Fix:** added a render-generation token (`state.recentGen`), bumped on every navigation away from the live Library grid (`switchTab`, `openAlbum`, `showRecentDetail`). Each async loader captures the gen at call time and **skips its repaint** if the gen advanced while it was awaiting — the fetched data is still stored in `state.recentItems` / `state.recentSmartResults`, so the grid self-heals on the next return. Delete/archive refreshes are unaffected (they don't go through the guarded loaders). `searchByImmichTag` captures its gen *after* its internal `switchTab('recent')` so the tab switch itself doesn't trip the guard.
+- Cache-bust: app.js v=263 → v=264; SHELL_CACHE v132 → v133; package.json 1.5.78 → 1.5.79.
+
+## v1.5.78 (2026-06-28)
+
+### Fix: clicking LIBRARY after viewing an album photo showed the album, not the library
+- Opening a photo *inside an album* (`showAlbumPhotoDetail`) was overwriting `state.recentItems` — the Library tab's dataset — with the album's assets, so the album lightbox could page through album photos. Side effect: after viewing an album photo, tapping **LIBRARY** ran `applyRecentFilters()` against the clobbered `recentItems` and rendered only the album's photos instead of the real library ("wonky, not taken to the library").
+- Fix: the album lightbox now pages via `state.displayedItems` **only** and never touches `state.recentItems`. All prev/next reads already fall back as `displayedItems || recentItems`, and `renderRecentGrid()` resets `displayedItems` when the Library re-renders, so the Library self-heals on return. The delete/archive paths still correctly drop assets from `recentItems`.
+- Cache-bust: app.js v=262 → v=263; SHELL_CACHE v131 → v132; package.json 1.5.77 → 1.5.78.
+
+## v1.5.77 (2026-06-28)
+
+### Add-to-Album dedupe by title (duplicate-album fix)
+- The **"+ Create"** button in the Add to Album modal now **dedupes by title**: if an album with the typed name already exists, the photo is added to it instead of spawning a new album. Before, `quickCreateAndAdd()` always `POST`ed a new album, so typing an existing album's name (e.g. adding photos to "Frenchman Coulee" one at a time) created a fresh duplicate every time — the slug auto-suffix (`-ys7d`, `-j3bq`) silently kept them distinct. To add into an existing album you had to click it in the pick list; typing the name was a footgun.
+- The dedupe **refreshes `state.albums` from `/api/albums` first**, so a stale client list (an album created on another device) can't slip a duplicate through.
+- Match is case-insensitive on the trimmed title. The dedicated **New Album** button on the Albums tab is unchanged (still allows intentional same-name albums).
+- Data cleanup: merged 5 single-photo **"Frenchman Coulee"** duplicates (all created 2026-06-28) into one album of 5 photos.
+- Cache-bust: app.js v=261 → v=262; SHELL_CACHE v130 → v131; package.json 1.5.76 → 1.5.77.
+
+## v1.5.76 (2026-06-21)
+
+### Library "Upload Date" sort — default restored to full sweep
+- **Default library sort is now Upload Date** again (was Date Taken). Upload-date sort is a Darkroom-only capability — Immich's `/search/metadata` can only order by `fileCreatedAt` (date taken), so Darkroom fetches the timeline and sorts by `createdAt` (upload date) itself.
+- **Default upload-sort mode flipped from `window` back to `full`** (`recentMode` in app.js). The 7-day window default (added with the window/full-sweep toggle) meant clicking **Upload Date** only returned uploads from the last 7 days — a small set that also fell under the 250-item threshold, so the **Load More** button stayed hidden. It read as "only some photos show and there's no way to see the rest." Full sweep pages through every timeline asset (server-cached 5 min) and paginates with a working Load More, restoring the pre-window behavior.
+- The 7-day window is still available as an opt-in **fast** mode via the toggle button; its full-sweep label now reads `Full sweep ✓ · Last 7d →` to make the fast option discoverable. `loadRecent()` now calls `updateRecentModeButton()` on first load so the toggle reflects the initial mode without requiring a sort click.
+- HTML: `active` class moved to `#lib-sort-upload`; `#lib-sort-mode` shown by default (no longer `display:none`).
+- Cache-bust: app.js v=260 → v=261; SHELL_CACHE v129 → v130; package.json 1.5.75 → 1.5.76.
+
+## v1.5.75 (2026-06-15)
+
+### "LeicaForum" share/export size
+- New **LeicaForum** option in the Share size dropdown (between L and XL): exports at **2048 px long edge, ≤2,400 kB**, any aspect ratio.
+- **Why:** the Leica Forum fits uploads to 2480 px then rejects anything still over ~5 MP. A full-size **square** (Mamiya 6×6) becomes 2480²=6.15 MP and is rejected with a generic "Upload Failed"; landscapes (~4 MP) pass. Confirmed by isolating a square frame that failed at every size/encoding/crop until dropped under ~5 MP. Capping the long edge at 2048 px keeps a square at 2048²=4.2 MP — safely under the ceiling and the 2,500 kB size limit — so it works for *any* aspect, no manual cropping/resizing.
+- `SHARE_TARGETS.forum = { maxBytes: 2400000, maxDim: 2048 }` (server.js); `SHARE_PRESETS.forum` + dropdown `<option>` (app.js). Existing quality-iteration encoder handles it (2048 px lands well under 2,400 kB).
+- Cache-bust: app.js v=259 → v=260; SHELL_CACHE v128 → v129; package.json 1.5.74 → 1.5.75.
+
 ## v1.5.74 (2026-06-14)
 
 ### Album sorting
