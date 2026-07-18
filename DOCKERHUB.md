@@ -17,6 +17,17 @@ header, optional slideshow, and pinch-zoom on every photo. No login required for
 
 **Source:** https://github.com/jaapjan14/darkroom-log
 
+## What's new in v1.5.80–94
+
+A mobile-first rework of the Library toolbar, plus a new Film Type filter and several Immich v3 migration fixes.
+
+- **Library toolbar rebuilt for mobile** — the search bar is back to just a search box and a "Sort" chip. Tap the search box to reveal Camera/Lens/State/City/Film dropdowns, the People avatar picker, and a Text/Smart search-mode toggle; tap Sort to reveal sort options and maintenance actions (full sweep, thumbnail refresh) — instead of a row of cramped buttons.
+- **Film Type filter** — filter the Library by film stock, alongside the existing Camera/Lens/State/City dropdowns.
+- **People filter now includes unnamed faces** — browse a detected-but-untagged face in Darkroom before naming it in Immich.
+- **"Last Edited" sort** — a third Library sort option, separate from Upload Date and Date Taken, surfaces what's recently been republished.
+- **Real-time reconciliation for Immich v3** — republishing an already-printed/albumed photo (Immich v3 assigns a new UUID on every republish) now updates prints/albums and restores the correct Upload Date immediately, instead of waiting on a periodic background script.
+- Fixes: archived photos no longer leak into Library search results; an album-embed loading hang specific to Chromium browsers on the same LAN as the server is resolved; an intermittent stale/duplicated Library listing after viewing an album is fixed.
+
 ## What's new in v1.5.76–79
 
 Reliability fixes for album browsing and the Library grid, plus a forum-friendly share size.
