@@ -1,5 +1,168 @@
 # Changelog
 
+## v1.5.94 (2026-07-17)
+
+### Fix: browser autofill suggestions covering the search-reveal panel
+
+- **Why:** Chromium browsers (Brave, reported by Jacob with a screenshot) remember past values typed into `#recent-search` and show their own suggestion dropdown on focus — which rendered on top of the new Camera/Lens/State/City/Film reveal panel, obscuring it. Same risk for `#people-filter-input` inside the same panel.
+- Added `autocomplete="off"` to both inputs.
+- `index.html` only, no JS changes.
+- Cache-bust: SHELL_CACHE v142 → v143; package.json 1.5.93 → 1.5.94. app.js unchanged (still v=272).
+
+## v1.5.93 (2026-07-17)
+
+### Fix: active-filter label sharing the search-bar row
+
+- **Why:** `#active-chip-label` (the small orange "Konica Hexar RF" / "Konica Hexar RF · Leica Summilux..." strip) lived in the same flex row as the search input and Sort chip. With only one active filter it was short enough to fit on line 1 alongside Search/Sort, cramping that row; with two it wrapped to its own line — inconsistent depending on how much text happened to fit. Reported by Jacob with side-by-side screenshots of both cases.
+- Gave the label `flex-basis:100%`, which forces it onto its own line below Search/Sort every time, regardless of length.
+
+### Add: Film Type filter
+
+- **Why:** The film-name metadata cleanup finished 2026-07-14 (see the `darkroom-film-type-filter-project` note — 1,047 files corrected, whitelist audit came back clean) specifically to unblock this dropdown; this ships the last unbuilt piece.
+- New **Film** dropdown in the search-reveal panel, alongside Camera/Lens/State/City — same single-select-chip pattern.
+- `buildFilterCache()` (`server.js`) now also parses `exifInfo.description`, splitting on `|` and taking segment 1 (the film — reliably that position across every description format variant per the 2026-07-14 audit) into a new `films` set, sorted into the filter-cache JSON.
+- `film` threaded through `/api/immich/text-search`, `/api/immich/smart-search`, and `/api/immich/combined-search` (as `films[]` for the combined/chip case) — maps to Immich's native `description` field, the same field the free-text search already substring-matches against, so an active Film chip now correctly ANDs with any other active chip or typed query. Guarded the existing free-text `description: query` search in `text-search` so an active Film chip doesn't get silently clobbered when the user also types a query.
+- Deleted the on-NAS `/data/filter-cache.json` after deploy so the Film list populates immediately instead of waiting for the 24h auto-rebuild.
+- Cache-bust: app.js v270 → v272; SHELL_CACHE v141 → v142; package.json 1.5.92 → 1.5.93.
+
+## v1.5.92 (2026-07-17)
+
+### Fix: reveal-panel buttons unclickable (v1.5.91 regression)
+
+- **Why:** The new `#recent-filter-backdrop`/`#sort-backdrop` divs (full-viewport, `z-index:100`, used to close the panel on an outside tap) sat *above* the panels themselves — `.filter-popup` is `z-index:50` — so the invisible backdrop intercepted every click meant for a button inside the panel. Visually the panels looked fine (backdrop is transparent); every tap inside them just silently hit the backdrop instead. Reported immediately by Jacob after the v1.5.91 deploy ("looks much better but the buttons are not working").
+- Gave `#recent-filter-popup` and `#sort-popup` an explicit `z-index:101`, above their backdrops.
+- `index.html` only, no JS changes.
+- Cache-bust: SHELL_CACHE v140 → v141; package.json 1.5.91 → 1.5.92. app.js unchanged (still v=270).
+
+## v1.5.91 (2026-07-17)
+
+### Redesign: Library toolbar rebuilt as a reveal-panel (search bar was still cramped after v1.5.90's wrap fix)
+
+- **Why:** v1.5.90's flex-wrap fix kept the search input readable but the row was still visually busy — Jacob wanted the toolbar cut down to just two always-visible controls, with everything else tucked behind taps, similar to how Immich's own search panel reveals on focus.
+- **Line 1 is now just two things:** the search input (with an inline "×" clear icon that only shows once you've typed something — no separate Clear button) and a standalone "Sort" chip.
+- **Tap the search input** to reveal a dropdown panel: Search Mode (Text/Smart, exclusive toggle), Select, Camera/Lens/State/City dropdowns, and the People avatar picker. Opens on focus, closes via its backdrop or the Done button — stays open while typing (no more auto-close-on-first-keystroke).
+- **Tap the Sort chip** to reveal a separate dropdown panel: sort options (Upload Date/Date Taken/Last Edited/Direction) on top, Full Sweep toggle + thumbnail refresh (now labeled "Maintenance") on the bottom.
+- The bulk-selection toolbar (count/+Album/DL/Done) stays in the main row whenever Select mode is active — it has to stay reachable while scrolling/tapping the grid, so it can't live inside a collapsed panel.
+- Picking a sort field (Upload Date/Date Taken/Last Edited) or running a thumbnail refresh now auto-closes the Sort panel after the action; the direction toggle and Full Sweep toggle leave it open since those are more often flipped back and forth.
+- Each popup is now anchored to its own trigger (search-input wrapper vs. Sort-chip wrapper) instead of both sharing one `right:0` anchor — previously they'd have stacked in the same top-right spot on wide layouts regardless of which button opened them.
+- Tap-header-to-scroll-to-top (`.header` click handler, ignores taps on buttons/links, scrolls `.view.active`) was already wired from a previous pass — confirmed still working with the new toolbar.
+- `app.js`, `index.html` changes; CSS reuses the existing `.filter-popup` class.
+- Cache-bust: app.js v269 → v270; SHELL_CACHE v139 → v140; package.json 1.5.90 → 1.5.91.
+
+## v1.5.90 (2026-07-17)
+
+### Fix: Library search input unreadable on mobile after the Filters redesign
+
+- **Why:** The v1.5.86 filter redesign moved the Filters button into the search bar's row alongside Clear/Text/Smart/Select. On narrow (mobile) viewports the 5 buttons claim their natural width first, squeezing the `flex:1` search input down to an unreadable sliver — reported directly by Jacob with a mobile screenshot.
+- Added `@media (max-width: 599px)` rule: the search bar row (`#recent-search-bar`) now wraps, giving the search input its own full-width line (`flex: 1 1 100%`) with the buttons flowing onto a second line beneath it. Desktop/tablet (≥600px) layout is unchanged — same row as before.
+- CSS/HTML only, no JS changes.
+- Cache-bust: SHELL_CACHE v138 → v139; package.json 1.5.89 → 1.5.90. app.js unchanged (still v=269).
+
+### Add: unnamed (not-yet-tagged) faces in the People filter
+
+- **Why:** The People list only ever showed named people (`filter(p => p.name)`), matching Immich's default search panel — but Jacob's Immich people-management page also surfaces detected-but-unlabeled faces, and he wanted the same in Darkroom so he can browse/identify a face before going to name it in Immich. Checked scope first: only 34 people total in Immich (22 named, 12 unnamed), so no pagination/performance concern.
+- `buildFilterCache()` and `/api/filters/refresh-people` (both `server.js`) no longer filter out unnamed people — they're included and sorted after named people (stable sort, so relative order within each group is preserved).
+- Frontend (`personChip()` in `app.js`): unnamed people show a "?" fallback (no text to derive an initial from) and an italic dim "Unnamed" label instead of a real name. Clicking still filters the Library to that person's photos like any named person. The "Filter people" search box naturally excludes them once you start typing (nothing to match against) but they're visible when the box is empty.
+- `updateActiveChipLabel()` shows "👤 Unnamed" instead of a blank label when an unnamed person is the active filter.
+- Cache-bust: app.js v=268 → v=269; SHELL_CACHE v137 → v138; package.json 1.5.88 → 1.5.89.
+
+## v1.5.88 (2026-07-13)
+
+### Fix: People avatars never loading in the Filters popup
+
+- **Why:** The v1.5.85 avatar-grid rework put `loading="lazy"` on the person face thumbnails. Diagnosis: navigating directly to `/api/immich/person-thumb/:id` in a browser tab loaded the image perfectly, and the server logs showed **zero** requests ever arriving for the `<img>`-tag versions — meaning the browser was never even issuing the request, not that it was failing server-side. `loading="lazy"` has known reliability issues in some browsers when the image sits inside a container that goes from `display:none` to `display:block` (like this filter popup) combined with `position:absolute` + `overflow-y:auto` — the intersection check that's supposed to trigger the load can simply never fire.
+- Removed `loading="lazy"` from the person avatar `<img>` (`personChip()` in `app.js`) — with ~20-30 people max, there's no real lazy-loading benefit here anyway, unlike the large photo grids elsewhere in the app where it's left in place.
+- Also removed the temporary diagnostic logging added in v1.5.86/v1.5.87 while chasing this down, keeping only the `console.warn`/`console.error` on genuine upstream failures.
+- Cache-bust: app.js v=267 → v=268; SHELL_CACHE v136 → v137; package.json 1.5.87 → 1.5.88.
+
+## v1.5.87 (2026-07-13)
+
+### Debug: log person-thumb proxy failures
+
+- People avatars in the Filters popup are showing initials-only fallback for everyone, including people confirmed (via a direct out-of-band test against Immich) to have a valid thumbnail — so the failure is happening somewhere between `/api/immich/person-thumb/:id` and the browser, not in Immich itself. The proxy previously swallowed both upstream-error and exception cases silently. Added `console.warn`/`console.error` so the next attempt surfaces the real cause in `docker logs`. Diagnostic-only, no behavior change; package.json/app.js/SW untouched.
+
+## v1.5.86 (2026-07-13)
+
+### Fix: archived assets leaking into Library search/filter results
+
+- **Why:** `/api/immich/recent` (plain unfiltered Library browsing) explicitly sends `visibility: 'timeline'` to Immich, correctly excluding archived assets. But the six search/filter endpoints — `/api/immich/search`, `text-search`, `smart-search`, `combined-search`, `tag-search`, `person-search` — never set `visibility` at all, so as soon as you typed a search term or clicked any filter (Camera/Lens/City/Person), archived photos leaked back into the Library grid. Reported directly: "Library and Archive now overlap" — correctly guessed as fallout from the Immich v3 migration, which replaced the old `isArchived` boolean with the `visibility` enum; only the `/recent` sweep got updated for it at the time, not the search endpoints.
+- All six endpoints (and `buildFilterCache()`'s sweep, which indexes Camera/Lens/City/State values for the filter dropdowns) now explicitly pass `visibility: 'timeline'`.
+- Confirmed this doesn't affect Archive browsing: the Archive view (`openArchivedView`) uses a separate `/api/immich/archived` call (`visibility: 'archive'`) and filters client-side over the already-loaded set — it never touches these six endpoints, so archive search still works.
+
+### Add: Filters popup redesign (Phase 4 of Immich-style filter work) — dropdowns, State, layout
+
+- **Why:** Direct feedback after Phase 1 (People avatar grid): the chip-button clutter for Camera/Lens/City needed to become dropdowns like Immich's search panel, Location needed a State tier (not just City), the Filters button/panel needed repositioning and more visual weight, and the popup was "tricky to close."
+- **New State dimension**: `buildFilterCache()` now aggregates `exifInfo.state` (alongside the existing `cities` set) into a new `states` array in the filter cache. Threaded through `text-search`, `smart-search`, and `combined-search` (new 4-way cross-product: camera × lens × city × state) exactly like the existing `city` field.
+- **Camera/Lens/State/City chips → dropdowns**: replaced the button-chip lists (`#chip-cameras`/`#chip-lenses`/`#chip-cities`) with native `<select>` elements (`#filter-camera`/`#filter-lens`/`#filter-state`/`#filter-city`), each single-select. `setFilterDropdown(category, val)` replaces `setRecentChip(val)` — picking a new dropdown value swaps out any prior value from that same category in `state.recentActiveChips`, reusing the exact same downstream search dispatch (`categorizeChips()`, `runMultiChipSearch()`) the old multi-toggle chips used.
+- **Filters button repositioned** to the top-right corner of the search bar (last item in the flex row, after Select), instead of a separate row below the search bar. The popup itself is now a `.filter-popup` anchored `right:0` under the button, bigger (`min(420px, 92vw)` vs the old 500px max, `75vh` max-height vs `60vh`), and larger type throughout (11–14px vs the old 9–11px monospace).
+- **Auto-close on search**: typing in the main Library search box now closes the Filters popup if it's open, mirroring Immich's "Search" button auto-closing its panel.
+- **Fixed the "tricky to close" bug**: the outside-click-to-close listener only listened for `mousedown`, which isn't reliable for closing overlays via touch tap in PWA contexts. Added a paired `touchstart` listener so it closes reliably on mobile/iPad, not just desktop.
+- People avatar grid (Phase 1) sizing bumped slightly (48px → 54px circles) to match the panel's larger scale.
+- Cache-bust: app.js v=266 → v=267; SHELL_CACHE v135 → v136; package.json 1.5.85 → 1.5.86. Filter cache (`data/filter-cache.json`) deleted on deploy to force a rebuild that includes the new `states` field.
+
+## v1.5.85 (2026-07-13)
+
+### Add: People filter — avatar grid + name search (Phase 1 of Immich-style filter redesign)
+
+- **Why:** The Library filter popup's People chips were plain text pills mixed in with Camera/Lens/Location chips — cumbersome to scan and impossible to recognize a person by face, unlike Immich's own search panel which shows a named avatar grid. First phase of a broader plan to bring Darkroom's filter popup closer to Immich's search-options layout (People avatar grid now; Location state/country breakdown, Camera Make tier, and Favorites planned as follow-up phases).
+- **New endpoint**: `GET /api/immich/person-thumb/:id`, mirroring the existing `/api/immich/thumb/:id` proxy pattern — passes through Immich's `/people/{id}/thumbnail` with `x-api-key` auth and the same `Cache-Control: private, max-age=86400` header.
+- **People chips** in the Library filter popup (`#chip-people`) are now a scrollable avatar grid: circular face thumbnail (falls back to an initials circle while loading, or permanently if the person has no Immich face thumbnail yet — the `<img>` is removed on load error, leaving the initials visible), name below, active state highlighted in the accent color. Click behavior (person-search filtering) is unchanged — same `searchByPerson` wiring, just new markup.
+- **New "Filter people" search box** above the grid — client-side substring match against person name (`filterPeopleChips()`), toggles `display` on already-rendered chips rather than re-fetching, so it doesn't lose scroll position and works instantly for large People lists.
+- Image load/error handling attached via `addEventListener` post-`innerHTML`, not inline `onload`/`onerror` attributes — Darkroom's CSP is `script-src 'self'` with no `unsafe-inline`, which silently drops inline handlers (see the CSP note in this same file's history).
+- Cache-bust: app.js v=265 → v=266; SHELL_CACHE v134 → v135; package.json 1.5.84 → 1.5.85.
+
+## v1.5.84 (2026-07-11)
+
+### Add: automatic `createdAt` restore, right on the publish path — no more periodic script
+
+- **Why:** v1.5.82/v0.12.1 fixed Upload Date drift with a Mac-side script (`immich-restore-created-at.py`) that had to be run manually/periodically. In practice these stale-republish situations (see the "9 photos" incident, 2026-07-11) happen often enough that a periodic script isn't good enough — Upload Date would sit wrong until someone remembered to run it.
+- **`/api/lr-uuid-remap` now accepts an optional `originalCreatedAt`** field. If present, it runs `UPDATE asset SET "createdAt" = $1 WHERE id = $2` directly against Immich's Postgres, using a **new dedicated `darkroom_svc` role** — not Immich's own superuser `jaapjan` — scoped via `GRANT` to exactly `SELECT(id)`/`UPDATE(createdAt)` on the `asset` table. Even full credential compromise of Darkroom can't read your library or touch any other table/column.
+- Connection uses the `pg` npm package; credentials live in `.immich-db-creds.json` next to `server.js` (`chmod 600`, not in git, not in the container's env config — deliberately avoided touching Darkroom's own compose/Container Station config for this).
+- Best-effort: any failure (bad timestamp, DB unreachable, missing creds file) is logged and does not affect the UUID-remap or the publish itself — same failure posture as every other Darkroom push in this pipeline.
+- Companion: `lr-immich v0.12.3` now sends `originalCreatedAt` on every `pushUuidRemapToDarkroom()` call (it was already capturing this value, just not sending it). `immich-restore-created-at.py` still exists as a manual fallback/audit tool, but is no longer load-bearing for normal operation.
+
+## v1.5.83 (2026-07-11)
+
+### Fix: full-sweep timeline cache went stale for up to 5min after a live publish
+
+- **Why:** `/api/immich/recent`'s full-mode branch (used by the Upload Date / Last Edited sorts) caches the entire timeline sweep for `UPLOAD_SWEEP_TTL_MS` (5 minutes) to avoid re-fetching thousands of assets from Immich on every request. Discovered live while testing v1.5.82's Last Edited sort and the companion `createdAt` restore script: a brand-new upload and a `createdAt`-restore Postgres write both failed to show up in the correct sort position immediately, because the cache was still serving a pre-change sweep.
+- **New endpoint**: `POST /api/lr-cache-bust`, same auth pattern as `/api/lr-title`/`/api/lr-uuid-remap` (caller's Immich API key, validated via `/users/me`). Just nulls `_uploadSweepCache`/`_uploadSweepCachedAt` so the next full-sweep request re-fetches fresh.
+- **lr-immich v0.12.2** calls this once per publish run (not per-photo) right after the rendition loop, only if at least one photo was actually uploaded or replaced — so Upload Date and Last Edited reflect the latest publish immediately instead of within 5 minutes.
+- Cache-bust: app.js unchanged this release (no frontend change); package.json 1.5.82 → 1.5.83.
+
+
+## v1.5.82 (2026-07-11)
+
+### Add: "Last Edited" sort — separate from Upload Date and Date Taken
+
+- **Why:** Immich v3's copy-based REPLACE (v1.5.81 above) inserts a brand-new asset row on every republish, which resets Immich's own `createdAt` bookkeeping field to "now" — so every future edit to old work was making already-printed/albumed photos look freshly uploaded in the Upload Date sort. Rather than just patching that away, split it into three genuinely useful, distinct axes: **Date Taken** (unaffected, always correct — EXIF capture date), **Uploaded** (the true first-upload date, restored via a companion Mac-side script since Immich has no API field to preserve it directly), and **Last Edited** (new — surfaces what was recently republished, using Immich's `updatedAt`, which was *already* correct with zero fix needed).
+- **New sort button**: "Last Edited", alongside the existing "Upload Date"/"Date Taken". Same window/full-sweep toggle as Upload Date (`updatedAfter` instead of `createdAfter`).
+- `server.js`: `/api/immich/recent` gained a `sort=edited` branch, structurally identical to the existing `upload` branch (same full-sweep cache reused, since it's not date-filtered — only the window fetch and the final sort key differ). `_fetchTimelineSince()` now takes an `afterParam` argument (`createdAfter` or `updatedAfter`) instead of being upload-only.
+- `app.js`: `sortRecentResults()`, `setLibrarySort()`, `updateRecentModeButton()`, and the recent-page fetch URL all extended to handle the third sort mode.
+- `mapAssetWithMeta()` already forwarded `updatedAt` to the frontend (originally added for thumbnail cache-busting) — no backend data-plumbing gap to close for this field, unlike `createdAt`.
+- Companion: `~/Documents/Dev/Scripts/immich-restore-created-at.py` (Mac-side) reads the lr-immich plugin's remap log and restores the true original `createdAt` via a direct Postgres UPDATE — Immich's API has no field for it. Not part of the live publish path (cosmetic, not urgent like the v1.5.81 real-time sync) — run it periodically, same cadence as the reconciliation script.
+- Cache-bust: app.js v=264 → v=265; SHELL_CACHE v133 → v134; package.json 1.5.81 → 1.5.82.
+
+
+## v1.5.81 (2026-07-10)
+
+### Add: `/api/lr-uuid-remap` — real-time UUID reconciliation for the Immich v3 migration
+
+- **Why:** Immich v3 removed the UUID-preserving `PUT /assets/{id}/original` endpoint. The reworked lr-immich plugin's replacement (upload-new + `copyAsset` + delete-old) means the asset UUID **changes** on every republish of an already-published photo. `copyAsset` only knows about Immich's own native albums — it has no idea `prints.json`/`albums.json` exist, so without this, any already-printed or already-albumed photo would go stale (broken thumbnail) the moment it's next edited in Lightroom, until a separate reconciliation script happened to run. Since several albums are embedded on the public lakatua.me portfolio site, that's a real, visitor-facing breakage window, not just an internal inconvenience.
+- **New endpoint:** `POST /api/lr-uuid-remap` `{oldId, newId}` — same auth pattern as the existing `/api/lr-title` (caller's Immich API key, validated against this Darkroom's Immich). Finds `oldId` in any print's `immichId`, any album's `assets` array, or any album's `cover`, and swaps in `newId` in place. Atomic write-back via the existing `saveData()`/`saveAlbums()` helpers.
+- **Called by the plugin** immediately after `copyAsset` succeeds, in the same publish operation that changed the UUID — not deferred. Best-effort: a failure here is logged by the plugin but never fails the publish.
+- Tested against a real copy of production `prints.json`/`albums.json` before deploying (a UUID present in both a print and two albums, a UUID used as an album cover, and a nonexistent UUID as a safe-no-op check) — all three behaved correctly. Verified live post-deploy with a no-op call; confirmed production data untouched.
+- The standalone reconciliation script (`immich-v3-reconcile.py`, Mac-side) remains as a periodic safety net for the rare case Darkroom is unreachable at the exact moment of a publish — no longer the primary mechanism.
+
+
+## v1.5.80 (2026-07-07)
+
+### Fix: album embed stuck "Loading..." in Chromium browsers on the LAN (Private Network Access)
+- The `?embed` album card used by the lakatua.me Astro portfolio (`<DarkroomBanner>`) would hang indefinitely in Brave/Chrome for Jacob specifically — Safari and off-LAN mobile connections were unaffected.
+- **Root cause:** Chromium's Private Network Access (PNA) requires a public page (lakatua.me, served from Cloudflare's public address space) to pass a preflight check before loading a subresource/iframe from a host that resolves to a private IP. Pi-hole's split-horizon DNS resolves `darkroom.jjlnas.com` to the LAN IP (192.168.0.199) for Jacob's own devices, which triggers the PNA gate; the server never answered the `Access-Control-Request-Private-Network` preflight, so Chromium silently blocked the request and `album.js`'s loading placeholder never resolved. Off-LAN (mobile data) resolves the hostname to Cloudflare's public edge instead, so the gate never triggers there — matches the observed Safari-works / Brave-hangs-on-LAN-only / works-on-mobile pattern exactly. Unrelated to the earlier ECH/pi-hole DNS fix (still intact).
+- **Fix:** `server.js` now responds to any request carrying `Access-Control-Request-Private-Network: true` with `Access-Control-Allow-Private-Network: true`, satisfying the PNA preflight.
+- Not visitor-facing — only affects Jacob's own devices on his LAN.
+
 ## v1.5.79 (2026-06-28)
 
 ### Fix: intermittent "wonky" Library listing after album→library (stale async repaint race)

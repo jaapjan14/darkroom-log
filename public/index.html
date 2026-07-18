@@ -121,6 +121,23 @@
   .tag-filter-bar { padding: 0.5rem 1rem 0.75rem; display: flex; gap: 0.4rem; flex-wrap: wrap; }
   .tag-filter { font-family: 'IBM Plex Mono', monospace; font-size: 11px; padding: 0.4rem 0.9rem; background: var(--surface2); border: 1px solid var(--border); color: var(--text-mid); cursor: pointer; transition: all 0.15s; }
   .tag-filter.active { border-color: var(--safe); color: var(--safe); background: var(--safe-glow); }
+  /* FILTER POPUP (Recent/Library tab) — Immich-style search-options panel:
+     bigger + larger type than the old chip-cluster popup, anchored to the
+     right edge under the Filters button in the search bar's corner. */
+  .filter-popup { display: none; position: absolute; top: 3rem; right: 0; background: var(--surface); border: 1px solid var(--border); padding: 1.25rem; z-index: 50; width: min(420px, 92vw); max-height: 75vh; overflow-y: auto; box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
+  .filter-section-label { font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-dim); margin-bottom: 0.5rem; }
+  .filter-dropdown { margin-bottom: 1rem; font-size: 14px; padding: 0.6rem 0.75rem; }
+  /* PEOPLE avatar grid (filter popup) */
+  .people-avatar-grid { display: flex; flex-wrap: wrap; gap: 0.7rem; max-height: 220px; overflow-y: auto; }
+  .person-avatar-item { display: flex; flex-direction: column; align-items: center; width: 62px; cursor: pointer; background: none; border: none; padding: 0; font-family: 'IBM Plex Mono', monospace; }
+  .person-avatar-fallback, .person-avatar-img { width: 54px; height: 54px; border-radius: 50%; border: 2px solid var(--border); background: var(--surface2); transition: border-color 0.15s; }
+  .person-avatar-img { object-fit: cover; display: none; }
+  .person-avatar-fallback { display: flex; align-items: center; justify-content: center; font-size: 18px; color: var(--text-mid); }
+  .person-avatar-item:hover .person-avatar-img, .person-avatar-item:hover .person-avatar-fallback { border-color: var(--text-mid); }
+  .person-avatar-item.active .person-avatar-img, .person-avatar-item.active .person-avatar-fallback { border-color: var(--safe); box-shadow: 0 0 0 2px var(--safe-glow); }
+  .person-avatar-name { margin-top: 0.3rem; font-size: 10px; color: var(--text-mid); text-align: center; max-width: 62px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .person-avatar-item.active .person-avatar-name { color: var(--safe); }
+  .person-avatar-unnamed .person-avatar-name { font-style: italic; color: var(--text-dim); }
   /* PRINT TAGS in detail view */
   .print-tags-row { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.75rem; align-items: center; }
   .print-tag { font-family: 'IBM Plex Mono', monospace; font-size: 10px; padding: 0.2rem 0.5rem; background: var(--surface2); border: 1px solid var(--border); color: var(--text-dim); }
@@ -316,45 +333,62 @@
   </div>
 
   <div class="view" id="recent-view">
-    <div style="max-width:1200px;margin:0 auto;padding:0.75rem 1rem;border-bottom:1px solid var(--border);display:flex;gap:0.5rem;align-items:center">
-      <input type="text" id="recent-search" placeholder="Search..." style="flex:1;font-size:13px" >
-      <button class="btn btn-ghost btn-sm" id="btn-clear-recent-search" data-action="clearRecentSearch" title="Clear search, chips, and person filter" style="white-space:nowrap">✕ Clear</button>
-      <button class="sort-btn" id="search-mode-text"  style="white-space:nowrap">Text</button>
-      <button class="sort-btn active" id="search-mode-smart"  style="white-space:nowrap">✦ Smart</button>
-      <button class="btn btn-ghost btn-sm" id="select-mode-btn" >Select</button>
+    <div id="recent-search-bar" style="max-width:1200px;margin:0 auto;padding:0.75rem 1rem;border-bottom:1px solid var(--border);display:flex;gap:0.5rem;align-items:center;position:relative;flex-wrap:wrap">
+      <div style="position:relative;flex:1;min-width:120px">
+        <input type="text" id="recent-search" placeholder="Search..." autocomplete="off" style="width:100%;font-size:13px;padding-right:2.2rem" >
+        <button id="btn-clear-recent-search" data-action="clearRecentSearch" title="Clear search, chips, and person filter" style="display:none;position:absolute;right:0.3rem;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--text-dim);font-size:15px;line-height:1;cursor:pointer;padding:0.4rem;width:auto">✕</button>
+
+        <!-- Tap the search input to reveal: search mode, select, and all filters.
+             Anchored to this wrapper (not the whole row) so it stays under the input. -->
+        <div id="recent-filter-backdrop" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:100"></div>
+        <div id="recent-filter-popup" class="filter-popup" style="display:none;left:0;right:auto;z-index:101">
+          <div class="filter-section-label">Search Mode</div>
+          <div style="display:flex;gap:0.4rem;margin-bottom:1rem">
+            <button class="tag-filter" id="search-mode-text"  style="flex:1">Text</button>
+            <button class="tag-filter active" id="search-mode-smart"  style="flex:1">✦ Smart</button>
+          </div>
+          <button class="btn btn-ghost btn-sm" id="select-mode-btn" style="width:100%;margin-bottom:1rem">Select</button>
+          <div class="filter-section-label">Camera</div>
+          <select id="filter-camera" class="filter-dropdown"><option value="">All cameras</option></select>
+          <div class="filter-section-label">Lens</div>
+          <select id="filter-lens" class="filter-dropdown"><option value="">All lenses</option></select>
+          <div class="filter-section-label">State</div>
+          <select id="filter-state" class="filter-dropdown"><option value="">All states</option></select>
+          <div class="filter-section-label">City</div>
+          <select id="filter-city" class="filter-dropdown"><option value="">All cities</option></select>
+          <div class="filter-section-label">Film</div>
+          <select id="filter-film" class="filter-dropdown"><option value="">All films</option></select>
+          <div class="filter-section-label">People</div>
+          <input type="text" id="people-filter-input" placeholder="Filter people..." autocomplete="off" style="margin-bottom:0.6rem">
+          <div id="chip-people" class="people-avatar-grid"></div>
+          <div style="margin-top:1rem;text-align:right">
+            <button class="btn btn-ghost btn-sm" id="btn-clear-chips">Clear</button>
+            <button class="btn btn-sm" id="filters-done-btn">Done</button>
+          </div>
+        </div>
+      </div>
+      <div style="position:relative">
+        <button class="sort-btn" id="sort-chip-btn" style="white-space:nowrap">Sort</button>
+        <!-- Tap the Sort chip to reveal: sort options (top), maintenance actions (bottom) -->
+        <div id="sort-backdrop" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:100"></div>
+        <div id="sort-popup" class="filter-popup" style="display:none;z-index:101">
+          <div class="filter-section-label">Sort</div>
+          <button class="sort-btn active" id="lib-sort-upload" style="width:100%;margin-bottom:0.4rem">Upload Date</button>
+          <button class="sort-btn" id="lib-sort-taken" style="width:100%;margin-bottom:0.4rem">Date Taken</button>
+          <button class="sort-btn" id="lib-sort-edited" style="width:100%;margin-bottom:0.4rem" title="Last time this photo's asset was replaced/republished — separate from when it was first uploaded">Last Edited</button>
+          <button class="sort-btn" id="lib-sort-dir" style="width:100%;margin-bottom:1rem">↓ Newest</button>
+          <div class="filter-section-label">Maintenance</div>
+          <button class="sort-btn" id="lib-sort-mode" style="width:100%;margin-bottom:0.4rem" title="Switch between full sweep (all uploads) and fast last-7-days">Full sweep ✓ · Last 7d →</button>
+          <button class="sort-btn" id="refresh-thumbs" style="width:100%" title="Re-fetch thumbnails from Immich — use after re-uploading or replacing photos if thumbnails look wrong">⟳ Thumbnails</button>
+        </div>
+      </div>
       <div id="select-actions" style="display:none;gap:0.5rem;align-items:center">
         <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--text-dim)" id="select-count">0 selected</span>
         <button class="btn btn-ghost btn-sm" id="btn-add-selection-album" >+ Album</button>
         <button class="btn btn-ghost btn-sm" id="btn-download-selection" >↓ DL</button>
         <button class="btn btn-danger btn-sm" id="btn-exit-select" >✕ Done</button>
       </div>
-    </div>
-    <div style="max-width:1200px;margin:0 auto;padding:0.4rem 1rem;display:flex;gap:0.4rem;align-items:center;border-bottom:1px solid var(--border)">
-      <span class="sort-label">Sort</span>
-      <button class="sort-btn active" id="lib-sort-upload" >Upload Date</button>
-      <button class="sort-btn" id="lib-sort-taken" >Date Taken</button>
-
-      <button class="sort-btn" id="lib-sort-dir"  style="margin-left:0.5rem">↓ Newest</button>
-      <button class="sort-btn" id="lib-sort-mode" style="margin-left:0.25rem" title="Switch between full sweep (all uploads) and fast last-7-days">Full sweep ✓ · Last 7d →</button>
-      <button class="sort-btn" id="refresh-thumbs" style="margin-left:auto" title="Re-fetch thumbnails from Immich — use after re-uploading or replacing photos if thumbnails look wrong">⟳ Thumbnails</button>
-    </div>
-    <div style="max-width:1200px;margin:0 auto;padding:0.25rem 1rem;display:flex;gap:0.5rem;align-items:center;position:relative">
-      <button class="sort-btn" id="filters-btn"  style="font-size:10px">⊞ Filters</button>
-      <span id="active-chip-label" style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--safe)"></span>
-      <div id="recent-filter-popup" style="display:none;position:absolute;top:2rem;left:0;background:var(--surface);border:1px solid var(--border);padding:1rem;z-index:50;min-width:320px;max-width:500px;max-height:60vh;overflow-y:auto">
-        <div style="font-family:'IBM Plex Mono',monospace;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--text-dim);margin-bottom:0.5rem">Camera</div>
-        <div id="chip-cameras" style="display:flex;flex-wrap:wrap;gap:0.4rem;margin-bottom:0.75rem"></div>
-        <div style="font-family:'IBM Plex Mono',monospace;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--text-dim);margin-bottom:0.5rem">Lens</div>
-        <div id="chip-lenses" style="display:flex;flex-wrap:wrap;gap:0.4rem;margin-bottom:0.75rem"></div>
-        <div style="font-family:'IBM Plex Mono',monospace;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--text-dim);margin-bottom:0.5rem">Location</div>
-        <div id="chip-cities" style="display:flex;flex-wrap:wrap;gap:0.4rem;margin-bottom:0.75rem"></div>
-        <div style="font-family:'IBM Plex Mono',monospace;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--text-dim);margin-bottom:0.5rem">People</div>
-        <div id="chip-people" style="display:flex;flex-wrap:wrap;gap:0.4rem"></div>
-        <div style="margin-top:0.75rem;text-align:right">
-          <button class="btn btn-ghost btn-sm" id="btn-clear-chips">Clear</button>
-          <button class="btn btn-sm" id="filters-done-btn">Done</button>
-        </div>
-      </div>
+      <span id="active-chip-label" style="flex-basis:100%;font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--safe)"></span>
     </div>
     <div class="gallery-grid" id="recent-grid">
       <div class="loading">Loading...</div>
@@ -776,7 +810,7 @@
 
 <script src="/zoom.js?v=2" defer></script>
 <script src="/audio-engine.js?v=10" defer></script>
-<script src="/app.js?v=264" defer></script>
+<script src="/app.js?v=272" defer></script>
 <script>
 // Service worker - registers sw.js for thumb stale-while-revalidate + shell
 // cache. Was actively unregistered v1.3.0 -> v1.5.61; re-enabled v1.5.62.

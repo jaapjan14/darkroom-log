@@ -18,6 +18,34 @@ const path = require('path');
 const sharp = require('sharp');
 const exifr = require('exifr');
 
+// Immich Postgres access — used ONLY to restore asset.createdAt after a v3
+// copy-based replace (see /api/lr-uuid-remap below and lr-immich v0.12.3+).
+// Immich's own API has no field to set createdAt, so this is the only way.
+// Credentials are for a dedicated, least-privilege role (darkroom_svc) —
+// NOT Immich's own jaapjan superuser — scoped via Postgres GRANT to exactly
+// SELECT(id)/UPDATE(createdAt) on the asset table, nothing else. Lives in a
+// local file (not container env, not git) so this container's compose/env
+// config never needed touching. Best-effort: if the file's missing or the
+// pool can't connect, the createdAt-restore feature just silently no-ops —
+// it's cosmetic (Upload Date sort), never blocks the actual publish.
+let _immichDbPool = null;
+function getImmichDbPool() {
+  if (_immichDbPool !== null) return _immichDbPool;
+  try {
+    const creds = JSON.parse(fs.readFileSync(path.join(__dirname, '.immich-db-creds.json'), 'utf8'));
+    const { Pool } = require('pg');
+    _immichDbPool = new Pool({
+      host: creds.host, port: creds.port, database: creds.database,
+      user: creds.user, password: creds.password,
+      max: 2, idleTimeoutMillis: 30000,
+    });
+  } catch (e) {
+    console.error('immich-db-creds.json missing/invalid — createdAt restore disabled:', e.message);
+    _immichDbPool = false;
+  }
+  return _immichDbPool;
+}
+
 // In-memory cache for asset titles extracted from JPEG IPTC/XMP.
 // Immich's API doesn't surface a title field — LR exports title to IPTC
 // ObjectName / XMP dc:title, which we have to read from the JPEG header
@@ -224,6 +252,10 @@ app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'SAMEORIGIN');
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), fullscreen=*');
+  // Chromium Private Network Access: allow public pages (e.g. lakatua.me embed) to load this pi-hole-resolved-private host
+  if (req.headers['access-control-request-private-network']) {
+    res.setHeader('Access-Control-Allow-Private-Network', 'true');
+  }
   res.setHeader('Content-Security-Policy',
     "default-src 'self'; " +
     "script-src 'self' blob:; " +
@@ -330,6 +362,78 @@ app.post('/api/lr-title', async (req, res) => {
   res.json({ ok: true });
 });
 
+// LR plugin pushes old->new Immich UUID remaps here immediately after a v3
+// copy-based replace (Immich v3 removed the UUID-preserving PUT
+// /assets/{id}/original; the plugin's replacement uploads a new asset +
+// copyAsset + deletes the old one, so the UUID changes on every republish).
+// Immich's own copyAsset has no idea prints.json/albums.json exist — this
+// closes that gap in real time (same publish operation) instead of leaving
+// public album/print pages broken until a periodic reconciliation script
+// happens to run. Auth: same as /api/lr-title — caller's Immich API key,
+// validated against this Darkroom's Immich. Best-effort on the plugin side:
+// a failure here is logged but never fails the publish.
+app.post('/api/lr-uuid-remap', async (req, res) => {
+  const apiKey = req.headers['x-api-key'];
+  if (!apiKey) return res.status(401).json({ error: 'missing api key' });
+  const ok = await validateImmichApiKey(apiKey);
+  if (!ok) return res.status(401).json({ error: 'invalid api key' });
+  const { oldId, newId, originalCreatedAt } = req.body || {};
+  if (!oldId || typeof oldId !== 'string') return res.status(400).json({ error: 'oldId required' });
+  if (!newId || typeof newId !== 'string') return res.status(400).json({ error: 'newId required' });
+
+  let createdAtRestored = false;
+  if (originalCreatedAt && typeof originalCreatedAt === 'string' &&
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z?$/.test(originalCreatedAt)) {
+    const pool = getImmichDbPool();
+    if (pool) {
+      try {
+        await pool.query('UPDATE asset SET "createdAt" = $1 WHERE id = $2', [originalCreatedAt, newId]);
+        createdAtRestored = true;
+      } catch (e) {
+        console.error(`lr-uuid-remap: createdAt restore failed for ${newId}:`, e.message);
+      }
+    }
+  }
+
+  let printsChanged = 0;
+  const prints = loadData();
+  for (const p of prints) {
+    if (p.immichId === oldId) { p.immichId = newId; printsChanged++; }
+  }
+  if (printsChanged > 0) saveData(prints);
+
+  let albumAssetsChanged = 0, albumCoversChanged = 0;
+  const albums = loadAlbums();
+  for (const a of albums) {
+    if (Array.isArray(a.assets)) {
+      for (let i = 0; i < a.assets.length; i++) {
+        if (a.assets[i] === oldId) { a.assets[i] = newId; albumAssetsChanged++; }
+      }
+    }
+    if (a.cover === oldId) { a.cover = newId; albumCoversChanged++; }
+  }
+  if (albumAssetsChanged > 0 || albumCoversChanged > 0) saveAlbums(albums);
+
+  console.log(`lr-uuid-remap: old=${oldId} new=${newId} prints=${printsChanged} albumAssets=${albumAssetsChanged} albumCovers=${albumCoversChanged} createdAtRestored=${createdAtRestored}`);
+  res.json({ ok: true, printsChanged, albumAssetsChanged, albumCoversChanged, createdAtRestored });
+});
+
+// Drop the in-memory full-sweep timeline cache (see UPLOAD_SWEEP_TTL_MS,
+// used by /api/immich/recent's sort=upload/edited full-mode branch) right
+// after a publish, so a just-uploaded or just-replaced photo shows up
+// immediately in Upload Date / Last Edited instead of waiting up to 5min
+// for the TTL to lapse. Same best-effort auth pattern as lr-uuid-remap.
+app.post('/api/lr-cache-bust', async (req, res) => {
+  const apiKey = req.headers['x-api-key'];
+  if (!apiKey) return res.status(401).json({ error: 'missing api key' });
+  const ok = await validateImmichApiKey(apiKey);
+  if (!ok) return res.status(401).json({ error: 'invalid api key' });
+  _uploadSweepCache = null;
+  _uploadSweepCachedAt = 0;
+  console.log('lr-cache-bust: full-sweep cache dropped');
+  res.json({ ok: true });
+});
+
 // Immich proxy - search photos. Queries Immich's filename index AND the
 // local title index in parallel; merges results so a search for "curtains"
 // finds the photo whose IPTC title is Curtains even if the filename is
@@ -342,7 +446,7 @@ app.get('/api/immich/search', requireAuth, async (req, res) => {
       fetch(`${IMMICH_URL}/search/metadata`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-api-key': IMMICH_KEY },
-        body: JSON.stringify({ originalFileName: q, size: 20 })
+        body: JSON.stringify({ originalFileName: q, size: 20, visibility: 'timeline' })
       }).then(r => r.json()).catch(() => ({ assets: { items: [] } })),
       Promise.resolve(searchTitleIndex(q))
     ]);
@@ -484,14 +588,14 @@ async function _fetchAllTimelineAssets() {
   }
   return all;
 }
-async function _fetchTimelineSince(sinceIso) {
+async function _fetchTimelineSince(sinceIso, afterParam = 'createdAfter') {
   const all = [];
   const pageSize = 1000;
   for (let p = 1; p <= 10; p++) {
     const r = await fetch(`${IMMICH_URL}/search/metadata`, {
       method: 'POST',
       headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ size: pageSize, page: p, visibility: 'timeline', createdAfter: sinceIso })
+      body: JSON.stringify({ size: pageSize, page: p, visibility: 'timeline', [afterParam]: sinceIso })
     });
     const data = await r.json();
     const items = (data.assets && data.assets.items) || [];
@@ -518,7 +622,15 @@ app.get('/api/immich/recent', requireAuth, async (req, res) => {
       res.json({ assets: items.map(mapAssetWithMeta), total: data.assets?.total || 0 });
       return;
     }
-    // sort === 'upload' — window (default) or full sweep
+    // sort === 'upload' or 'edited' — window (default) or full sweep.
+    // 'edited' mirrors 'upload' exactly but keys off Immich's updatedAt
+    // instead of createdAt — surfaces recently-republished photos (v3
+    // copy-based replace bumps updatedAt on every edit) separately from
+    // genuinely new uploads. _fetchAllTimelineAssets() isn't date-filtered,
+    // so the SAME full-sweep cache serves both sorts; only the window-mode
+    // fetch and the final sort key differ.
+    const dateField = sort === 'edited' ? 'updatedAt' : 'createdAt';
+    const afterParam = sort === 'edited' ? 'updatedAfter' : 'createdAfter';
     const mode = req.query.mode === 'full' ? 'full' : 'window';
     const windowDays = Math.max(1, Math.min(365, parseInt(req.query.windowDays) || 7));
     let pool;
@@ -531,11 +643,11 @@ app.get('/api/immich/recent', requireAuth, async (req, res) => {
       pool = _uploadSweepCache;
     } else {
       const since = new Date(Date.now() - windowDays * 86400e3).toISOString();
-      pool = await _fetchTimelineSince(since);
+      pool = await _fetchTimelineSince(since, afterParam);
     }
     pool = pool.slice().sort((a, b) => dir === 'asc'
-      ? new Date(a.createdAt) - new Date(b.createdAt)
-      : new Date(b.createdAt) - new Date(a.createdAt));
+      ? new Date(a[dateField]) - new Date(b[dateField])
+      : new Date(b[dateField]) - new Date(a[dateField]));
     const startIdx = (page - 1) * size;
     const slice = pool.slice(startIdx, startIdx + size);
     res.json({
@@ -609,6 +721,25 @@ app.get('/api/immich/thumb/:id', requireAuth, async (req, res) => {
     res.set('Cache-Control', 'private, max-age=86400');
     response.body.pipe(res);
   } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Immich proxy - person face thumbnail (for the People filter avatar grid)
+app.get('/api/immich/person-thumb/:id', requireAuth, async (req, res) => {
+  try {
+    const response = await fetch(`${IMMICH_URL}/people/${req.params.id}/thumbnail`, {
+      headers: { 'x-api-key': IMMICH_KEY }
+    });
+    if (!response.ok) {
+      console.warn('person-thumb upstream error:', req.params.id, response.status);
+      return res.status(response.status).send('upstream ' + response.status);
+    }
+    res.set('Content-Type', response.headers.get('content-type'));
+    res.set('Cache-Control', 'private, max-age=86400');
+    response.body.pipe(res);
+  } catch(e) {
+    console.error('person-thumb proxy error:', req.params.id, e.message);
     res.status(500).json({ error: e.message });
   }
 });
@@ -774,13 +905,15 @@ async function buildFilterCache() {
   const cameras = new Set();
   const lenses = new Set();
   const cities = new Set();
+  const states = new Set();
+  const films = new Set();
   let page = 1;
   while (true) {
     try {
       const r = await fetch(`${IMMICH_URL}/search/metadata`, {
         method: 'POST',
         headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ size: 250, page })
+        body: JSON.stringify({ size: 250, page, visibility: 'timeline' })
       });
       const data = await r.json();
       const items = data.assets?.items || [];
@@ -794,6 +927,12 @@ async function buildFilterCache() {
           if (asset.exifInfo?.model) cameras.add(asset.exifInfo.model);
           if (asset.exifInfo?.lensModel) lenses.add(asset.exifInfo.lensModel);
           if (asset.exifInfo?.city) cities.add(asset.exifInfo.city);
+          if (asset.exifInfo?.state) states.add(asset.exifInfo.state);
+          // Film Type — descriptions follow "Camera | Film | Developer | Lens"
+          // (segment 1 is reliably the film across all format variants, per the
+          // 2026-07-14 full-library audit — see darkroom-film-type-filter-project memory).
+          const filmSeg = asset.exifInfo?.description?.split('|')[1]?.trim();
+          if (filmSeg) films.add(filmSeg);
         } catch(e) {}
         await new Promise(res => setTimeout(res, 20));
       }
@@ -808,19 +947,26 @@ async function buildFilterCache() {
       headers: { 'x-api-key': IMMICH_KEY }
     });
     const pd = await pr.json();
-    people = (pd.people || []).filter(p => p.name).map(p => ({ name: p.name, id: p.id }));
+    // Include unnamed (not-yet-tagged) faces too, sorted after named people —
+    // lets Jacob browse/identify a detected-but-unlabeled face in Darkroom
+    // before going to name them in Immich.
+    people = (pd.people || [])
+      .map(p => ({ name: p.name || '', id: p.id }))
+      .sort((a, b) => (a.name ? 0 : 1) - (b.name ? 0 : 1));
   } catch(e) { console.log('People fetch failed:', e.message); }
 
   const cache = {
     cameras: [...cameras].filter(Boolean).sort(),
     lenses: [...lenses].filter(Boolean).sort(),
     cities: [...cities].filter(Boolean).sort(),
+    states: [...states].filter(Boolean).sort(),
+    films: [...films].filter(Boolean).sort(),
     people,
     builtAt: new Date().toISOString()
   };
   fs.writeFileSync(FILTER_CACHE_FILE, JSON.stringify(cache));
   filterCacheBuilding = false;
-  console.log('Filter cache built:', cache.cameras.length, 'cameras,', cache.lenses.length, 'lenses,', cache.cities.length, 'cities,', people.length, 'people');
+  console.log('Filter cache built:', cache.cameras.length, 'cameras,', cache.lenses.length, 'lenses,', cache.cities.length, 'cities,', cache.states.length, 'states,', cache.films.length, 'films,', people.length, 'people');
 }
 
 // Refresh just the people list from Immich (fast — single API call).
@@ -828,12 +974,14 @@ async function buildFilterCache() {
 // without a full filter-cache rebuild. Camera/lens/city stays cached.
 app.post('/api/filters/refresh-people', requireAuth, async (req, res) => {
   try {
-    const cache = loadFilterCache() || { cameras: [], lenses: [], cities: [], people: [], builtAt: new Date().toISOString() };
+    const cache = loadFilterCache() || { cameras: [], lenses: [], cities: [], states: [], films: [], people: [], builtAt: new Date().toISOString() };
     const pr = await fetch(`${IMMICH_URL}/people?withHidden=false&size=500`, {
       headers: { 'x-api-key': IMMICH_KEY }
     });
     const pd = await pr.json();
-    cache.people = (pd.people || []).filter(p => p.name).map(p => ({ name: p.name, id: p.id }));
+    cache.people = (pd.people || [])
+      .map(p => ({ name: p.name || '', id: p.id }))
+      .sort((a, b) => (a.name ? 0 : 1) - (b.name ? 0 : 1));
     fs.writeFileSync(FILTER_CACHE_FILE, JSON.stringify(cache));
     console.log('People refreshed:', cache.people.length);
     res.json({ ok: true, count: cache.people.length });
@@ -847,10 +995,14 @@ app.get('/api/immich/filter-options', requireAuth, async (req, res) => {
   const cache = loadFilterCache();
   if (!cache) {
     buildFilterCache();
-    res.json({ cameras: [], lenses: [], cities: [], people: [], building: true });
+    res.json({ cameras: [], lenses: [], cities: [], states: [], films: [], people: [], building: true });
   } else {
     const age = Date.now() - new Date(cache.builtAt).getTime();
     if (age > 24 * 60 * 60 * 1000 && !filterCacheBuilding) buildFilterCache();
+    // Existing on-disk cache predates the `states`/`films` fields — default
+    // them so those dropdowns don't error out until the next full rebuild.
+    if (!cache.states) cache.states = [];
+    if (!cache.films) cache.films = [];
     // If cache has no people, fetch them now and return with cache
     if (!cache.people) {
       try {
@@ -858,7 +1010,9 @@ app.get('/api/immich/filter-options', requireAuth, async (req, res) => {
           headers: { 'x-api-key': IMMICH_KEY }
         });
         const pd = await pr.json();
-        cache.people = (pd.people || []).filter(p => p.name).map(p => ({ name: p.name, id: p.id }));
+        cache.people = (pd.people || [])
+      .map(p => ({ name: p.name || '', id: p.id }))
+      .sort((a, b) => (a.name ? 0 : 1) - (b.name ? 0 : 1));
       } catch(e) { cache.people = []; }
     }
     res.json(cache);
@@ -867,17 +1021,22 @@ app.get('/api/immich/filter-options', requireAuth, async (req, res) => {
 
 // Server-side text search across metadata
 app.post('/api/immich/text-search', requireAuth, async (req, res) => {
-  const { query, size = 60, page = 1, model, lensModel, city, personId = null } = req.body;
+  const { query, size = 60, page = 1, model, lensModel, city, state, film, personId = null } = req.body;
   try {
     const chips = {};
     if (model) chips.model = model;
     if (lensModel) chips.lensModel = lensModel;
     if (city) chips.city = city;
+    if (state) chips.state = state;
+    // Film Type is stored in the description field (segment 1 of the pipe-
+    // delimited "Camera | Film | Developer | Lens" format), so it shares
+    // Immich's `description` param with the free-text description search below.
+    if (film) chips.description = film;
     if (personId) chips.personIds = [personId];
     const meta = (fields) => fetch(`${IMMICH_URL}/search/metadata`, {
       method: 'POST',
       headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ size, page, ...chips, ...fields })
+      body: JSON.stringify({ size, page, visibility: 'timeline', ...chips, ...fields })
     });
     // Search across fields — skip fields already occupied by a chip filter
     const searches = [
@@ -885,7 +1044,8 @@ app.post('/api/immich/text-search', requireAuth, async (req, res) => {
       meta({ make: query }),
       !chips.model && meta({ model: query }),
       !chips.city && meta({ city: query }),
-      meta({ description: query }),
+      !chips.state && meta({ state: query }),
+      !chips.description && meta({ description: query }),
       meta({ originalFileName: query }),
     ].filter(Boolean);
 
@@ -935,7 +1095,7 @@ app.post('/api/immich/text-search', requireAuth, async (req, res) => {
         const tagR = await fetch(`${IMMICH_URL}/search/metadata`, {
           method: 'POST',
           headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ tagIds: matched.map(t => t.id), size, page })
+          body: JSON.stringify({ tagIds: matched.map(t => t.id), size, page, visibility: 'timeline' })
         });
         const tagData = await tagR.json();
         for (const a of (tagData.assets?.items || [])) {
@@ -955,12 +1115,14 @@ app.post('/api/immich/text-search', requireAuth, async (req, res) => {
 
 // Smart search (CLIP)
 app.post('/api/immich/smart-search', requireAuth, async (req, res) => {
-  const { query, size = 60, page = 1, model, lensModel, city, personId = null } = req.body;
+  const { query, size = 60, page = 1, model, lensModel, city, state, film, personId = null } = req.body;
   try {
-    const body = { query, size, page };
+    const body = { query, size, page, visibility: 'timeline' };
     if (model) body.model = model;
     if (lensModel) body.lensModel = lensModel;
     if (city) body.city = city;
+    if (state) body.state = state;
+    if (film) body.description = film;
     if (personId) body.personIds = [personId];
     const r = await fetch(`${IMMICH_URL}/search/smart`, {
       method: 'POST',
@@ -977,19 +1139,23 @@ app.post('/api/immich/smart-search', requireAuth, async (req, res) => {
 
 // Multi-field combined search (for filter chips AND logic)
 app.post('/api/immich/combined-search', requireAuth, async (req, res) => {
-  const { cameras = [], lenses = [], cities = [], unknowns = [], personId = null, size = 60, page = 1 } = req.body;
+  const { cameras = [], lenses = [], cities = [], states = [], films = [], unknowns = [], personId = null, size = 60, page = 1 } = req.body;
   try {
     // For unknown chips, detect category by trying each field and seeing which returns results
     let resolvedCameras = [...cameras];
     let resolvedLenses = [...lenses];
     let resolvedCities = [...cities];
+    let resolvedStates = [...states];
+    let resolvedFilms = [...films];
 
     if (unknowns.length) {
       await Promise.all(unknowns.map(async chip => {
         const searches = [
-          { field: 'model', body: { size: 1, page: 1, model: chip } },
-          { field: 'lensModel', body: { size: 1, page: 1, lensModel: chip } },
-          { field: 'city', body: { size: 1, page: 1, city: chip } },
+          { field: 'model', body: { size: 1, page: 1, model: chip, visibility: 'timeline' } },
+          { field: 'lensModel', body: { size: 1, page: 1, lensModel: chip, visibility: 'timeline' } },
+          { field: 'city', body: { size: 1, page: 1, city: chip, visibility: 'timeline' } },
+          { field: 'state', body: { size: 1, page: 1, state: chip, visibility: 'timeline' } },
+          { field: 'description', body: { size: 1, page: 1, description: chip, visibility: 'timeline' } },
         ];
         for (const s of searches) {
           const r = await fetch(`${IMMICH_URL}/search/metadata`, {
@@ -1002,6 +1168,8 @@ app.post('/api/immich/combined-search', requireAuth, async (req, res) => {
             if (s.field === 'model') resolvedCameras.push(chip);
             else if (s.field === 'lensModel') resolvedLenses.push(chip);
             else if (s.field === 'city') resolvedCities.push(chip);
+            else if (s.field === 'state') resolvedStates.push(chip);
+            else if (s.field === 'description') resolvedFilms.push(chip);
             break;
           }
         }
@@ -1011,17 +1179,25 @@ app.post('/api/immich/combined-search', requireAuth, async (req, res) => {
     const cameraList = resolvedCameras.length ? resolvedCameras : [null];
     const lensList = resolvedLenses.length ? resolvedLenses : [null];
     const cityList = resolvedCities.length ? resolvedCities : [null];
+    const stateList = resolvedStates.length ? resolvedStates : [null];
+    const filmList = resolvedFilms.length ? resolvedFilms : [null];
 
     const searches = [];
     for (const cam of cameraList) {
       for (const lens of lensList) {
         for (const city of cityList) {
-          const body = { size, page, type: 'IMAGE' };
-          if (cam) body.model = cam;
-          if (lens) body.lensModel = lens;
-          if (city) body.city = city;
-          if (personId) body.personIds = [personId];
-          searches.push(body);
+          for (const st of stateList) {
+            for (const film of filmList) {
+              const body = { size, page, type: 'IMAGE', visibility: 'timeline' };
+              if (cam) body.model = cam;
+              if (lens) body.lensModel = lens;
+              if (city) body.city = city;
+              if (st) body.state = st;
+              if (film) body.description = film;
+              if (personId) body.personIds = [personId];
+              searches.push(body);
+            }
+          }
         }
       }
     }
@@ -1072,7 +1248,7 @@ app.post('/api/immich/tag-search', requireAuth, async (req, res) => {
     const r = await fetch(`${IMMICH_URL}/search/metadata`, {
       method: 'POST',
       headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tagIds: [match.id], size, page })
+      body: JSON.stringify({ tagIds: [match.id], size, page, visibility: 'timeline' })
     });
     const data = await r.json();
     const items = (data.assets && data.assets.items) || [];
@@ -1092,7 +1268,7 @@ app.post('/api/immich/person-search', requireAuth, async (req, res) => {
     const r = await fetch(`${IMMICH_URL}/search/metadata`, {
       method: 'POST',
       headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ personIds: [personId], size, page })
+      body: JSON.stringify({ personIds: [personId], size, page, visibility: 'timeline' })
     });
     const data = await r.json();
     const items = (data.assets && data.assets.items) || [];

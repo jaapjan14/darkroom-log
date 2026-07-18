@@ -134,14 +134,16 @@ function isRecentFilterActive() {
 }
 
 // Sort asset objects by the current library sort/dir using fields that ARE
-// present in /search/metadata responses: createdAt (upload time) and
-// takenAt/localDateTime/fileCreatedAt (capture time).
+// present in /search/metadata responses: createdAt (upload time), updatedAt
+// (last-edited time — bumped by a v3 copy-based replace, same as a
+// republish always has), and takenAt/localDateTime/fileCreatedAt (capture
+// time).
 function sortRecentResults(arr) {
-  const useUpload = state.librarySort === 'upload';
   const dir = state.librarySortDir === 'asc' ? 1 : -1;
   const ts = a => {
-    const v = useUpload ? (a.createdAt || a.fileCreatedAt)
-                        : (a.takenAt || a.localDateTime || a.fileCreatedAt || a.createdAt);
+    const v = state.librarySort === 'upload' ? (a.createdAt || a.fileCreatedAt)
+      : state.librarySort === 'edited' ? (a.updatedAt || a.createdAt || a.fileCreatedAt)
+      : (a.takenAt || a.localDateTime || a.fileCreatedAt || a.createdAt);
     const t = v ? new Date(v).getTime() : 0;
     return Number.isNaN(t) ? 0 : t;
   };
@@ -159,9 +161,10 @@ function resortActiveFilterIfPresent() {
 
 function setLibrarySort(sort) {
   state.librarySort = sort;
-  // Only clear `active` from actual sort buttons (upload/taken). lib-sort-mode
-  // and lib-sort-dir are toggle buttons with their own visual state, not sorts.
-  document.querySelectorAll('#lib-sort-upload, #lib-sort-taken').forEach(b => b.classList.remove('active'));
+  // Only clear `active` from actual sort buttons (upload/taken/edited).
+  // lib-sort-mode and lib-sort-dir are toggle buttons with their own visual
+  // state, not sorts.
+  document.querySelectorAll('#lib-sort-upload, #lib-sort-taken, #lib-sort-edited').forEach(b => b.classList.remove('active'));
   document.getElementById('lib-sort-' + sort).classList.add('active');
   if (typeof updateRecentModeButton === 'function') updateRecentModeButton();
   if (resortActiveFilterIfPresent()) return;
@@ -180,11 +183,11 @@ function toggleLibrarySortDir() {
   fetchRecentPage();
 }
 
-// Upload-Date sort has two modes:
-//   window: query Immich with createdAfter = now-7d, fast (default)
+// Upload-Date and Last-Edited sorts both have two modes:
+//   window: query Immich with createdAfter/updatedAfter = now-7d, fast (default)
 //   full:   page through every timeline asset, server caches for 5 min,
-//           surfaces freshly-uploaded film scans whose fileCreatedAt buries
-//           them deep in the chronological timeline
+//           surfaces freshly-uploaded/edited film scans whose fileCreatedAt
+//           buries them deep in the chronological timeline
 // The toggle also fires /api/filters/refresh-people so newly-tagged faces
 // from Immich's face-recognition appear in the people filter without a
 // full filter-cache rebuild.
@@ -209,15 +212,16 @@ function toggleRecentMode() {
 function updateRecentModeButton() {
   const btn = document.getElementById('lib-sort-mode');
   if (!btn) return;
-  const visible = state.librarySort === 'upload';
+  const visible = state.librarySort === 'upload' || state.librarySort === 'edited';
   btn.style.display = visible ? '' : 'none';
   if (!visible) return;
+  const label = state.librarySort === 'edited' ? 'edits' : 'uploads';
   btn.textContent = state.recentMode === 'window'
     ? `Last ${state.recentWindowDays}d · Full sweep →`
     : `Full sweep ✓ · Last ${state.recentWindowDays}d →`;
   btn.title = state.recentMode === 'window'
-    ? `Showing uploads from the last ${state.recentWindowDays} days. Click for a full sweep of all uploads (slower, 5-min cache). Also refreshes face tags.`
-    : 'Showing all uploads, sorted by upload date. Click to return to the fast window view.';
+    ? `Showing ${label} from the last ${state.recentWindowDays} days. Click for a full sweep of all ${label} (slower, 5-min cache). Also refreshes face tags.`
+    : `Showing all ${label}, sorted by ${state.librarySort === 'edited' ? 'last-edited' : 'upload'} date. Click to return to the fast window view.`;
 }
 
 async function loadRecent() {
@@ -306,7 +310,7 @@ async function fetchRecentPage() {
   }
   const size = 250;
   const url = `/api/immich/recent?page=${state.recentPage}&size=${size}&sort=${state.librarySort}&dir=${state.librarySortDir}`
-    + (state.librarySort === 'upload' ? `&mode=${state.recentMode}&windowDays=${state.recentWindowDays}` : '');
+    + ((state.librarySort === 'upload' || state.librarySort === 'edited') ? `&mode=${state.recentMode}&windowDays=${state.recentWindowDays}` : '');
   const r = await fetch(url);
   const data = await r.json();
   const items = data.assets || [];
@@ -422,17 +426,21 @@ async function runMultiChipSearch(chips, personId = null) {
     const cameraSet = new Set(opts.cameras || []);
     const lensSet = new Set(opts.lenses || []);
     const citySet = new Set(opts.cities || []);
+    const stateSet = new Set(opts.states || []);
+    const filmSet = new Set(opts.films || []);
     // If filterOptions not loaded, categorize by trying all fields on server
     const cameras = cameraSet.size ? chips.filter(c => cameraSet.has(c)) : [];
     const lenses = lensSet.size ? chips.filter(c => lensSet.has(c)) : [];
     const cities = citySet.size ? chips.filter(c => citySet.has(c)) : [];
+    const states = stateSet.size ? chips.filter(c => stateSet.has(c)) : [];
+    const films = filmSet.size ? chips.filter(c => filmSet.has(c)) : [];
     // For uncategorized chips (when filterOptions not loaded), pass as unknowns
-    const known = new Set([...cameras, ...lenses, ...cities]);
+    const known = new Set([...cameras, ...lenses, ...cities, ...states, ...films]);
     const unknowns = chips.filter(c => !known.has(c));
     const r = await fetch('/api/immich/combined-search', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ cameras, lenses, cities, unknowns, personId, size: 250, page: 1 })
+      body: JSON.stringify({ cameras, lenses, cities, states, films, unknowns, personId, size: 250, page: 1 })
     });
     const data = await r.json();
     const items = data.assets || [];
@@ -453,7 +461,7 @@ async function runMultiChipSearch(chips, personId = null) {
         const r2 = await fetch('/api/immich/combined-search', {
           method: 'POST',
           headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({ cameras, lenses, cities, personId, size: 250, page: state.searchPage })
+          body: JSON.stringify({ cameras, lenses, cities, states, films, personId, size: 250, page: state.searchPage })
         });
         const d2 = await r2.json();
         absorbAssetMeta(d2.assets || []);
@@ -575,28 +583,44 @@ function applyRecentFilters() {
   renderRecentGrid(items);
 }
 
-let _outsideClickHandler = null;
+// Search-reveal panel (Search Mode/Select/Camera/Lens/State/City/People) —
+// opens when the search input is focused ("tap the search bar"), closes via
+// its backdrop or the Done button. A backdrop <div> handles both mouse and
+// touch taps reliably (unlike the old document-level mousedown+touchstart
+// listener pattern, which this replaces).
+function openRecentFilterPopup() {
+  const popup = document.getElementById('recent-filter-popup');
+  if (popup.style.display !== 'none') return; // already open
+  popup.style.display = 'block';
+  document.getElementById('recent-filter-backdrop').style.display = 'block';
+  updateRecentFilterChips();
+}
+function closeRecentFilterPopup() {
+  document.getElementById('recent-filter-popup').style.display = 'none';
+  document.getElementById('recent-filter-backdrop').style.display = 'none';
+}
 function toggleFiltersPopup() {
   const popup = document.getElementById('recent-filter-popup');
-  const opening = popup.style.display === 'none';
-  popup.style.display = opening ? 'block' : 'none';
-  if (_outsideClickHandler) {
-    document.removeEventListener('mousedown', _outsideClickHandler);
-    _outsideClickHandler = null;
-  }
-  if (opening) {
-    updateRecentFilterChips();
-    setTimeout(() => {
-      _outsideClickHandler = function(e) {
-        if (!popup.contains(e.target) && e.target.id !== 'filters-btn') {
-          popup.style.display = 'none';
-          document.removeEventListener('mousedown', _outsideClickHandler);
-          _outsideClickHandler = null;
-        }
-      };
-      document.addEventListener('mousedown', _outsideClickHandler);
-    }, 0);
-  }
+  if (popup.style.display === 'none') openRecentFilterPopup();
+  else closeRecentFilterPopup();
+}
+
+// Sort-reveal panel (Sort options on top, Full Sweep/Thumbnails maintenance
+// below) — opens/closes via the Sort chip, same backdrop-close pattern.
+function openSortPopup() {
+  const popup = document.getElementById('sort-popup');
+  if (popup.style.display !== 'none') return;
+  popup.style.display = 'block';
+  document.getElementById('sort-backdrop').style.display = 'block';
+}
+function closeSortPopup() {
+  document.getElementById('sort-popup').style.display = 'none';
+  document.getElementById('sort-backdrop').style.display = 'none';
+}
+function toggleSortPopup() {
+  const popup = document.getElementById('sort-popup');
+  if (popup.style.display === 'none') openSortPopup();
+  else closeSortPopup();
 }
 
 function updateRecentFilterChips() {
@@ -604,20 +628,90 @@ function updateRecentFilterChips() {
   const cameras = opts.cameras || [];
   const lenses = opts.lenses || [];
   const cities = opts.cities || [];
+  const states = opts.states || [];
+  const films = opts.films || [];
   const people = opts.people || [];
   const building = opts.building;
-  const chip = (label, val) => `<button class="tag-filter${state.recentActiveChips.has(val) ? ' active' : ''}" data-action="setRecentChip" data-val="${val}">${label}</button>`;
-  const personChip = (p) => `<button class="tag-filter${state.recentActivePerson === p.id ? ' active' : ''}" data-action="searchByPerson" data-id="${p.id}" data-name="${p.name}">${p.name}</button>`;
-  const camEl = document.getElementById('chip-cameras');
-  const lensEl = document.getElementById('chip-lenses');
-  const cityEl = document.getElementById('chip-cities');
+  // Camera/Lens/State/City are single-select dropdowns (Immich-style) — each
+  // category holds at most one active value in state.recentActiveChips, so
+  // picking a new value just swaps out any prior value from that category.
+  const populateDropdown = (id, values, label) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (!values.length) {
+      el.innerHTML = `<option value="">${building ? 'Building index…' : 'None found'}</option>`;
+      el.disabled = true;
+      return;
+    }
+    el.disabled = false;
+    const known = new Set(values);
+    const current = [...state.recentActiveChips].find(v => known.has(v)) || '';
+    const optsHtml = values.map(v => {
+      const safe = String(v).replace(/"/g, '&quot;');
+      return `<option value="${safe}"${v === current ? ' selected' : ''}>${v}</option>`;
+    }).join('');
+    el.innerHTML = `<option value="">All ${label}</option>${optsHtml}`;
+  };
+  populateDropdown('filter-camera', cameras, 'cameras');
+  populateDropdown('filter-lens', lenses, 'lenses');
+  populateDropdown('filter-state', states, 'states');
+  populateDropdown('filter-city', cities, 'cities');
+  populateDropdown('filter-film', films, 'films');
+  // Avatar-grid person picker (mirrors Immich's People search panel) — face
+  // thumbnail via the /api/immich/person-thumb proxy, with an initials
+  // fallback shown until the image loads (or if the person has no face
+  // thumbnail yet, in which case onerror just removes the broken <img>).
+  const personChip = (p) => {
+    const hasName = !!p.name;
+    const name = String(p.name).replace(/"/g, '&quot;');
+    const pname = String(p.name).toLowerCase().replace(/"/g, '&quot;');
+    // Unnamed (not-yet-tagged in Immich) faces have no text to derive an
+    // initial from — show "?" instead, and label them so it's clear why.
+    const initial = hasName ? String(p.name).trim().charAt(0).toUpperCase() : '?';
+    const labelText = hasName ? name : 'Unnamed';
+    return `<button class="person-avatar-item${!hasName ? ' person-avatar-unnamed' : ''}${state.recentActivePerson === p.id ? ' active' : ''}" data-action="searchByPerson" data-id="${p.id}" data-name="${name}" data-pname="${pname}">
+      <span class="person-avatar-fallback">${initial}</span>
+      <img class="person-avatar-img" src="/api/immich/person-thumb/${p.id}" alt="">
+      <span class="person-avatar-name">${labelText}</span>
+    </button>`;
+  };
   const peopleEl = document.getElementById('chip-people');
   const loadingMsg = building ? '<span style="color:var(--text-dim);font-size:11px">Building index...</span>' : '<span style="color:var(--text-dim);font-size:11px">None found</span>';
-  if (camEl) camEl.innerHTML = cameras.map(c => chip(c, c)).join('') || loadingMsg;
-  if (lensEl) lensEl.innerHTML = lenses.map(l => chip(l, l)).join('') || loadingMsg;
-  if (cityEl) cityEl.innerHTML = cities.map(c => chip(c, c)).join('') || loadingMsg;
-  if (peopleEl) peopleEl.innerHTML = people.map(p => personChip(p)).join('') || loadingMsg;
+  if (peopleEl) {
+    peopleEl.innerHTML = people.map(p => personChip(p)).join('') || loadingMsg;
+    // CSP is script-src 'self' with no 'unsafe-inline', so image load/error
+    // handlers must be attached via addEventListener, not inline onload/onerror
+    // (see darkroom-csp-no-inline-handlers memory — inline handlers are
+    // silently dropped, not just warned about).
+    peopleEl.querySelectorAll('.person-avatar-img').forEach(img => {
+      const showImg = () => {
+        img.style.display = 'block';
+        const fallback = img.previousElementSibling;
+        if (fallback) fallback.style.display = 'none';
+      };
+      if (img.complete && img.naturalWidth > 0) {
+        showImg();
+      } else {
+        img.addEventListener('load', showImg);
+        img.addEventListener('error', () => img.remove());
+      }
+    });
+  }
+  filterPeopleChips();
 
+}
+
+// Live-filters the People avatar grid by name substring as the user types
+// in #people-filter-input. Purely client-side — all people chips are already
+// rendered by updateRecentFilterChips, this just toggles visibility so we
+// don't refetch/re-render (and don't lose scroll position) on every keystroke.
+function filterPeopleChips() {
+  const input = document.getElementById('people-filter-input');
+  const q = (input?.value || '').trim().toLowerCase();
+  document.querySelectorAll('#chip-people .person-avatar-item').forEach(el => {
+    const match = !q || (el.dataset.pname || '').includes(q);
+    el.style.display = match ? '' : 'none';
+  });
 }
 
 // Filter the Library grid to all assets carrying a specific Immich tag.
@@ -768,19 +862,28 @@ function categorizeChips() {
   const cameraSet = new Set(opts.cameras || []);
   const lensSet = new Set(opts.lenses || []);
   const citySet = new Set(opts.cities || []);
+  const stateSet = new Set(opts.states || []);
+  const filmSet = new Set(opts.films || []);
   return {
     model: chips.find(c => cameraSet.has(c)),
     lensModel: chips.find(c => lensSet.has(c)),
-    city: chips.find(c => citySet.has(c))
+    city: chips.find(c => citySet.has(c)),
+    state: chips.find(c => stateSet.has(c)),
+    film: chips.find(c => filmSet.has(c))
   };
 }
 
-function setRecentChip(val) {
-  if (state.recentActiveChips.has(val)) {
-    state.recentActiveChips.delete(val);
-  } else {
-    state.recentActiveChips.add(val);
+// Camera/Lens/State/City filter dropdowns (single-select per category) —
+// picking a new value replaces any prior value from that same category in
+// state.recentActiveChips, then re-runs the same search dispatch the old
+// multi-toggle chips used.
+// category matches a state.filterOptions key: 'cameras'|'lenses'|'states'|'cities'.
+function setFilterDropdown(category, val) {
+  const known = new Set((state.filterOptions || {})[category] || []);
+  for (const v of [...state.recentActiveChips]) {
+    if (known.has(v)) state.recentActiveChips.delete(v);
   }
+  if (val) state.recentActiveChips.add(val);
   updateActiveChipLabel();
   updateRecentFilterChips();
   const chips = [...state.recentActiveChips];
@@ -805,7 +908,7 @@ function updateActiveChipLabel() {
   if (state.recentActivePerson) {
     const people = (state.filterOptions && state.filterOptions.people) || [];
     const p = people.find(x => x.id === state.recentActivePerson);
-    if (p) parts.push('👤 ' + p.name);
+    if (p) parts.push('👤 ' + (p.name || 'Unnamed'));
   }
   parts.push(...[...state.recentActiveChips]);
   label.textContent = parts.join(' · ');
@@ -825,6 +928,8 @@ function clearRecentChip() {
 function clearRecentSearch() {
   const searchEl = document.getElementById('recent-search');
   if (searchEl) searchEl.value = '';
+  const clearBtn = document.getElementById('btn-clear-recent-search');
+  if (clearBtn) clearBtn.style.display = 'none';
   state.recentActivePerson = null;
   state.recentActiveChips = new Set();
   state.recentSmartResults = [];
@@ -4600,21 +4705,36 @@ function wireListeners() {
   w('sort-sessions', 'click', () => setSort('sessions'));
 
   // Library
-  w('recent-search', 'input', (e) => handleRecentSearch(e.target.value));
-  w('refresh-thumbs', 'click', (e) => refreshThumbnails(e.currentTarget));
+  w('recent-search', 'input', (e) => {
+    handleRecentSearch(e.target.value);
+    document.getElementById('btn-clear-recent-search').style.display = e.target.value ? 'block' : 'none';
+  });
+  // Tap into the search bar to reveal Search Mode/Select/Filters — stays
+  // open while typing (closes via its backdrop or the Done button instead).
+  w('recent-search', 'focus', openRecentFilterPopup);
+  w('recent-filter-backdrop', 'click', closeRecentFilterPopup);
+  w('refresh-thumbs', 'click', (e) => { refreshThumbnails(e.currentTarget); closeSortPopup(); });
   w('search-mode-text', 'click', () => setSearchMode('text'));
   w('search-mode-smart', 'click', () => setSearchMode('smart'));
-  w('select-mode-btn', 'click', () => toggleSelectMode());
+  w('select-mode-btn', 'click', () => { toggleSelectMode(); closeRecentFilterPopup(); });
   w('btn-add-selection-album', 'click', () => addSelectionToAlbum());
   w('btn-download-selection', 'click', () => downloadSelectedAssets());
   w('btn-exit-select', 'click', () => exitSelectMode());
-  w('lib-sort-upload', 'click', () => setLibrarySort('upload'));
-  w('lib-sort-taken', 'click', () => setLibrarySort('taken'));
+  w('lib-sort-upload', 'click', () => { setLibrarySort('upload'); closeSortPopup(); });
+  w('lib-sort-taken', 'click', () => { setLibrarySort('taken'); closeSortPopup(); });
+  w('lib-sort-edited', 'click', () => { setLibrarySort('edited'); closeSortPopup(); });
   w('lib-sort-dir', 'click', () => toggleLibrarySortDir());
   w('lib-sort-mode', 'click', () => toggleRecentMode());
-  w('filters-btn', 'click', () => toggleFiltersPopup());
-  w('filters-done-btn', 'click', () => toggleFiltersPopup());
-  w('btn-clear-chips', 'click', () => { clearRecentChip(); toggleFiltersPopup(); });
+  w('sort-chip-btn', 'click', toggleSortPopup);
+  w('sort-backdrop', 'click', closeSortPopup);
+  w('people-filter-input', 'input', () => filterPeopleChips());
+  w('filter-camera', 'change', (e) => setFilterDropdown('cameras', e.target.value));
+  w('filter-lens', 'change', (e) => setFilterDropdown('lenses', e.target.value));
+  w('filter-state', 'change', (e) => setFilterDropdown('states', e.target.value));
+  w('filter-city', 'change', (e) => setFilterDropdown('cities', e.target.value));
+  w('filter-film', 'change', (e) => setFilterDropdown('films', e.target.value));
+  w('filters-done-btn', 'click', closeRecentFilterPopup);
+  w('btn-clear-chips', 'click', () => { clearRecentChip(); closeRecentFilterPopup(); });
 
   // Immich sort/filter
   // btn-immich-add-album removed — handled by data-action="openImmichAddToAlbum" delegation
@@ -4826,7 +4946,6 @@ document.addEventListener('click', (e) => {
 
   switch(action) {
     // Filter chips
-    case 'setRecentChip': setRecentChip(val); break;
     case 'searchByPerson': searchByPerson(id, el.dataset.name); break;
     case 'searchByImmichTag': searchByImmichTag(el.dataset.tag); break;
     case 'clearRecentSearch': clearRecentSearch(); break;
