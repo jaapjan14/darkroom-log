@@ -8,6 +8,7 @@
 - Added `autocomplete="off"` to both inputs.
 - `index.html` only, no JS changes.
 - Cache-bust: SHELL_CACHE v142 → v143; package.json 1.5.93 → 1.5.94. app.js unchanged (still v=272).
+- Release housekeeping (2026-07-18): synced NAS v1.5.76 → v1.5.94 into the local repo, committed `35fadba` (code sync) + `9bd7e2b` (DOCKERHUB.md What's new), pushed to GitHub `main`, and published to Docker Hub as `jaap14/darkroom-log:1.5.94` + `:latest` (amd64 via `buildx`).
 
 ## v1.5.93 (2026-07-17)
 
