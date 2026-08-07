@@ -244,7 +244,17 @@
     .detail-layout { display: grid; grid-template-columns: 3fr 2fr; min-height: 100%; }
     .detail-left { position: sticky; top: 0; height: calc(100dvh - 92px); display: flex; align-items: center; justify-content: center; overflow: hidden; background: #000; }
     .detail-image { max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; display: block; }
-    .detail-right { overflow-y: auto; border-left: 1px solid var(--border); }
+    /* height (not just min-height on .detail-layout) is required here — CSS
+       grid rows auto-size to fit content by default, so without a hard cap
+       .detail-right just grows to match its own content height and its own
+       overflow-y:auto never has anything to actually scroll. Matches
+       .detail-left's height formula so both columns agree on the viewport
+       bound. Found 2026-08-06: the Tags & Captions panel was the first
+       content long enough to push .detail-right past the viewport and
+       expose this — no scrollbar, no response to wheel/trackpad, silently
+       inaccessible content, on desktop widths only (mobile stacks instead
+       of using this grid, so it was unaffected). */
+    .detail-right { overflow-y: auto; border-left: 1px solid var(--border); height: calc(100dvh - 92px); }
     #recent-detail-view.active { overflow-y: hidden; }
   }
   /* Phone landscape: phone-width is >600px so the 600px rule above kicks in,
@@ -373,8 +383,8 @@
         <div id="sort-backdrop" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:100"></div>
         <div id="sort-popup" class="filter-popup" style="display:none;z-index:101">
           <div class="filter-section-label">Sort</div>
-          <button class="sort-btn active" id="lib-sort-upload" style="width:100%;margin-bottom:0.4rem">Upload Date</button>
-          <button class="sort-btn" id="lib-sort-taken" style="width:100%;margin-bottom:0.4rem">Date Taken</button>
+          <button class="sort-btn" id="lib-sort-upload" style="width:100%;margin-bottom:0.4rem">Upload Date</button>
+          <button class="sort-btn active" id="lib-sort-taken" style="width:100%;margin-bottom:0.4rem">Date Taken</button>
           <button class="sort-btn" id="lib-sort-edited" style="width:100%;margin-bottom:0.4rem" title="Last time this photo's asset was replaced/republished — separate from when it was first uploaded">Last Edited</button>
           <button class="sort-btn" id="lib-sort-dir" style="width:100%;margin-bottom:1rem">↓ Newest</button>
           <div class="filter-section-label">Maintenance</div>
@@ -810,7 +820,7 @@
 
 <script src="/zoom.js?v=2" defer></script>
 <script src="/audio-engine.js?v=10" defer></script>
-<script src="/app.js?v=272" defer></script>
+<script src="/app.js?v=276" defer></script>
 <script>
 // Service worker - registers sw.js for thumb stale-while-revalidate + shell
 // cache. Was actively unregistered v1.3.0 -> v1.5.61; re-enabled v1.5.62.

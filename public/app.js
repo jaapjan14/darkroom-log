@@ -28,7 +28,7 @@ let state = {
   fullscreenOpen: false,
   recentMeta: {},
   filterOptions: null,
-  librarySort: 'upload',
+  librarySort: 'taken',
   librarySortDir: 'desc',
   recentMode: 'full', // upload-sort default: 'full' (all uploads, paginated w/ Load More) | 'window' (last N days, fast)
   recentWindowDays: 7,
@@ -228,8 +228,9 @@ async function loadRecent() {
   state.recentPage = 1;
   state.recentItems = [];
   state.recentLoaded = true;
-  // Default sort is now 'upload' — make the window/full-sweep toggle reflect
-  // the initial mode on first load (it's otherwise only updated via setLibrarySort).
+  // Make the window/full-sweep toggle reflect the initial mode on first load
+  // (it's otherwise only updated via setLibrarySort; hidden entirely unless
+  // the default sort is 'upload'/'edited' — see updateRecentModeButton).
   if (typeof updateRecentModeButton === 'function') updateRecentModeButton();
   await fetchRecentPage();
   fetchFilterOptions();
@@ -1173,8 +1174,15 @@ async function renderRecentDetail(assetId, navGen) {
   const assetAlbums = (state.albums || []).filter(a => (a.assets || []).includes(assetId));
 
   // Format date
-  const takenDate = meta.takenAt ? new Date(meta.takenAt).toLocaleDateString('en-US', {weekday:'short', year:'numeric', month:'short', day:'numeric'}) : '';
-  const takenTime = meta.takenAt ? new Date(meta.takenAt).toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit'}) : '';
+  // timeZone:'UTC' is deliberate, not a bug: Immich's `localDateTime` is the
+  // capture's wall-clock reading serialized with a dummy UTC ('Z') marker —
+  // it's meant to be displayed literally, not re-converted through the
+  // viewer's own timezone. Letting toLocaleDateString/TimeString apply the
+  // browser's local offset on top double-shifts it (e.g. a 4:34 PM Pacific
+  // capture rendering as 9:34 AM for a Pacific-timezone viewer). Forcing UTC
+  // here just means "print the digits Immich gave us, don't convert them."
+  const takenDate = meta.takenAt ? new Date(meta.takenAt).toLocaleDateString('en-US', {weekday:'short', year:'numeric', month:'short', day:'numeric', timeZone:'UTC'}) : '';
+  const takenTime = meta.takenAt ? new Date(meta.takenAt).toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit', timeZone:'UTC'}) : '';
 
   // Map
   const hasGPS = meta.latitude && meta.longitude;
@@ -1270,9 +1278,17 @@ async function renderRecentDetail(assetId, navGen) {
               </div>
             </div>` : ''}
           </div>
+          <div style="margin-top:0.75rem;padding-top:0.75rem;border-top:1px solid var(--border)">
+            <div style="display:flex;align-items:center;justify-content:space-between">
+              <div class="sessions-label">Tags &amp; Captions</div>
+              <button id="generate-tags-btn-library" class="btn btn-ghost btn-sm" data-action="generateTags" data-id="${assetId}">Generate</button>
+            </div>
+            <div id="generated-tags-panel-library"></div>
+          </div>
         </div>
       </div>
   `;
+  loadGeneratedTagsPanel({ assetId, title: meta.title || '', tags: Array.isArray(meta.tags) ? meta.tags : [], allowAddTag: false, panelId: 'generated-tags-panel-library', btnId: 'generate-tags-btn-library' });
 }
 
 // Downscale a JPEG/PNG blob via canvas, returning a JPEG blob with longest edge ≤ maxPx.
@@ -2608,15 +2624,20 @@ async function _computeAlbumDateRange(album) {
   return _formatDateRange(dates[0], dates[dates.length - 1]);
 }
 
+// Same UTC-literal treatment as renderRecentDetail's takenDate/takenTime —
+// these Dates are built from Immich's localDateTime (wall-clock digits with
+// a dummy 'Z'), so every getter here must read UTC fields, not local ones,
+// or the range shifts by the viewer's timezone offset (can cross a day
+// boundary and merge/split what should be separate calendar days).
 function _formatDateRange(d1, d2) {
-  const month = d => d.toLocaleString('en-US', { month: 'short' });
-  const year = d => d.getFullYear();
+  const month = d => d.toLocaleString('en-US', { month: 'short', timeZone: 'UTC' });
+  const year = d => d.getUTCFullYear();
   // Same calendar day
-  if (d1.toDateString() === d2.toDateString()) {
-    return `${month(d1)} ${d1.getDate()}, ${year(d1)}`;
+  if (year(d1) === year(d2) && d1.getUTCMonth() === d2.getUTCMonth() && d1.getUTCDate() === d2.getUTCDate()) {
+    return `${month(d1)} ${d1.getUTCDate()}, ${year(d1)}`;
   }
   // Same month and year
-  if (year(d1) === year(d2) && d1.getMonth() === d2.getMonth()) {
+  if (year(d1) === year(d2) && d1.getUTCMonth() === d2.getUTCMonth()) {
     return `${month(d1)} ${year(d1)}`;
   }
   // Same year, different months
@@ -3857,6 +3878,13 @@ async function showDetail(printId, navGen) {
           ${printAlbums.map(a => `<button class="album-chip" data-action="openAlbum" data-id="${a.id}" title="Open album">${a.title}</button>`).join('')}
         </div>
       ` : ''}
+      <div style="margin-top:0.75rem;padding-top:0.75rem;border-top:1px solid var(--border)">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <div class="sessions-label">Tags &amp; Captions</div>
+          <button id="generate-tags-btn-print" class="btn btn-ghost btn-sm" data-action="generateTags" data-id="${print.immichId}">Generate</button>
+        </div>
+        <div id="generated-tags-panel-print"></div>
+      </div>
     </div>
     <div class="sessions-header">
       <div class="sessions-label">Print Sessions (${sessions.length})</div>
@@ -3903,6 +3931,7 @@ async function showDetail(printId, navGen) {
     `}).join('')}
       </div>
   `;
+  loadGeneratedTagsPanel({ assetId: print.immichId, title: print.title, tags: print.tags || [], allowAddTag: true, panelId: 'generated-tags-panel-print', btnId: 'generate-tags-btn-print' });
 }
 
 function closePrintDetail() {
@@ -4129,6 +4158,141 @@ function updateTagsDisplay(print) {
     <button class="btn-icon" data-action="showTagInput" style="font-size:11px;color:var(--safe)">+ tag</button>
     <input class="tag-add-input" id="tag-add-input" type="text" placeholder="tag name">
   `;
+}
+
+// ── Tag & Caption generator (Lomography / Flickr / Instagram) ─────────────
+// See ~/Desktop/tag-generation-spec.md. Output is generated server-side
+// (lib/tag-format.js), keyed by Immich asset ID, and cached in
+// generated-tags.json — this file only renders it and wires up
+// generate/copy/add-suggested-tag. Works from both the Prints tab (tags
+// come from print.tags, editable here) and the Library tab (tags come from
+// Immich/LR sync, read-only here — see state.currentGeneratedCtx.allowAddTag).
+function escapeHtmlLite(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function renderGeneratedTagsBlock(label, field, text) {
+  return `
+    <div style="margin-bottom:0.6rem">
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <div style="font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.03em">${label}</div>
+        <button class="btn-icon" data-action="copyGeneratedText" data-field="${field}" style="font-size:10px;color:var(--safe)">Copy</button>
+      </div>
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;white-space:pre-wrap;color:var(--text)">${escapeHtmlLite(text)}</div>
+    </div>
+  `;
+}
+
+// allowAddTag: Prints tab tags are Darkroom's own (writable via PUT
+// /api/prints/:id) — Library tab tags are Immich/LR-synced and read-only
+// here, so suggestions there render as plain chips with no add action.
+function renderGeneratedTagsPanel(gt, allowAddTag) {
+  if (!gt) return '<div class="loading" style="padding:0.5rem 0;font-size:11px;color:var(--text-dim)">Not generated yet.</div>';
+  const flickrText = (gt.flickr || []).join(', ');
+  const igText = gt.instagram ? gt.instagram.text : '';
+  return `
+    ${renderGeneratedTagsBlock('Standard Caption', 'standardCaption', gt.standardCaption)}
+    ${renderGeneratedTagsBlock('Lomography', 'lomography', gt.lomography)}
+    ${renderGeneratedTagsBlock('Flickr', 'flickr', flickrText)}
+    ${renderGeneratedTagsBlock('Instagram', 'instagram', igText)}
+    ${gt.suggestedTags && gt.suggestedTags.length ? `
+      <div style="margin-top:0.5rem">
+        <div style="font-size:10px;color:var(--text-dim);margin-bottom:0.3rem">${allowAddTag ? 'Suggested from photo — not yet in your tags' : 'Suggested from photo (informational — tags here come from Lightroom sync)'}</div>
+        <div style="display:flex;flex-wrap:wrap;gap:0.35rem">
+          ${gt.suggestedTags.map(t => allowAddTag
+            ? `<button class="btn-icon" data-action="addSuggestedTag" data-tag="${escapeHtmlLite(t)}" style="font-size:11px;border:1px solid var(--border);border-radius:4px;padding:2px 6px">+ ${escapeHtmlLite(t)}</button>`
+            : `<span style="font-size:11px;border:1px solid var(--border);border-radius:4px;padding:2px 6px;color:var(--text-dim)">${escapeHtmlLite(t)}</span>`
+          ).join('')}
+        </div>
+      </div>
+    ` : ''}
+  `;
+}
+
+// Populates the panel from cache on open (no model call) — called from both
+// showDetail (Prints) and renderRecentDetail (Library) after their own HTML
+// is in place. ctx: { assetId, title, tags, allowAddTag, panelId, btnId }.
+// panelId/btnId are per-context (not a shared #generated-tags-panel id)
+// because both overlay views stay in the DOM at once, just toggled via
+// .active — a shared id would resolve to whichever rendered first, not
+// necessarily the one currently open.
+async function loadGeneratedTagsPanel(ctx) {
+  state.currentGeneratedCtx = ctx;
+  const panel = document.getElementById(ctx.panelId);
+  if (!panel) return;
+  try {
+    const r = await fetch(`/api/generate-tags/${ctx.assetId}`);
+    // Stale-result guard: rapid prev/next may have moved on to a different
+    // photo (new ctx object) while this fetch was in flight.
+    if (state.currentGeneratedCtx !== ctx) return;
+    if (!r.ok) { panel.innerHTML = renderGeneratedTagsPanel(null); return; }
+    const gt = await r.json();
+    if (state.currentGeneratedCtx !== ctx) return;
+    state.currentGeneratedTags = gt;
+    panel.innerHTML = renderGeneratedTagsPanel(gt, ctx.allowAddTag);
+    const btn = document.getElementById(ctx.btnId);
+    if (btn) btn.textContent = 'Regenerate';
+  } catch (e) {
+    if (state.currentGeneratedCtx === ctx) panel.innerHTML = renderGeneratedTagsPanel(null);
+  }
+}
+
+async function generateTags(assetId) {
+  const ctx = state.currentGeneratedCtx;
+  if (!ctx || ctx.assetId !== assetId) return;
+  const panel = document.getElementById(ctx.panelId);
+  if (panel) panel.innerHTML = '<div class="loading" style="padding:0.5rem 0;font-size:11px">Generating…</div>';
+  try {
+    const r = await fetch(`/api/generate-tags/${assetId}`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ title: ctx.title, tags: ctx.tags || [] })
+    });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'Request failed');
+    const gt = await r.json();
+    if (state.currentGeneratedCtx !== ctx) return; // moved on to a different photo
+    state.currentGeneratedTags = gt;
+    if (panel) panel.innerHTML = renderGeneratedTagsPanel(gt, ctx.allowAddTag);
+    const btn = document.getElementById(ctx.btnId);
+    if (btn) btn.textContent = 'Regenerate';
+  } catch (e) {
+    if (panel && state.currentGeneratedCtx === ctx) panel.innerHTML = `<div class="loading" style="padding:0.5rem 0;font-size:11px;color:var(--red)">Generation failed: ${escapeHtmlLite(e.message)}</div>`;
+  }
+}
+
+function copyGeneratedText(field) {
+  const gt = state.currentGeneratedTags;
+  if (!gt) return;
+  const text = field === 'flickr' ? (gt.flickr || []).join(', ')
+    : field === 'instagram' ? (gt.instagram ? gt.instagram.text : '')
+    : (gt[field] || '');
+  navigator.clipboard.writeText(text).then(() => {
+    alert('Copied to clipboard!');
+  }).catch(() => {
+    prompt('Copy this:', text);
+  });
+}
+
+// Prints-tab only (see allowAddTag) — writes to print.tags via the existing
+// PUT /api/prints/:id path, same as the manual "+ tag" input.
+async function addSuggestedTag(tag) {
+  const print = state.prints.find(p => p.id === state.currentPrintId);
+  if (!print) return;
+  const tags = [...new Set([...(print.tags || []), tag])];
+  await fetch(`/api/prints/${state.currentPrintId}`, {
+    method: 'PUT',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({tags})
+  });
+  print.tags = tags;
+  updateTagsDisplay(print);
+  const ctx = state.currentGeneratedCtx;
+  if (ctx) ctx.tags = tags;
+  if (state.currentGeneratedTags) {
+    state.currentGeneratedTags.suggestedTags = (state.currentGeneratedTags.suggestedTags || []).filter(t => t !== tag);
+    const panel = ctx && document.getElementById(ctx.panelId);
+    if (panel) panel.innerHTML = renderGeneratedTagsPanel(state.currentGeneratedTags, true);
+  }
 }
 
 async function saveSession() {
@@ -5030,6 +5194,9 @@ case 'shareSelected': shareSelected(id, el.dataset.filename, el.dataset.desc); b
     case 'saveTitle': saveTitle(); break;
     case 'cancelEditTitle': cancelEditTitle(decodeURIComponent(el.dataset.title)); break;
     case 'openAddSessionModal': openAddSessionModal(); break;
+    case 'generateTags': generateTags(id); break;
+    case 'copyGeneratedText': copyGeneratedText(el.dataset.field); break;
+    case 'addSuggestedTag': addSuggestedTag(el.dataset.tag); break;
 
     // Immich search
     case 'selectImmich':

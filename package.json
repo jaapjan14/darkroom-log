@@ -1,12 +1,13 @@
 {
   "name": "darkroom-log",
-  "version": "1.5.94",
+  "version": "1.5.100",
   "description": "Darkroom print log with Immich integration",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.70.0",
     "bcryptjs": "^2.4.3",
     "compression": "^1.8.1",
     "exifr": "^7.1.3",

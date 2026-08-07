@@ -1,5 +1,64 @@
 # Changelog
 
+## v1.5.100 (2026-08-06)
+
+### Change: Tag generator falls back to AI suggestions when a photo has no manual tags
+
+- **Why:** Jacob confirmed most of his library has no meaningful manual tags — with the previous behavior, Lomography (and effectively the location slot in Flickr/Instagram) rendered blank for the majority of photos, since those outputs were built purely from `tags[]`/Immich tags with the AI only filling small gaps.
+- `server.js`: when the photo has zero existing tags, `rankedTags` now falls back to the AI's `suggestedTags` instead of staying empty — the same result still comes back as `suggestedTags` too, so the "+" chips (Prints tab) still let Jacob commit any of them as real tags.
+- Also widened the suggestion prompt: 3-5 gap-filling suggestions when tags already exist (unchanged), 6-10 when starting from nothing (subject/activity/mood/landmark) — closer to what a fully hand-tagged photo would have, so Lomography/Flickr aren't thin on a fresh photo.
+- No cache-bust needed — server-only change, no client files touched. package.json 1.5.99 → 1.5.100.
+
+## v1.5.99 (2026-08-06)
+
+### Fix: detail-view right column stopped scrolling on desktop once content grew past viewport height
+
+- **Why:** Jacob reported that after generating tags on desktop, he couldn't scroll down to see the Flickr/Instagram/suggested-tags content — two-finger trackpad scroll over the info panel did nothing. Confirmed it worked fine on his phone, which narrowed it to the desktop two-column layout specifically.
+- Root cause (verified live via computed styles): `.detail-right { overflow-y: auto }` (desktop `min-width:600px` layout, shared by both the Prints and Library detail views) had no bounded height — `.detail-layout`'s `min-height: 100%` is a *minimum*, not a cap, so the CSS grid row auto-sized to fit `.detail-right`'s own content instead of the viewport. Measured live: `.detail-right` had `clientHeight === scrollHeight` (1170px both) — its own overflow never had anything to actually scroll into, while the outer `#recent-detail-view`/`#detail-view` is intentionally `overflow-y: hidden` at this breakpoint (expects the inner column to scroll instead). Net effect: content beyond the viewport was genuinely unreachable, not just visually hidden — wheel/trackpad events had nowhere to go. This was a latent bug in the existing layout, first exposed by the new Tags & Captions panel being the first content long enough to push `.detail-right` past one screen.
+- Fix: gave `.detail-right` the same `height: calc(100dvh - 92px)` formula `.detail-left` already uses, so both columns agree on the viewport bound and `.detail-right`'s `overflow-y: auto` has an actual height to overflow against. Verified live before deploying (injected the fix as a temporary stylesheet, confirmed `scrollHeight > clientHeight` flipped to true and the panel scrolled) — applies to both Prints and Library since the rule isn't ID-scoped.
+- Cache-bust: SHELL_CACHE v147 → v148 (index.html's inline CSS is precached under it); package.json 1.5.98 → 1.5.99. app.js unchanged, still v276.
+
+## v1.5.98 (2026-08-06)
+
+### Change: Tag & Caption generator moved to work from the Library tab too
+
+- **Why:** Jacob's Prints tab is for the physical darkroom workflow (enlarger settings, print sessions) — a small subset of the library. The tag/caption generator is for posting any photo to Lomography/Flickr/Instagram, so it needs to work from the Library detail view, not just Prints.
+- Backend re-keyed from print ID to **Immich asset ID**: `POST /api/generate-tags/:assetId` now takes `{title, tags}` in the body (the caller's own tag source) instead of reading a print record — the Prints tab passes `print.title`/`print.tags` (Darkroom's own editable tags), the Library tab passes the Immich asset's title/tags (LR-synced, read-only in Darkroom). Added `GET /api/generate-tags/:assetId` to populate the panel from cache without regenerating. Cache moved off `prints.json` (`print.generatedTags` removed) into a new `data/generated-tags.json`, keyed by asset ID — same photo shares one cached result whichever tab it's opened from.
+- Added the same "Tags & Captions" section to the Library detail lightbox (`renderRecentDetail`). Suggested tags render as plain informational chips there (no "+ add") since Immich/LR-synced tags aren't writable from Darkroom — only the Prints tab's own tags get the interactive add button.
+- Fixed a latent bug caught while wiring this up: both detail overlays (`detail-view` for Prints, `recent-detail-view` for Library) stay mounted in the DOM at once, just toggled via `.active` — a shared `#generated-tags-panel` id would have resolved to whichever view rendered first, not necessarily the open one. Panel/button ids are now per-view (`generated-tags-panel-print` / `-library`) and threaded through a small context object instead of a global id lookup. Also added a stale-result guard (rapid prev/next while a generate/fetch is in flight can no longer paint the wrong photo's tags into the panel).
+- Cache-bust: app.js v275 → v276; SHELL_CACHE v146 → v147; package.json 1.5.97 → 1.5.98.
+
+## v1.5.97 (2026-08-06)
+
+### Add: Tag & Caption generator (Lomography / Flickr / Instagram)
+
+- New "Generate" button in the print detail lightbox, next to the tags row. Produces four copy-ready outputs per print: the Standard Caption, a Lomography tag string (123-char cap), a Flickr tag list, and a 3-line Instagram post (title / gear line / 5 hashtags) — exact formats per `~/Desktop/tag-generation-spec.md`.
+- Camera/film/developer/lens, format (35mm vs medium format/6x7 etc.), and platform hashtag slugs are all resolved deterministically from `description` (`"Camera | Film | Developer | Lens"`) and a static gear lookup table (`lib/gear-catalog.js`) covering the current camera/lens/film roster — no model call involved for any of that.
+- The one non-deterministic step: Claude (Sonnet 5, vision) reorders the print's existing manual tags by search value for Lomography's char-limit trimming and Flickr's tag ordering, and can suggest up to 5 additional tags for things visible in the photo that aren't already tagged (shown as "+ add" chips, never auto-added). New endpoint `POST /api/generate-tags/:printId` in `server.js`; new `lib/tag-format.js` (pure templating engine) + `lib/gear-catalog.js` (camera/lens/film → format/slug lookup).
+- Result is cached on the print record (`generatedTags`) so reopening the lightbox doesn't re-call the model; a "Regenerate" button re-runs it.
+- Requires `ANTHROPIC_API_KEY` in the container env (added to docker-compose by Jacob directly, per usual). New dependency: `@anthropic-ai/sdk`.
+- Cache-bust: app.js v274 → v275; SHELL_CACHE v145 → v146; package.json 1.5.96 → 1.5.97.
+
+## v1.5.96 (2026-07-18)
+
+### Fix: capture time displayed ~7 hours early (timezone double-conversion)
+
+- **Why:** Jacob spotted a photo ("Sweet Send-Off") showing 09:34 AM in the Library detail view when Lightroom's own EXIF panel clearly showed `Date Time Original: 6/16/26 4:34:44 PM`. Traced it via a direct read-only query against Immich's Postgres (`asset`/`asset_exif` tables): Immich had the correct data the whole time — `fileCreatedAt` = `2026-06-16 23:34:44+00` (the true UTC instant, correctly = 4:34 PM Pacific) and `localDateTime` = `2026-06-16 16:34:44+00` (Immich's documented convention: the capture's *wall-clock* reading, serialized with a dummy `+00`/`Z` marker purely so it round-trips as valid ISO8601 — it's meant to be read literally, never re-converted). Darkroom's `takenAt` prefers `localDateTime` (`server.js`), which is correct, but the frontend then ran it through `new Date(...).toLocaleDateString()/.toLocaleTimeString()` with no explicit `timeZone`, so the browser applied Pacific's UTC-7 offset *on top* of an already-local value — double-shifting every capture time 7 hours early for any Pacific-timezone viewer. Confirmed this wasn't isolated to one photo; it's systemic to every asset with `localDateTime` set (effectively the entire library), just never previously noticed at the minute-level because nobody had cross-checked against Lightroom's panel side by side before.
+- Fixed in **four** spots, all sharing the identical root cause — two in `app.js` (Library detail view's Date/Time fields; the album date-range helper used by slideshow title cards) and two in `album.js` (the *public* shared-album lightbox's date/time display; its own date-range helper) — the public-album bug meant any visitor to a shared/embedded album saw the same wrong time, not just Jacob in the Darkroom UI.
+- Fix: added `timeZone: 'UTC'` to every `toLocaleDateString`/`toLocaleTimeString`/`toLocaleString` call consuming a `takenAt`-family value, and switched the date-range helpers' same-day/same-month comparisons from local getters (`getFullYear`/`getMonth`/`getDate`/`toDateString`) to their UTC equivalents. This tells the browser "print Immich's digits as-is," which is exactly what `localDateTime` semantics call for.
+- Known accepted edge case: the rare asset with `fileCreatedAt` but no `localDateTime` at all (should be very uncommon in practice — Immich computes `localDateTime` for essentially every asset with EXIF or GPS) will now show verbatim UTC digits instead of being converted to the viewer's local time. That combination was untested/unconfirmed as actually occurring in Jacob's library; worth revisiting if a genuinely-wrong-the-other-direction time ever surfaces.
+- **Not a bug, left as-is:** the *location* shown for the same photo (47.5950, -122.3878 / "Seattle, Washington") doesn't match the actual venue (tagged "Bellevue Club") — but it's exactly what's embedded in the file's own GPS EXIF tag (confirmed via `exiftool` on both the original scan JPG and the edited TIF, and matches Immich's stored `asset_exif.latitude/longitude` exactly). Darkroom is faithfully displaying real (if wrong) source data — the error is upstream in the scan/GPS-import pipeline for that specific frame, not something Darkroom Log introduced or can correct on its own.
+- Cache-bust: app.js v273 → v274; album.js v64 → v65; SHELL_CACHE v144 → v145; package.json 1.5.95 → 1.5.96.
+
+## v1.5.95 (2026-07-18)
+
+### Change: default Library sort back to Date Taken
+
+- **Why:** v1.5.79 (2026-06-28) had switched the default from Date Taken back to Upload Date (full sweep). Jacob asked to revert the default to Date Taken.
+- `state.librarySort` default changed `'upload'` → `'taken'` (`app.js`); `#lib-sort-taken` now carries the initial `active` class in the Sort panel instead of `#lib-sort-upload` (`index.html`).
+- No backend change needed — `/api/immich/recent`'s `sort=taken` branch (a direct paginated Immich metadata-search query, independent of the window/full-sweep machinery) was already fully working, just not the default. Upload Date and Last Edited remain available as before, one tap away in the Sort panel.
+- Cache-bust: app.js v272 → v273; SHELL_CACHE v143 → v144; package.json 1.5.94 → 1.5.95.
+
 ## v1.5.94 (2026-07-17)
 
 ### Fix: browser autofill suggestions covering the search-reveal panel

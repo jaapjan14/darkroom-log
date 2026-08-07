@@ -17,6 +17,8 @@ const fs = require('fs');
 const path = require('path');
 const sharp = require('sharp');
 const exifr = require('exifr');
+const Anthropic = require('@anthropic-ai/sdk');
+const tagFormat = require('./lib/tag-format');
 
 // Immich Postgres access — used ONLY to restore asset.createdAt after a v3
 // copy-based replace (see /api/lr-uuid-remap below and lr-immich v0.12.3+).
@@ -105,6 +107,10 @@ const PORT = process.env.PORT || 3000;
 const PASSWORD_HASH = process.env.PASSWORD_HASH || bcrypt.hashSync(process.env.APP_PASSWORD || 'darkroom', 10);
 const IMMICH_URL = process.env.IMMICH_URL || 'http://192.168.0.199:2283/api';
 const IMMICH_KEY = process.env.IMMICH_KEY || '';
+// Tag generator (Lomography/Flickr/Instagram) — client is undefined (not
+// missing-key-errored) when ANTHROPIC_API_KEY isn't set, so the endpoint can
+// fail with a clear message instead of crashing the whole server at boot.
+const anthropic = process.env.ANTHROPIC_API_KEY ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }) : null;
 const DATA_FILE = '/data/prints.json';
 const ALBUMS_FILE = '/data/albums.json';
 const SETTINGS_FILE = '/data/settings.json';
@@ -1964,6 +1970,163 @@ app.post('/api/settings/immich-albums', requireAuth, (req, res) => {
   settings.immichAlbums = req.body.albums || [];
   saveSettings(settings);
   res.json({ success: true });
+});
+
+// Tag & Caption generator — see ~/Desktop/tag-generation-spec.md for the
+// output spec this implements. Camera/film/location fields are resolved
+// deterministically (lib/tag-format.js + lib/gear-catalog.js); the only
+// model call is ranking the photo's existing tags by search value and
+// (optionally) suggesting tags the photo shows but weren't manually tagged.
+//
+// Keyed by Immich asset ID (not print ID) so it works from both the Prints
+// tab (print.tags, editable in Darkroom) and the Library tab (Immich's own
+// tags, LR-synced, read-only here) — same underlying photo either way.
+// Result is cached in generated-tags.json so reopening either view is free.
+const GENERATED_TAGS_FILE = '/data/generated-tags.json';
+function loadGeneratedTagsStore() {
+  try { return JSON.parse(fs.readFileSync(GENERATED_TAGS_FILE, 'utf8')); }
+  catch (e) { return {}; }
+}
+function saveGeneratedTagsStore(store) {
+  fs.writeFileSync(GENERATED_TAGS_FILE, JSON.stringify(store, null, 2));
+}
+
+const TAG_RANK_SCHEMA = {
+  type: 'object',
+  properties: {
+    rankedTags: { type: 'array', items: { type: 'string' } },
+    suggestedTags: { type: 'array', items: { type: 'string' } },
+  },
+  required: ['rankedTags', 'suggestedTags'],
+  additionalProperties: false,
+};
+
+async function rankTagsWithAI({ imageBase64, title, camera, film, city, state, tags }) {
+  if (!anthropic) throw new Error('ANTHROPIC_API_KEY not configured');
+  const context = [
+    title ? `Title: ${title}` : null,
+    camera ? `Camera: ${camera}` : null,
+    film ? `Film: ${film}` : null,
+    (city || state) ? `Location: ${[city, state].filter(Boolean).join(', ')}` : null,
+    tags.length ? `Existing tags: ${tags.join(', ')}` : 'Existing tags: (none)',
+  ].filter(Boolean).join('\n');
+
+  // Most of Jacob's library has no manual tags at all — when that's true,
+  // suggestions become the primary tag source (see the endpoint below), so
+  // ask for a fuller set instead of just gap-filling a handful.
+  const suggestionCount = tags.length ? '3-5' : '6-10';
+  const suggestionPurpose = tags.length
+    ? `for things clearly visible in the photo that aren't already covered by an existing tag`
+    : `covering the photo's subject, activity, mood, and any identifiable landmark — there are no existing tags, so this list is what the photo will be tagged with`;
+
+  const response = await anthropic.messages.create({
+    model: 'claude-sonnet-5',
+    max_tokens: 1024,
+    output_config: {
+      effort: 'low',
+      format: { type: 'json_schema', schema: TAG_RANK_SCHEMA },
+    },
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: imageBase64 } },
+        {
+          type: 'text',
+          text: `This is a scanned black-and-white or color film photograph being tagged for posting to ` +
+            `Lomography, Flickr, and Instagram — communities of film photographers. ` +
+            `${context}\n\n` +
+            `1. Reorder "Existing tags" by how likely a real person would search for this photo using that ` +
+            `term on those platforms — most valuable/most-searched first. Return every existing tag, just ` +
+            `reordered (don't drop any). Return an empty list if there are no existing tags.\n` +
+            `2. Separately, suggest ${suggestionCount} short tags (1-3 words each) ${suggestionPurpose}. ` +
+            `Do not suggest camera, lens, film, or generic tags like "photo" or "film photography" — those ` +
+            `are added automatically elsewhere. If nothing meaningful applies, return an empty list.`,
+        },
+      ],
+    }],
+  });
+
+  if (response.stop_reason === 'refusal') throw new Error('Model declined the request');
+  const textBlock = response.content.find(b => b.type === 'text');
+  const parsed = JSON.parse(textBlock.text);
+  return {
+    rankedTags: Array.isArray(parsed.rankedTags) ? parsed.rankedTags : tags,
+    suggestedTags: Array.isArray(parsed.suggestedTags) ? parsed.suggestedTags : [],
+  };
+}
+
+// Cached result only — used to populate the panel on open without regenerating.
+app.get('/api/generate-tags/:assetId', requireAuth, (req, res) => {
+  const store = loadGeneratedTagsStore();
+  const cached = store[req.params.assetId];
+  if (!cached) return res.status(404).json({ error: 'Not generated yet' });
+  res.json(cached);
+});
+
+// title/tags come from the caller — the Prints tab passes print.title/print.tags
+// (Darkroom's own editable tags), the Library tab passes the Immich asset's
+// title/tags (LR-synced, read-only here). Everything else (description, city,
+// state, the image itself) is fetched from Immich here since both callers
+// share the same underlying asset.
+app.post('/api/generate-tags/:assetId', requireAuth, async (req, res) => {
+  try {
+    const assetId = req.params.assetId;
+    const title = req.body.title || '';
+    const tags = Array.isArray(req.body.tags) ? req.body.tags : [];
+
+    const assetRes = await fetch(`${IMMICH_URL}/assets/${assetId}`, {
+      headers: { 'x-api-key': IMMICH_KEY }
+    });
+    const asset = await assetRes.json();
+    const description = asset.exifInfo?.description || '';
+    const city = asset.exifInfo?.city || '';
+    const state = asset.exifInfo?.state || '';
+    const { camera, film } = tagFormat.parseDescription(description);
+
+    const imgRes = await fetch(`${IMMICH_URL}/assets/${assetId}/thumbnail?size=preview`, {
+      headers: { 'x-api-key': IMMICH_KEY }
+    });
+    const imageBase64 = Buffer.from(await imgRes.arrayBuffer()).toString('base64');
+
+    let rankedTags = tags;
+    let suggestedTags = [];
+    try {
+      const ai = await rankTagsWithAI({ imageBase64, title, camera, film, city, state, tags });
+      rankedTags = ai.rankedTags;
+      suggestedTags = ai.suggestedTags;
+    } catch (e) {
+      console.error('generate-tags AI ranking failed, falling back to entry order:', e.message);
+    }
+
+    // Most photos have no manual tags at all — without this, Lomography (and
+    // effectively Flickr/Instagram's subject/location slot) would render
+    // empty for the majority of the library. suggestedTags still comes back
+    // separately so they can be committed as real tags via the "+" chips.
+    if (!tags.length && suggestedTags.length) {
+      rankedTags = suggestedTags;
+    }
+
+    const filterCache = loadFilterCache() || { cities: [] };
+    const outputs = tagFormat.generateAll({
+      title,
+      description,
+      tags,
+      rankedTags,
+      city,
+      state,
+      knownCities: filterCache.cities || [],
+    });
+
+    const generatedTags = { ...outputs, suggestedTags, generatedAt: new Date().toISOString() };
+    const store = loadGeneratedTagsStore();
+    store[assetId] = generatedTags;
+    saveGeneratedTagsStore(store);
+
+    res.json(generatedTags);
+  } catch (e) {
+    console.error('generate-tags failed:', e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // Serve SPA
