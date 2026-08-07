@@ -17,6 +17,8 @@ header, optional slideshow, and pinch-zoom on every photo. No login required for
 
 **Source:** https://github.com/jaapjan14/darkroom-log
 
+**Immich compatibility:** actively run in production against **Immich v3.1.0** (upgraded 2026-07-29, audited clean against this image). Talks to Immich entirely through its REST API (asset/search/album/tag endpoints), so it isn't tied to Immich's internal ML/vector-search backend — the v3 migration (pgvecto.rs → VectorChord) needed no changes on Darkroom's side. Not tested against Immich versions older than v3.
+
 ## What's new in v1.5.95–100
 
 A one-click Tag & Caption generator for posting photos to Lomography, Flickr, and Instagram, plus a desktop layout fix.
