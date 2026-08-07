@@ -17,6 +17,13 @@ header, optional slideshow, and pinch-zoom on every photo. No login required for
 
 **Source:** https://github.com/jaapjan14/darkroom-log
 
+## What's new in v1.5.95–100
+
+A one-click Tag & Caption generator for posting photos to Lomography, Flickr, and Instagram, plus a desktop layout fix.
+
+- **Tag & Caption generator** — a new "Generate" button in the photo detail view (both the Prints and Library tabs) produces four copy-ready outputs per photo: a Standard Caption, a Lomography tag string (kept under its 123-character limit), a Flickr tag list, and a 3-line Instagram post (title / gear line / 5 hashtags). Camera, film, developer, lens, and format are pulled straight from your logged metadata; an AI pass ranks your existing tags by how likely someone is to actually search for them, and suggests a handful more for anything visible in the photo that isn't tagged yet — shown as "+" chips you can add to the photo's real tags, never applied automatically. Works even on untagged photos, generating a full tag set from the image itself. Requires an `ANTHROPIC_API_KEY` in your container environment.
+- Fixed a desktop-only layout bug where the info panel could grow taller than the visible area with no way to scroll down to see it.
+
 ## What's new in v1.5.80–94
 
 A mobile-first rework of the Library toolbar, plus a new Film Type filter and several Immich v3 migration fixes.
