@@ -15,17 +15,12 @@ header, optional slideshow, and pinch-zoom on every photo. No login required for
 
 ![Public album with branded header](screenshots/03-public-album.png)
 
-## What's new in v1.5.43
+## What's new in v1.5.101
 
-- **Server-side sized share** — the Share button now goes through `sharp` + mozjpeg on the server with JPEG quality iterated to a byte target. Sizes: **S** (≤500 KB / 1200 px) for SMS, **M** (≤1.5 MB / 2400 px) for messaging, **L** (≤2.7 MB / 4200 px — hard-capped for forum uploads), **XL** (full original Q100). Encoded outputs are disk-cached keyed by Immich `updatedAt` so a Lightroom republish auto-invalidates.
-- **Two-step share modal** — Safari iOS revoked `navigator.share()` activation when the fetch took too long; the share button now opens a "Preparing image…" modal first and flips to "Tap to share" once the blob is ready. Desktop falls back to a Blob-URL save-to-disk with the same spinner.
-- **Tiered progressive image loading** — detail and fullscreen views load thumbnail → small → preview → original on mobile (preview → original on desktop). Each tier swaps in as the next preloads; stale upgrades are dropped on navigation.
-- **Race-free navigation** — nav-generation counter drops async results from superseded navigations; 400 ms cooldown prevents accidental double-skip from a stray click + swipe.
-- **Phone-landscape detail view** — image full-width on top, metadata below, tab bar hidden, header pinned to the bottom of the viewport so Back is always reachable.
-- **iOS double-tap fix** — synthetic clicks fired ~300 ms after a touch double-tap no longer leak into the fullscreen viewer's prev/next/close logic.
-- **Force Refresh button (🔄)** in the detail view — one-tap SW cache flush + reload escape hatch.
-- **Public album viewer parity** — public `/album/<slug>` fullscreen now uses the same `zoom.js` controller as the main app (pinch / wheel / drag-pan / double-tap-toggle to 2.5×) plus 2-stage progressive load. Hi-res originals actually decode now (CSS `will-change` trap fixed).
-- **Library shift-click range select**, archive/delete-disappear-from-grid fixes, "share already in progress" alert suppressed, archived/trashed photos no longer reappear after a refetch.
+- **Library-tab title and tag editing** — the Tag & Caption generator's suggestions can now be saved directly onto Library photos, not just Prints. Tag edits write real Immich tags; titles are tracked separately and survive the periodic IPTC byte-scan.
+- **AI-suggested titles** — the generator now proposes a short, evocative title for untitled photos alongside its tag suggestions.
+- **Public album date fix** — photo dates/times on public albums could render several hours off the actual capture time due to a local-vs-UTC mismatch; fixed.
+- **Library chip-filter fix** — filtering the Library by a Lens/Camera/City/State chip no longer wipes the grid to "No recent uploads." when re-entering the Library tab.
 
 ## What's new in v1.5
 
