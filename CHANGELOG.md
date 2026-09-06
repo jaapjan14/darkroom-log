@@ -1,5 +1,31 @@
 # Changelog
 
+## v1.5.101 (2026-08-20)
+
+### Feature: Library-tab title and tag editing
+
+- **Why:** the Tag & Caption generator needed a way to actually save its suggestions onto Library photos — Prints already had a title/tag edit path, but a Library photo (not yet logged as a print) had no way to commit a generated title or tag.
+- New `PUT /api/library-title/:id` writes to `titles.json` with `source: 'manual'`, getting the same backfill-scan protection as an LR-plugin push (`source: 'lr'`) so a Library edit survives the 6h IPTC byte-scan.
+- New `POST`/`DELETE /api/library-tags/:id/add|remove` write real Immich tags — not Darkroom-local `print.tags[]` — mirroring the semantics the lr-immich plugin already uses on the LR→Immich direction: add links a tag, remove unlinks it, never deletes the tag entity itself. Tag names are matched case-insensitively before creating, so "Trestle" reuses an existing "trestle" tag instead of forking a duplicate.
+- New `GET /api/lr-title-export` lets the LR plugin's "Pull Titles & Tags from Darkroom" action pull back only `source: 'manual'` (Library-tab) titles — LR-sourced and scan-sourced titles are excluded, since LR already has the former and the latter carries no authority.
+
+### Feature: AI-suggested titles in the Tag & Caption generator
+
+- **Why:** most of the library has no title, so generated captions and social copy looked generic for the majority of photos — the generator now proposes a short, evocative 2–4 word title (Flickr-post style, e.g. "Steel Quills") alongside its tag suggestions. Shown as a suggestion to accept, never applied automatically; if a title already exists, the AI may still propose a replacement but is told to keep it if it's already good.
+
+### Fix: Public album dates could render hours off
+
+- **Why:** Jacob noticed a photo's displayed date/time was off by several hours on a public album page.
+- `album.js`'s date/time formatting used the browser's local-timezone getters against a value that's actually Immich's `localDateTime` — the capture's wall-clock digits serialized with a dummy `Z` marker, meant to be shown literally. Reading it with local getters re-applied the viewer's own timezone on top, shifting (and sometimes merging or splitting) the displayed day — e.g. a 4:34 PM Pacific capture showing as 9:34 AM. Switched to UTC-literal getters (`timeZone: 'UTC'`) throughout the date-grouping and per-photo date/time formatters so the stored wall-clock value renders unchanged regardless of viewer timezone.
+
+### Fix: Library search results wiped to "No recent uploads" when re-entering the Library tab
+
+- **Why:** Jacob reported that after filtering the Library by a Lens/Camera/City/State chip (e.g. "Konica 58mm f/5.6 Wide Omegon"), the results showed fine — but clicking the LIBRARY tab again (or returning to it) emptied the grid to "No recent uploads." while the chip label stayed visible, looking like the filter was still active but broken.
+- Root cause (confirmed live via console): `applyRecentFilters()` in `app.js` re-ran its client-side chip filter unconditionally whenever a chip was active (`if ((q && !hasResults) || chips.size)`), even when `items` was already `state.recentSmartResults` — the server-side, pre-filtered results from `/api/immich/combined-search`. Those combined-search results don't include `lens`/`model`/`city`/`state` (no `exifInfo`), so `state.recentMeta[id].lens` etc. are empty strings for every item, and the redundant client-side re-check (`searchable.includes(chip)`) failed for all of them — filtering the already-correct 46-item result set down to zero. This is the same class of bug the code comment near `isRecentFilterActive()`/`resortActiveFilterIfPresent()` already documents and works around for sorting; `applyRecentFilters()` itself just didn't have the same guard.
+- Fix: only run the client-side filter when `!hasResults` (i.e. only against the plain `state.recentItems` fallback, not against already-server-filtered `recentSmartResults`): `if ((q && !hasResults) || chips.size)` → `if (!hasResults && (q || chips.size))`.
+- Verified live: reproduced the exact repro (Lens chip → 46 results → click LIBRARY tab → grid empties while `recentSmartResults`/chip state stay populated), then confirmed the corrected logic returns all 46 items against the same live state before deploying.
+- No cache-bust needed — server-served file, no version-pinned asset; package.json 1.5.100 → 1.5.101.
+
 ## v1.5.100 (2026-08-06)
 
 ### Change: Tag generator falls back to AI suggestions when a photo has no manual tags

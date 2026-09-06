@@ -271,11 +271,16 @@ async function _computeAlbumDateRange(){
   return _formatDateRange(dates[0],dates[dates.length-1]);
 }
 
+// UTC-literal getters, not local ones — these Dates are built from Immich's
+// localDateTime (wall-clock digits serialized with a dummy 'Z'), so reading
+// them with local getters re-applies the viewer's timezone offset on top
+// and can shift/merge/split calendar days that shouldn't be. See the
+// matching note on _albFmtDate/_albFmtTime below.
 function _formatDateRange(d1,d2){
-  const month=d=>d.toLocaleString('en-US',{month:'short'});
-  const year=d=>d.getFullYear();
-  if(d1.toDateString()===d2.toDateString()) return `${month(d1)} ${d1.getDate()}, ${year(d1)}`;
-  if(year(d1)===year(d2)&&d1.getMonth()===d2.getMonth()) return `${month(d1)} ${year(d1)}`;
+  const month=d=>d.toLocaleString('en-US',{month:'short',timeZone:'UTC'});
+  const year=d=>d.getUTCFullYear();
+  if(year(d1)===year(d2)&&d1.getUTCMonth()===d2.getUTCMonth()&&d1.getUTCDate()===d2.getUTCDate()) return `${month(d1)} ${d1.getUTCDate()}, ${year(d1)}`;
+  if(year(d1)===year(d2)&&d1.getUTCMonth()===d2.getUTCMonth()) return `${month(d1)} ${year(d1)}`;
   if(year(d1)===year(d2)) return `${month(d1)} — ${month(d2)} ${year(d1)}`;
   return `${month(d1)} ${year(d1)} — ${month(d2)} ${year(d2)}`;
 }
@@ -1316,17 +1321,21 @@ function _albFmtShutter(s){
   if (f >= 1) return f + 's';
   return '1/' + Math.round(1 / f) + 's';
 }
+// timeZone:'UTC' is deliberate: iso here is Immich's localDateTime (capture
+// wall-clock digits with a dummy 'Z' marker), meant to be shown literally —
+// not re-converted through the viewer's own timezone. Without this a Pacific
+// capture shown to a Pacific visitor renders ~7h early (e.g. 4:34 PM -> 9:34 AM).
 function _albFmtDate(iso){
   if (!iso) return '';
   const d = new Date(iso);
   if (isNaN(d.getTime())) return '';
-  return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+  return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
 }
 function _albFmtTime(iso){
   if (!iso) return '';
   const d = new Date(iso);
   if (isNaN(d.getTime())) return '';
-  return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+  return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', timeZone: 'UTC' });
 }
 function albumDetailOpen(idx){
   if (!album || !album.assets) return;

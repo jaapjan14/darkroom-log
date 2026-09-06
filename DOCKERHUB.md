@@ -19,6 +19,15 @@ header, optional slideshow, and pinch-zoom on every photo. No login required for
 
 **Immich compatibility:** actively run in production against **Immich v3.1.0** (upgraded 2026-07-29, audited clean against this image). Talks to Immich entirely through its REST API (asset/search/album/tag endpoints), so it isn't tied to Immich's internal ML/vector-search backend — the v3 migration (pgvecto.rs → VectorChord) needed no changes on Darkroom's side. Not tested against Immich versions older than v3.
 
+## What's new in v1.5.101
+
+Library-tab title and tag editing, AI-suggested titles, and a public-album timezone fix.
+
+- **Library-tab title and tag editing** — the "Generate" button's suggestions can now actually be saved on Library photos, not just Prints: a new title edit and tag add/remove path writes real Immich tags and a manual title entry, separate from the Prints-only fields.
+- **AI-suggested titles** — the Tag & Caption generator now proposes a short, evocative title for untitled photos alongside its tag suggestions.
+- **Public album date fix** — photo dates/times on public albums could render several hours off from the actual capture time; fixed a local-vs-UTC timezone mismatch in the date formatting.
+- Library search results no longer wipe to "No recent uploads" when re-entering the Library tab after filtering by a Lens/Camera/City/State chip.
+
 ## What's new in v1.5.95–100
 
 A one-click Tag & Caption generator for posting photos to Lomography, Flickr, and Instagram, plus a desktop layout fix.

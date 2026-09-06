@@ -143,6 +143,11 @@
   .print-tag { font-family: 'IBM Plex Mono', monospace; font-size: 10px; padding: 0.2rem 0.5rem; background: var(--surface2); border: 1px solid var(--border); color: var(--text-dim); }
   .tag-add-input { font-family: 'IBM Plex Mono', monospace; font-size: 10px; padding: 0.2rem 0.5rem; width: 120px; display: none; }
   .tag-add-input.visible { display: inline-block; }
+  /* LIBRARY TAGS in detail view — separate class from .tag-add-input above
+     (not shared) so the delegated keydown listener can't double-fire onto
+     both Prints' and Library's tag-add handlers at once. */
+  .library-tag-add-input { font-family: 'IBM Plex Mono', monospace; font-size: 10px; padding: 0.2rem 0.5rem; width: 120px; display: none; }
+  .library-tag-add-input.visible { display: inline-block; }
   /* "In albums" chips on the print detail page */
   .print-albums-row { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.6rem; align-items: center; }
   .print-albums-label { font-family: 'IBM Plex Mono', monospace; font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-dim); margin-right: 0.25rem; }
@@ -820,7 +825,7 @@
 
 <script src="/zoom.js?v=2" defer></script>
 <script src="/audio-engine.js?v=10" defer></script>
-<script src="/app.js?v=276" defer></script>
+<script src="/app.js?v=280" defer></script>
 <script>
 // Service worker - registers sw.js for thumb stale-while-revalidate + shell
 // cache. Was actively unregistered v1.3.0 -> v1.5.61; re-enabled v1.5.62.

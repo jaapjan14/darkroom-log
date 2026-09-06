@@ -557,7 +557,7 @@ function applyRecentFilters() {
   const hasResults = state.recentSmartResults?.length && (q.trim() || chips.size);
   let items = hasResults ? state.recentSmartResults : state.recentItems;
 
-  if ((q && !hasResults) || chips.size) {
+  if (!hasResults && (q || chips.size)) {
     items = items.filter(a => {
       const meta = state.recentMeta[a.id] || {};
       const searchable = [
@@ -1219,7 +1219,7 @@ async function renderRecentDetail(assetId, navGen) {
           </div>` : ''}
         </div>
         <div class="detail-meta">
-          ${meta.title ? `<div class="detail-title" style="margin-bottom:0.5rem;font-weight:600;color:var(--text);font-size:18px;line-height:1.3">${meta.title}</div>` : ''}
+          <div class="library-title-row" id="library-title-row" style="display:flex;align-items:center;gap:0.4rem;margin-bottom:0.5rem">${libraryTitleInnerHtml(meta.title)}</div>
           ${meta.description ? `<div class="detail-film" style="margin-bottom:0.75rem;font-weight:500;color:var(--text);font-size:16px">${meta.description}</div>` : ''}
           <div class="exif-table">
             ${takenDate ? `
@@ -1267,16 +1267,13 @@ async function renderRecentDetail(assetId, navGen) {
                 </div>
               </div>
             </div>` : ''}
-            ${(Array.isArray(meta.tags) && meta.tags.length) ? `
             <div class="exif-row-item">
               <div class="exif-row-icon">🏷</div>
               <div class="exif-row-label">Tags</div>
               <div class="exif-row-value">
-                <div style="display:flex;gap:0.25rem;flex-wrap:wrap">
-                  ${meta.tags.map(t => `<button class="immich-tag" data-action="searchByImmichTag" data-tag="${t.replace(/"/g,'&quot;')}" title="Show all photos tagged &quot;${t.replace(/"/g,'&quot;')}&quot;" style="background:var(--bg-elev,#222);color:var(--text);padding:2px 8px;border-radius:10px;font-size:11px;font-family:'IBM Plex Mono',monospace;border:1px solid var(--border);cursor:pointer">${t}</button>`).join('')}
-                </div>
+                <div class="library-tags-row" id="library-tags-row" style="display:flex;gap:0.25rem;flex-wrap:wrap;align-items:center">${libraryTagsInnerHtml(Array.isArray(meta.tags) ? meta.tags : [])}</div>
               </div>
-            </div>` : ''}
+            </div>
           </div>
           <div style="margin-top:0.75rem;padding-top:0.75rem;border-top:1px solid var(--border)">
             <div style="display:flex;align-items:center;justify-content:space-between">
@@ -1288,7 +1285,7 @@ async function renderRecentDetail(assetId, navGen) {
         </div>
       </div>
   `;
-  loadGeneratedTagsPanel({ assetId, title: meta.title || '', tags: Array.isArray(meta.tags) ? meta.tags : [], allowAddTag: false, panelId: 'generated-tags-panel-library', btnId: 'generate-tags-btn-library' });
+  loadGeneratedTagsPanel({ assetId, title: meta.title || '', tags: Array.isArray(meta.tags) ? meta.tags : [], allowAddTag: true, kind: 'library', panelId: 'generated-tags-panel-library', btnId: 'generate-tags-btn-library' });
 }
 
 // Downscale a JPEG/PNG blob via canvas, returning a JPEG blob with longest edge ≤ maxPx.
@@ -3931,7 +3928,7 @@ async function showDetail(printId, navGen) {
     `}).join('')}
       </div>
   `;
-  loadGeneratedTagsPanel({ assetId: print.immichId, title: print.title, tags: print.tags || [], allowAddTag: true, panelId: 'generated-tags-panel-print', btnId: 'generate-tags-btn-print' });
+  loadGeneratedTagsPanel({ assetId: print.immichId, title: print.title, tags: print.tags || [], allowAddTag: true, kind: 'prints', panelId: 'generated-tags-panel-print', btnId: 'generate-tags-btn-print' });
 }
 
 function closePrintDetail() {
@@ -3979,6 +3976,126 @@ function cancelEditTitle(original) {
     <div class="detail-title" id="title-display">${original}</div>
     <button class="btn-icon" data-action="startEditTitle" title="Edit title">✎</button>
   `;
+}
+
+// Library-tab title editing. Writes to /api/library-title/:id (source:
+// 'manual' in titles.json) — separate write path from Prints' title (which
+// lives in prints.json, not titles.json — see the two-write-target note in
+// the two-way-sync plan). Uses distinct ids from the Prints title-edit row
+// above since both detail views stay mounted in the DOM simultaneously,
+// just toggled via .active — reusing #title-display/#title-edit-input here
+// would silently resolve to whichever view rendered first.
+function libraryTitleInnerHtml(title) {
+  const t = (title || '').trim();
+  const display = t
+    ? t
+    : `<span class="library-title-placeholder" style="color:var(--text-dim);font-weight:400;font-style:italic">+ Add title</span>`;
+  return `
+    <div class="detail-title" id="library-title-display" style="font-weight:600;color:var(--text);font-size:18px;line-height:1.3">${display}</div>
+    <button class="btn-icon" data-action="startEditLibraryTitle" title="Edit title">✎</button>
+  `;
+}
+
+function startEditLibraryTitle() {
+  const disp = document.getElementById('library-title-display');
+  const current = disp && !disp.querySelector('.library-title-placeholder') ? disp.textContent.trim() : '';
+  document.getElementById('library-title-row').innerHTML = `
+    <input class="title-edit-input" id="library-title-edit-input" type="text" value="${current.replace(/"/g, '&quot;')}" placeholder="Title">
+    <button class="btn btn-ghost btn-sm" data-action="saveLibraryTitle">Save</button>
+    <button class="btn-icon" data-action="cancelEditLibraryTitle" data-title="${encodeURIComponent(current)}">✕</button>
+  `;
+  const inp = document.getElementById('library-title-edit-input');
+  inp.focus();
+  inp.addEventListener('keydown', e => {
+    if (e.key === 'Enter') saveLibraryTitle();
+    if (e.key === 'Escape') cancelEditLibraryTitle(current);
+  });
+}
+
+async function saveLibraryTitle() {
+  const assetId = state.currentRecentId;
+  const newTitle = document.getElementById('library-title-edit-input').value.trim();
+  const res = await fetch(`/api/library-title/${assetId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: newTitle }) });
+  if (!res.ok) {
+    alert(`Failed to save title (${res.status}). Your session may have expired — try reloading the page.`);
+    return;
+  }
+  document.getElementById('library-title-row').innerHTML = libraryTitleInnerHtml(newTitle);
+}
+
+function cancelEditLibraryTitle(original) {
+  document.getElementById('library-title-row').innerHTML = libraryTitleInnerHtml(original);
+}
+
+// Library-tab tag editing. Writes real Immich tags via /api/library-tags/:id/
+// add|remove (see server.js) — NOT print.tags[], which is Prints' unrelated
+// local field. Chip body keeps its existing searchByImmichTag click (via
+// closest('[data-action]') delegation, the inner × button naturally wins
+// over the outer span since it's the more specific match) — nested inside a
+// <span>, not a <button>, since a <button> can't validly contain another
+// interactive element (Prints avoids this the same way with .print-tag).
+function libraryTagsInnerHtml(tags) {
+  const chips = (tags || []).map(t => {
+    const esc = t.replace(/"/g, '&quot;');
+    return `<span class="immich-tag" data-action="searchByImmichTag" data-tag="${esc}" title="Show all photos tagged &quot;${esc}&quot;" style="background:var(--bg-elev,#222);color:var(--text);padding:2px 4px 2px 8px;border-radius:10px;font-size:11px;font-family:'IBM Plex Mono',monospace;border:1px solid var(--border);cursor:pointer;display:inline-flex;align-items:center;gap:4px">${t}<button class="btn-icon" data-action="removeLibraryTag" data-tag="${esc}" style="font-size:10px;line-height:1">×</button></span>`;
+  }).join('');
+  return `
+    ${chips}
+    <button class="btn-icon" data-action="showLibraryTagInput" style="font-size:11px;color:var(--safe)">+ tag</button>
+    <input class="library-tag-add-input" id="library-tag-add-input" type="text" placeholder="tag name">
+  `;
+}
+
+function showLibraryTagInput() {
+  const inp = document.getElementById('library-tag-add-input');
+  inp.classList.add('visible');
+  inp.focus();
+}
+
+function handleLibraryTagKey(e) {
+  if (e.key === 'Enter') addLibraryTag();
+  if (e.key === 'Escape') {
+    document.getElementById('library-tag-add-input').classList.remove('visible');
+    document.getElementById('library-tag-add-input').value = '';
+  }
+}
+
+async function addLibraryTag() {
+  const assetId = state.currentRecentId;
+  const inp = document.getElementById('library-tag-add-input');
+  const newTags = inp.value.split(/[\s,]+/).map(t => t.trim().toLowerCase()).filter(Boolean);
+  if (!newTags.length) return;
+  inp.value = '';
+  inp.classList.remove('visible');
+  for (const t of newTags) {
+    const res = await fetch(`/api/library-tags/${assetId}/add`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tag: t })
+    });
+    if (!res.ok) {
+      alert(`Failed to add tag "${t}" (${res.status}). Your session may have expired — try reloading the page.`);
+      return;
+    }
+  }
+  await refreshLibraryTags(assetId);
+}
+
+async function removeLibraryTag(tag) {
+  const assetId = state.currentRecentId;
+  const res = await fetch(`/api/library-tags/${assetId}/remove`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tag })
+  });
+  if (!res.ok) {
+    alert(`Failed to remove tag "${tag}" (${res.status}). Your session may have expired — try reloading the page.`);
+    return;
+  }
+  await refreshLibraryTags(assetId);
+}
+
+async function refreshLibraryTags(assetId) {
+  const res = await fetch(`/api/immich/photo/${assetId}`);
+  const meta = await res.json();
+  const row = document.getElementById('library-tags-row');
+  if (row) row.innerHTML = libraryTagsInnerHtml(Array.isArray(meta.tags) ? meta.tags : []);
 }
 
 function openAddPrintModal() {
@@ -4162,11 +4279,13 @@ function updateTagsDisplay(print) {
 
 // ── Tag & Caption generator (Lomography / Flickr / Instagram) ─────────────
 // See ~/Desktop/tag-generation-spec.md. Output is generated server-side
-// (lib/tag-format.js), keyed by Immich asset ID, and cached in
-// generated-tags.json — this file only renders it and wires up
-// generate/copy/add-suggested-tag. Works from both the Prints tab (tags
-// come from print.tags, editable here) and the Library tab (tags come from
-// Immich/LR sync, read-only here — see state.currentGeneratedCtx.allowAddTag).
+// (lib/tag-format.js + the Claude ranking call), keyed by Immich asset ID,
+// and cached in generated-tags.json — this file only renders it and wires
+// up generate/copy/add-suggested-tag/use-suggested-title. Works from both
+// the Prints tab (print.tags, via PUT /api/prints/:id) and the Library tab
+// (real Immich tags, via /api/library-tags/:id/add — see server.js) —
+// state.currentGeneratedCtx.kind ('prints' | 'library') tells addSuggestedTag
+// and useSuggestedTitle which write path to use.
 function escapeHtmlLite(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
@@ -4183,10 +4302,14 @@ function renderGeneratedTagsBlock(label, field, text) {
   `;
 }
 
-// allowAddTag: Prints tab tags are Darkroom's own (writable via PUT
-// /api/prints/:id) — Library tab tags are Immich/LR-synced and read-only
-// here, so suggestions there render as plain chips with no add action.
-function renderGeneratedTagsPanel(gt, allowAddTag) {
+// allowAddTag: both Prints (print.tags, via PUT /api/prints/:id) and Library
+// (real Immich tags, via /api/library-tags/:id/add) are writable now, so
+// this is currently always true from both call sites — kept as a parameter
+// rather than hardcoded in case a future read-only context needs the panel.
+// ctx (optional) is the loadGeneratedTagsPanel context this render is for —
+// only used to decide whether to show the "Use this title" affordance
+// (suppressed once the photo already has a title, via ctx.title).
+function renderGeneratedTagsPanel(gt, allowAddTag, ctx) {
   if (!gt) return '<div class="loading" style="padding:0.5rem 0;font-size:11px;color:var(--text-dim)">Not generated yet.</div>';
   const flickrText = (gt.flickr || []).join(', ');
   const igText = gt.instagram ? gt.instagram.text : '';
@@ -4195,6 +4318,15 @@ function renderGeneratedTagsPanel(gt, allowAddTag) {
     ${renderGeneratedTagsBlock('Lomography', 'lomography', gt.lomography)}
     ${renderGeneratedTagsBlock('Flickr', 'flickr', flickrText)}
     ${renderGeneratedTagsBlock('Instagram', 'instagram', igText)}
+    ${(gt.suggestedTitle && allowAddTag && ctx && !ctx.title) ? `
+      <div style="margin-top:0.5rem;padding-top:0.5rem;border-top:1px solid var(--border)">
+        <div style="font-size:10px;color:var(--text-dim);margin-bottom:0.3rem">Suggested title</div>
+        <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap">
+          <div style="font-size:13px;color:var(--text)">${escapeHtmlLite(gt.suggestedTitle)}</div>
+          <button class="btn-icon" data-action="useSuggestedTitle" data-title="${encodeURIComponent(gt.suggestedTitle)}" style="font-size:11px;color:var(--safe)">Use this title</button>
+        </div>
+      </div>
+    ` : ''}
     ${gt.suggestedTags && gt.suggestedTags.length ? `
       <div style="margin-top:0.5rem">
         <div style="font-size:10px;color:var(--text-dim);margin-bottom:0.3rem">${allowAddTag ? 'Suggested from photo — not yet in your tags' : 'Suggested from photo (informational — tags here come from Lightroom sync)'}</div>
@@ -4229,7 +4361,7 @@ async function loadGeneratedTagsPanel(ctx) {
     const gt = await r.json();
     if (state.currentGeneratedCtx !== ctx) return;
     state.currentGeneratedTags = gt;
-    panel.innerHTML = renderGeneratedTagsPanel(gt, ctx.allowAddTag);
+    panel.innerHTML = renderGeneratedTagsPanel(gt, ctx.allowAddTag, ctx);
     const btn = document.getElementById(ctx.btnId);
     if (btn) btn.textContent = 'Regenerate';
   } catch (e) {
@@ -4252,7 +4384,7 @@ async function generateTags(assetId) {
     const gt = await r.json();
     if (state.currentGeneratedCtx !== ctx) return; // moved on to a different photo
     state.currentGeneratedTags = gt;
-    if (panel) panel.innerHTML = renderGeneratedTagsPanel(gt, ctx.allowAddTag);
+    if (panel) panel.innerHTML = renderGeneratedTagsPanel(gt, ctx.allowAddTag, ctx);
     const btn = document.getElementById(ctx.btnId);
     if (btn) btn.textContent = 'Regenerate';
   } catch (e) {
@@ -4273,25 +4405,66 @@ function copyGeneratedText(field) {
   });
 }
 
-// Prints-tab only (see allowAddTag) — writes to print.tags via the existing
-// PUT /api/prints/:id path, same as the manual "+ tag" input.
+// Dispatches on ctx.kind: 'prints' writes print.tags via the existing PUT
+// /api/prints/:id path (same as the manual "+ tag" input); 'library' writes
+// a real Immich tag via /api/library-tags/:id/add (see server.js) and
+// refreshes the Tags row above using the same refreshLibraryTags() the
+// manual Library "+ tag" input uses.
 async function addSuggestedTag(tag) {
-  const print = state.prints.find(p => p.id === state.currentPrintId);
-  if (!print) return;
-  const tags = [...new Set([...(print.tags || []), tag])];
-  await fetch(`/api/prints/${state.currentPrintId}`, {
-    method: 'PUT',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({tags})
-  });
-  print.tags = tags;
-  updateTagsDisplay(print);
   const ctx = state.currentGeneratedCtx;
-  if (ctx) ctx.tags = tags;
+  if (!ctx) return;
+  if (ctx.kind === 'library') {
+    const res = await fetch(`/api/library-tags/${ctx.assetId}/add`, {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ tag })
+    });
+    if (!res.ok) {
+      alert(`Failed to add tag "${tag}" (${res.status}). Your session may have expired — try reloading the page.`);
+      return;
+    }
+    await refreshLibraryTags(ctx.assetId);
+    ctx.tags = [...(ctx.tags || []), tag.trim().toLowerCase()];
+  } else {
+    const print = state.prints.find(p => p.id === state.currentPrintId);
+    if (!print) return;
+    const tags = [...new Set([...(print.tags || []), tag])];
+    await fetch(`/api/prints/${state.currentPrintId}`, {
+      method: 'PUT',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({tags})
+    });
+    print.tags = tags;
+    updateTagsDisplay(print);
+    ctx.tags = tags;
+  }
   if (state.currentGeneratedTags) {
     state.currentGeneratedTags.suggestedTags = (state.currentGeneratedTags.suggestedTags || []).filter(t => t !== tag);
-    const panel = ctx && document.getElementById(ctx.panelId);
-    if (panel) panel.innerHTML = renderGeneratedTagsPanel(state.currentGeneratedTags, true);
+    const panel = document.getElementById(ctx.panelId);
+    if (panel) panel.innerHTML = renderGeneratedTagsPanel(state.currentGeneratedTags, ctx.allowAddTag, ctx);
+  }
+}
+
+// Library-only (Prints has its own always-editable title field, so there's
+// no "suggested title" affordance there — see the ctx.title gate in
+// renderGeneratedTagsPanel, which only shows this button when Library's
+// title is currently empty). Writes via the same /api/library-title/:id
+// path the ✎ editor uses, then re-renders both the title row and this
+// panel (so the affordance disappears now that a title exists).
+async function useSuggestedTitle(title) {
+  const ctx = state.currentGeneratedCtx;
+  if (!ctx || ctx.kind !== 'library') return;
+  const res = await fetch(`/api/library-title/${ctx.assetId}`, {
+    method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ title })
+  });
+  if (!res.ok) {
+    alert(`Failed to save title (${res.status}). Your session may have expired — try reloading the page.`);
+    return;
+  }
+  ctx.title = title;
+  const titleRow = document.getElementById('library-title-row');
+  if (titleRow) titleRow.innerHTML = libraryTitleInnerHtml(title);
+  if (state.currentGeneratedTags) {
+    const panel = document.getElementById(ctx.panelId);
+    if (panel) panel.innerHTML = renderGeneratedTagsPanel(state.currentGeneratedTags, ctx.allowAddTag, ctx);
   }
 }
 
@@ -5095,6 +5268,7 @@ function wireListeners() {
   // Delegated keydown for dynamically generated tag input
   document.addEventListener('keydown', (e) => {
     if (e.target.classList.contains('tag-add-input')) handleTagKey(e);
+    if (e.target.classList.contains('library-tag-add-input')) handleLibraryTagKey(e);
   });
 }
 
@@ -5115,6 +5289,11 @@ document.addEventListener('click', (e) => {
     case 'clearRecentSearch': clearRecentSearch(); break;
 
     // Library
+    case 'startEditLibraryTitle': startEditLibraryTitle(); break;
+    case 'saveLibraryTitle': saveLibraryTitle(); break;
+    case 'cancelEditLibraryTitle': cancelEditLibraryTitle(decodeURIComponent(el.dataset.title)); break;
+    case 'showLibraryTagInput': showLibraryTagInput(); break;
+    case 'removeLibraryTag': removeLibraryTag(el.dataset.tag); break;
     case 'recentItemClick':
       if (state.selectMode) toggleAssetSelect(id, e);
       else showRecentDetail(id);
@@ -5197,6 +5376,7 @@ case 'shareSelected': shareSelected(id, el.dataset.filename, el.dataset.desc); b
     case 'generateTags': generateTags(id); break;
     case 'copyGeneratedText': copyGeneratedText(el.dataset.field); break;
     case 'addSuggestedTag': addSuggestedTag(el.dataset.tag); break;
+    case 'useSuggestedTitle': useSuggestedTitle(decodeURIComponent(el.dataset.title)); break;
 
     // Immich search
     case 'selectImmich':

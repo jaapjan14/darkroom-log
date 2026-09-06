@@ -195,9 +195,10 @@ async function backfillTitleIndex() {
       await Promise.all(batch.map(async (a) => {
         const updatedAt = a.updatedAt || a.fileModifiedAt;
         const cached = _titleIndex.get(a.id);
-        // LR plugin pushes are authoritative for their assets — don't let the
-        // byte scanner clobber them with whatever it finds in the JPEG.
-        if (cached && cached.source === 'lr') return;
+        // LR plugin pushes and manual Library edits are both authoritative
+        // for their assets — don't let the byte scanner clobber them with
+        // whatever it finds in the JPEG.
+        if (cached && (cached.source === 'lr' || cached.source === 'manual')) return;
         if (cached && cached.updatedAt === updatedAt) return;
         try {
           const title = await fetchAssetTitle(a.id, updatedAt);
@@ -368,6 +369,51 @@ app.post('/api/lr-title', async (req, res) => {
   res.json({ ok: true });
 });
 
+// Library-tab title edit (browser UI, session auth — distinct from
+// /api/lr-title's x-api-key auth, which is LR-plugin-only). Entries flagged
+// source='manual' get the same backfill-scan protection as source='lr' (see
+// the cached.source check in backfillTitleIndex above), so a Library edit
+// survives the 6h IPTC byte-scan. Note this only ever updates titles.json —
+// it does not round-trip into the JPEG's embedded IPTC, same asymmetry the
+// LR push already has.
+app.put('/api/library-title/:id', requireAuth, (req, res) => {
+  const assetId = req.params.id;
+  const { title } = req.body || {};
+  if (typeof title !== 'string') return res.status(400).json({ error: 'title required (empty string clears)' });
+  _titleIndex.set(assetId, {
+    title: title.trim(),
+    updatedAt: new Date().toISOString(),
+    indexedAt: Date.now(),
+    source: 'manual',
+  });
+  saveTitleIndexSoon();
+  bustUploadSweepCache();
+  console.log(`library-title: asset=${assetId} title=${JSON.stringify(title.trim())}`);
+  res.json({ ok: true, title: title.trim() });
+});
+
+// LR plugin's "Pull Titles & Tags from Darkroom" menu action reads this to
+// find titles it should pull INTO the catalog. Only returns source==='manual'
+// entries (Library-tab edits) — source==='lr' is skipped because it already
+// matches LR (pulling it back is a wasted round-trip: LR pushed it, LR
+// already has it), and source==='scan' is skipped because that's an
+// IPTC-byte-scanned title LR never wrote and has no authority claim over —
+// don't let an unrelated read-side fallback masquerade as an authoritative
+// value. Auth: same x-api-key pattern as /api/lr-title.
+app.get('/api/lr-title-export', async (req, res) => {
+  const apiKey = req.headers['x-api-key'];
+  if (!apiKey) return res.status(401).json({ error: 'missing api key' });
+  const ok = await validateImmichApiKey(apiKey);
+  if (!ok) return res.status(401).json({ error: 'invalid api key' });
+  const out = {};
+  for (const [id, entry] of _titleIndex) {
+    if (entry && entry.source === 'manual') {
+      out[id] = { title: entry.title || '', updatedAt: entry.updatedAt };
+    }
+  }
+  res.json(out);
+});
+
 // LR plugin pushes old->new Immich UUID remaps here immediately after a v3
 // copy-based replace (Immich v3 removed the UUID-preserving PUT
 // /assets/{id}/original; the plugin's replacement uploads a new asset +
@@ -434,8 +480,7 @@ app.post('/api/lr-cache-bust', async (req, res) => {
   if (!apiKey) return res.status(401).json({ error: 'missing api key' });
   const ok = await validateImmichApiKey(apiKey);
   if (!ok) return res.status(401).json({ error: 'invalid api key' });
-  _uploadSweepCache = null;
-  _uploadSweepCachedAt = 0;
+  bustUploadSweepCache();
   console.log('lr-cache-bust: full-sweep cache dropped');
   res.json({ ok: true });
 });
@@ -496,11 +541,12 @@ app.get('/api/immich/photo/:id', requireAuth, async (req, res) => {
     const data = await response.json();
     // Title isn't in Immich's API. Prefer the title index (which is
     // authoritative when populated by the lr-immich plugin's POST
-    // /api/lr-title — source: 'lr'). Fall back to scanning JPEG bytes
-    // for assets the plugin never touched (older uploads, non-LR sources).
+    // /api/lr-title — source: 'lr' — or a manual Library-tab edit —
+    // source: 'manual'). Fall back to scanning JPEG bytes for assets
+    // neither has touched (older uploads, non-LR sources).
     let title = '';
     const indexed = _titleIndex.get(req.params.id);
-    if (indexed && indexed.source === 'lr') {
+    if (indexed && (indexed.source === 'lr' || indexed.source === 'manual')) {
       title = indexed.title || '';
     } else {
       title = await fetchAssetTitle(req.params.id, data.updatedAt || data.fileModifiedAt);
@@ -578,6 +624,13 @@ function mapAssetWithMeta(a) {
 let _uploadSweepCache = null;
 let _uploadSweepCachedAt = 0;
 const UPLOAD_SWEEP_TTL_MS = 5 * 60 * 1000;
+// Shared reset used by /api/lr-cache-bust (LR plugin, post-publish) and any
+// Library-tab edit endpoint that changes title/tags — both make the cached
+// full-sweep list stale until the 5min TTL lapses otherwise.
+function bustUploadSweepCache() {
+  _uploadSweepCache = null;
+  _uploadSweepCachedAt = 0;
+}
 async function _fetchAllTimelineAssets() {
   const all = [];
   const pageSize = 1000;
@@ -1263,6 +1316,83 @@ app.post('/api/immich/tag-search', requireAuth, async (req, res) => {
       total: data.assets?.total || items.length
     });
   } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Library-tab tag editing — writes REAL Immich tags (unlike Prints'
+// print.tags[], which is a Darkroom-local field with no relationship to
+// Immich at all). Immich is the tag source of truth here, matching how the
+// lr-immich plugin already treats it on the LR→Immich direction (mirror
+// semantics: add links a tag, remove unlinks it — never deletes the tag
+// entity itself, so it survives for other photos still using it).
+//
+// Normalization: match case-insensitively against existing tag NAMES
+// (Immich tag-name uniqueness is itself case-insensitive) before creating,
+// so "Trestle" reuses an existing "trestle" tag instead of forking a
+// duplicate. Matched/created by "name" (the leaf), not "value" (the full
+// "/"-hierarchical path the lr-immich plugin keys by) — deliberately
+// simpler, since Jacob's tagging convention never puts "/" in a keyword
+// (see feedback-film-metadata-exiftool-direct-write.md), so name and value
+// are equivalent in practice for every tag this app will ever write.
+async function fetchImmichTags() {
+  const r = await fetch(`${IMMICH_URL}/tags`, { headers: { 'x-api-key': IMMICH_KEY } });
+  const data = await r.json();
+  return Array.isArray(data) ? data : [];
+}
+
+async function resolveOrCreateTagId(desiredName) {
+  const normalized = desiredName.trim().toLowerCase();
+  const all = await fetchImmichTags();
+  const existing = all.find(t => (t.name || '').toLowerCase() === normalized);
+  if (existing) return existing.id;
+  const r = await fetch(`${IMMICH_URL}/tags`, {
+    method: 'POST',
+    headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: normalized })
+  });
+  const created = await r.json();
+  if (!created || !created.id) throw new Error(`tag create failed: ${JSON.stringify(created)}`);
+  return created.id;
+}
+
+app.post('/api/library-tags/:id/add', requireAuth, async (req, res) => {
+  const assetId = req.params.id;
+  const { tag } = req.body || {};
+  if (!tag || typeof tag !== 'string' || !tag.trim()) return res.status(400).json({ error: 'tag required' });
+  try {
+    const tagId = await resolveOrCreateTagId(tag);
+    await fetch(`${IMMICH_URL}/tags/${tagId}/assets`, {
+      method: 'PUT',
+      headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: [assetId] })
+    });
+    bustUploadSweepCache();
+    console.log(`library-tags: asset=${assetId} add="${tag.trim().toLowerCase()}"`);
+    res.json({ ok: true, tag: tag.trim().toLowerCase() });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/library-tags/:id/remove', requireAuth, async (req, res) => {
+  const assetId = req.params.id;
+  const { tag } = req.body || {};
+  if (!tag || typeof tag !== 'string') return res.status(400).json({ error: 'tag required' });
+  try {
+    const normalized = tag.trim().toLowerCase();
+    const all = await fetchImmichTags();
+    const existing = all.find(t => (t.name || '').toLowerCase() === normalized);
+    if (!existing) return res.json({ ok: true, tag: normalized }); // nothing to unlink
+    await fetch(`${IMMICH_URL}/tags/${existing.id}/assets`, {
+      method: 'DELETE',
+      headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: [assetId] })
+    });
+    bustUploadSweepCache();
+    console.log(`library-tags: asset=${assetId} remove="${normalized}"`);
+    res.json({ ok: true, tag: normalized });
+  } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
@@ -1996,8 +2126,9 @@ const TAG_RANK_SCHEMA = {
   properties: {
     rankedTags: { type: 'array', items: { type: 'string' } },
     suggestedTags: { type: 'array', items: { type: 'string' } },
+    suggestedTitle: { type: 'string' },
   },
-  required: ['rankedTags', 'suggestedTags'],
+  required: ['rankedTags', 'suggestedTags', 'suggestedTitle'],
   additionalProperties: false,
 };
 
@@ -2040,7 +2171,11 @@ async function rankTagsWithAI({ imageBase64, title, camera, film, city, state, t
             `reordered (don't drop any). Return an empty list if there are no existing tags.\n` +
             `2. Separately, suggest ${suggestionCount} short tags (1-3 words each) ${suggestionPurpose}. ` +
             `Do not suggest camera, lens, film, or generic tags like "photo" or "film photography" — those ` +
-            `are added automatically elsewhere. If nothing meaningful applies, return an empty list.`,
+            `are added automatically elsewhere. If nothing meaningful applies, return an empty list.\n` +
+            `3. Suggest a short, evocative title for the photo in the style of a Flickr post title — 2-4 ` +
+            `words, concrete and specific to what's actually in the frame (e.g. "Steel Quills", "Empty ` +
+            `Schoolyard", "Deck Ironwork"). Never generic ("Untitled", "Street Scene", "Nice Photo"). If a ` +
+            `title is already given above, you may suggest a replacement, but keep it if it's already good.`,
         },
       ],
     }],
@@ -2052,6 +2187,7 @@ async function rankTagsWithAI({ imageBase64, title, camera, film, city, state, t
   return {
     rankedTags: Array.isArray(parsed.rankedTags) ? parsed.rankedTags : tags,
     suggestedTags: Array.isArray(parsed.suggestedTags) ? parsed.suggestedTags : [],
+    suggestedTitle: typeof parsed.suggestedTitle === 'string' ? parsed.suggestedTitle : '',
   };
 }
 
@@ -2090,10 +2226,12 @@ app.post('/api/generate-tags/:assetId', requireAuth, async (req, res) => {
 
     let rankedTags = tags;
     let suggestedTags = [];
+    let suggestedTitle = '';
     try {
       const ai = await rankTagsWithAI({ imageBase64, title, camera, film, city, state, tags });
       rankedTags = ai.rankedTags;
       suggestedTags = ai.suggestedTags;
+      suggestedTitle = ai.suggestedTitle;
     } catch (e) {
       console.error('generate-tags AI ranking failed, falling back to entry order:', e.message);
     }
@@ -2117,7 +2255,7 @@ app.post('/api/generate-tags/:assetId', requireAuth, async (req, res) => {
       knownCities: filterCache.cities || [],
     });
 
-    const generatedTags = { ...outputs, suggestedTags, generatedAt: new Date().toISOString() };
+    const generatedTags = { ...outputs, suggestedTags, suggestedTitle, generatedAt: new Date().toISOString() };
     const store = loadGeneratedTagsStore();
     store[assetId] = generatedTags;
     saveGeneratedTagsStore(store);
