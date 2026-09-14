@@ -15,6 +15,11 @@ header, optional slideshow, and pinch-zoom on every photo. No login required for
 
 ![Public album with branded header](screenshots/03-public-album.png)
 
+## What's new in v1.5.102–103
+
+- **Album picker sorts most-recently-used first** — the "+ Album" picker now surfaces whichever album you were just filing photos into, instead of an unsorted list.
+- **Fixed: Immich albums appearing empty when opened** — Immich v3.1.0 stopped including an inline asset list on its album-detail endpoint; the proxy now fetches it separately via search and merges it back in.
+
 ## What's new in v1.5.101
 
 - **Library-tab title and tag editing** — the Tag & Caption generator's suggestions can now be saved directly onto Library photos, not just Prints. Tag edits write real Immich tags; titles are tracked separately and survive the periodic IPTC byte-scan.

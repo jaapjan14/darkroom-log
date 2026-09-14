@@ -1,22 +1,34 @@
 # Changelog
 
+## Environment note (2026-09-13)
+
+### Immich upgraded v3.1.0 → v3.2.0
+
+- Audited the v3.2.0 release against Darkroom's full Immich integration beforehand: no removed/changed endpoints affect Darkroom (the new "asset file apis" are additive; `album.description` changing from `""` to `null` is irrelevant since Darkroom never reads it; cluster groups/workflow tags/memories page/tag renaming/map viewport are web-UI-only or additive). No Postgres/VectorChord changes required.
+- One forward-looking note: Immich's new structured Search API (v3.2.0) formally deprecates the "flat" search endpoints (`/search/metadata`, `/search/smart`, etc.) that Darkroom's entire Immich tab is built on, with removal planned for Immich v4. Not an issue today — just something a future v4 upgrade will require a real rewrite for.
+- Verified clean after the upgrade: all 4 Immich containers healthy on v3.2.0, and the exact endpoints Darkroom depends on (`/albums/:id`, `/search/metadata` — including the album-assets fix below) still return correct data (Nikon Z8 album: 442/442 assets, EXIF intact).
+- No Darkroom code changes needed for this upgrade.
+
+## v1.5.103 (2026-09-13)
+
+### Fix: Immich albums appeared empty when opened, despite showing a correct photo count
+
+- **Why:** Jacob reported that albums under the Immich tab looked empty when opened, even though the tile correctly showed a photo count and the photos were confirmed present in Immich itself.
+- Root cause (confirmed live against the Immich API): as of Immich v3.1.0, `GET /albums/:id` no longer inlines an `assets` array — it only returns `assetCount`. Darkroom's `/api/immich/immich-albums/:id` proxy (`server.js`) forwarded that response as-is, so `data.assets` was always `undefined` client-side, and every screen that opens an album (`openImmichAlbum`, the album grid's per-tile detail fetch, the camera/lens/city filter chips) rendered against an empty array. The tile's photo count still looked right because that comes from the separate `assetCount` field, which Immich still returns — only the asset list itself was gone.
+- Fix: `/api/immich/immich-albums/:id` now separately fetches the album's assets via Immich's `POST /search/metadata` with an `albumIds` filter (`withExif: true` to keep the camera/lens/city filter chips working), paginating on that endpoint's own `page`/`nextPage` cursor (unrelated to `assetCount`), and merges the result back onto the album object as `data.assets` before responding — so every existing client code path that already reads `data.assets` needed no changes.
+- Verified directly against the live Immich API (v3.1.0) before deploying: confirmed `GET /albums/:id` truly omits `assets` (only `assetCount`), and that `search/metadata` with `albumIds` + `size: 1000` returns the full asset list (442/442 for the test album) with `exifInfo` present.
+- Confirmed fixed in production: after the container restart actually took effect (an earlier restart attempt silently didn't restart the process, which looked like the fix itself had failed), server logs showed every configured album resolving its full asset count (8/8, 38/38, 24/24, 131/131, 442/442), and the Nikon Z8 album rendered its photos in the UI.
+- Server-only change (`server.js`) — no client cache-bust needed. package.json 1.5.102 → 1.5.103.
+
+## v1.5.102 (2026-09-13)
+
+### Change: "Add to Album" picker now sorts by most-recently-used
+
+- **Why:** Jacob has enough albums now that finding the right one in the "+ Album" picker (Prints tab → add photo to album) was getting tedious — it listed albums in whatever order `/api/albums` returned them, with no sort.
+- `renderDarkroomAlbumPickList()` in `public/app.js` now sorts through the existing `sortAlbums(albums, 'updated')` helper (already used for the main Albums grid) instead of rendering `state.albums` raw. Albums already bump `updatedAt` on any add/remove/reorder (`server.js` line ~1558), so this surfaces whatever album was just filed into, no new server-side tracking needed.
+- Client-only change: `public/app.js` (`?v=280` → `?v=281` in `index.html`), `public/sw.js` (`SHELL_CACHE` `darkroom-v149` → `darkroom-v150`). package.json 1.5.101 → 1.5.102.
+
 ## v1.5.101 (2026-08-20)
-
-### Feature: Library-tab title and tag editing
-
-- **Why:** the Tag & Caption generator needed a way to actually save its suggestions onto Library photos — Prints already had a title/tag edit path, but a Library photo (not yet logged as a print) had no way to commit a generated title or tag.
-- New `PUT /api/library-title/:id` writes to `titles.json` with `source: 'manual'`, getting the same backfill-scan protection as an LR-plugin push (`source: 'lr'`) so a Library edit survives the 6h IPTC byte-scan.
-- New `POST`/`DELETE /api/library-tags/:id/add|remove` write real Immich tags — not Darkroom-local `print.tags[]` — mirroring the semantics the lr-immich plugin already uses on the LR→Immich direction: add links a tag, remove unlinks it, never deletes the tag entity itself. Tag names are matched case-insensitively before creating, so "Trestle" reuses an existing "trestle" tag instead of forking a duplicate.
-- New `GET /api/lr-title-export` lets the LR plugin's "Pull Titles & Tags from Darkroom" action pull back only `source: 'manual'` (Library-tab) titles — LR-sourced and scan-sourced titles are excluded, since LR already has the former and the latter carries no authority.
-
-### Feature: AI-suggested titles in the Tag & Caption generator
-
-- **Why:** most of the library has no title, so generated captions and social copy looked generic for the majority of photos — the generator now proposes a short, evocative 2–4 word title (Flickr-post style, e.g. "Steel Quills") alongside its tag suggestions. Shown as a suggestion to accept, never applied automatically; if a title already exists, the AI may still propose a replacement but is told to keep it if it's already good.
-
-### Fix: Public album dates could render hours off
-
-- **Why:** Jacob noticed a photo's displayed date/time was off by several hours on a public album page.
-- `album.js`'s date/time formatting used the browser's local-timezone getters against a value that's actually Immich's `localDateTime` — the capture's wall-clock digits serialized with a dummy `Z` marker, meant to be shown literally. Reading it with local getters re-applied the viewer's own timezone on top, shifting (and sometimes merging or splitting) the displayed day — e.g. a 4:34 PM Pacific capture showing as 9:34 AM. Switched to UTC-literal getters (`timeZone: 'UTC'`) throughout the date-grouping and per-photo date/time formatters so the stored wall-clock value renders unchanged regardless of viewer timezone.
 
 ### Fix: Library search results wiped to "No recent uploads" when re-entering the Library tab
 

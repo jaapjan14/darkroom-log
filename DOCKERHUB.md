@@ -17,7 +17,14 @@ header, optional slideshow, and pinch-zoom on every photo. No login required for
 
 **Source:** https://github.com/jaapjan14/darkroom-log
 
-**Immich compatibility:** actively run in production against **Immich v3.1.0** (upgraded 2026-07-29, audited clean against this image). Talks to Immich entirely through its REST API (asset/search/album/tag endpoints), so it isn't tied to Immich's internal ML/vector-search backend — the v3 migration (pgvecto.rs → VectorChord) needed no changes on Darkroom's side. Not tested against Immich versions older than v3.
+**Immich compatibility:** actively run in production against **Immich v3.2.0** (upgraded 2026-09-13, audited clean against this image). Talks to Immich entirely through its REST API (asset/search/album/tag endpoints), so it isn't tied to Immich's internal ML/vector-search backend — the v3 migration (pgvecto.rs → VectorChord) needed no changes on Darkroom's side. Not tested against Immich versions older than v3. Note: Immich v3.2.0 formally deprecated the "flat" search endpoints this app's Immich integration is built on, with removal planned for a future Immich v4 — no impact today, but a v4 upgrade will require a search-layer rewrite here.
+
+## What's new in v1.5.102–103
+
+Two Immich-tab fixes: a smarter Album picker sort, and Immich albums that had gone blank when opened.
+
+- **"Add to Album" picker now sorts most-recently-used first** — with enough albums accumulated, finding the right one when filing a photo was getting tedious. Reuses the existing "last updated" sort already used for the main Albums grid.
+- **Fixed: Immich albums appeared empty when opened, despite showing a correct photo count** — as of Immich v3.1.0, `GET /albums/:id` stopped inlining an `assets` array (only `assetCount` comes back now). This app's Immich-albums proxy now separately fetches the asset list via Immich's `search/metadata` endpoint and merges it back in, so opening an album shows its photos again.
 
 ## What's new in v1.5.101
 

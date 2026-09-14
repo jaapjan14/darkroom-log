@@ -2112,7 +2112,9 @@ async function renderDarkroomAlbumPickList() {
     list.innerHTML = '<div style="color:var(--text-dim);font-family:IBM Plex Mono,monospace;font-size:11px;margin-bottom:0.5rem">No albums yet</div>';
     return;
   }
-  list.innerHTML = state.albums.map(a => `
+  // Most-recently-used first — albums.updatedAt bumps on add/remove/reorder,
+  // so this surfaces whatever album Jacob was just filing photos into.
+  list.innerHTML = sortAlbums(state.albums, 'updated').map(a => `
     <button class="btn btn-ghost btn-sm" style="width:100%;text-align:left;margin-bottom:0.4rem" data-action="addToAlbum" data-id="${a.id}">${a.title} (${a.assets.length})</button>
   `).join('');
 }

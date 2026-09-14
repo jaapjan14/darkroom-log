@@ -1943,8 +1943,34 @@ app.get('/api/immich/immich-albums/:id', requireAuth, async (req, res) => {
       headers: { 'x-api-key': IMMICH_KEY }
     });
     const data = await r.json();
+    // Immich (as of v3.1.0) no longer inlines `assets` on GET /albums/:id —
+    // only assetCount comes back. Assets now have to be pulled separately via
+    // /search/metadata's albumIds filter, paginated with its own page/nextPage
+    // cursor (unrelated to assetCount). withExif:true keeps camera/lens/city
+    // filter chips in the album view working.
+    const assets = [];
+    let page = 1;
+    let guard = 0;
+    while (page && guard++ < 50) {
+      const sr = await fetch(`${IMMICH_URL}/search/metadata`, {
+        method: 'POST',
+        headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ albumIds: [req.params.id], size: 1000, page, withExif: true })
+      });
+      const sdata = await sr.json();
+      if (!sr.ok) {
+        console.error(`[immich-albums/${req.params.id}] search/metadata page ${page} -> ${sr.status}:`, JSON.stringify(sdata).slice(0, 500));
+        break;
+      }
+      assets.push(...(sdata.assets?.items || []));
+      page = sdata.assets?.nextPage ? Number(sdata.assets.nextPage) : null;
+    }
+    data.assets = assets;
     res.json(data);
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) {
+    console.error(`[immich-albums/${req.params.id}] error:`, e);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // Create a new Immich album and optionally add assets to it
