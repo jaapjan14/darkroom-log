@@ -104,7 +104,10 @@ const app = express();
 // + sw.js + grid thumb JSON were shipping uncompressed).
 app.use(compression());
 const PORT = process.env.PORT || 3000;
-const PASSWORD_HASH = process.env.PASSWORD_HASH || bcrypt.hashSync(process.env.APP_PASSWORD || 'darkroom', 10);
+if (!process.env.PASSWORD_HASH && !process.env.APP_PASSWORD) {
+  throw new Error('PASSWORD_HASH or APP_PASSWORD environment variable must be set — no default password is provided.');
+}
+const PASSWORD_HASH = process.env.PASSWORD_HASH || bcrypt.hashSync(process.env.APP_PASSWORD, 10);
 const IMMICH_URL = process.env.IMMICH_URL || 'http://192.168.0.199:2283/api';
 const IMMICH_KEY = process.env.IMMICH_KEY || '';
 // Tag generator (Lomography/Flickr/Instagram) — client is undefined (not
