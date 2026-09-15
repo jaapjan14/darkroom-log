@@ -19,6 +19,15 @@ header, optional slideshow, and pinch-zoom on every photo. No login required for
 
 **Immich compatibility:** actively run in production against **Immich v3.2.0** (upgraded 2026-09-13, audited clean against this image). Talks to Immich entirely through its REST API (asset/search/album/tag endpoints), so it isn't tied to Immich's internal ML/vector-search backend — the v3 migration (pgvecto.rs → VectorChord) needed no changes on Darkroom's side. Not tested against Immich versions older than v3. Note: Immich v3.2.0 formally deprecated the "flat" search endpoints this app's Immich integration is built on, with removal planned for a future Immich v4 — no impact today, but a v4 upgrade will require a search-layer rewrite here.
 
+## What's new in v1.5.104–108
+
+Library tag-add bug fixes plus a dedicated title regenerate button.
+
+- **Fixed: pasting a multi-word tag list into a "+ tag" input shredded every tag into single words** — the paste handler split on any whitespace instead of just commas. Multi-word tags (e.g. "black and white film") now paste correctly, and slashes are stripped from Library tags to avoid Immich's nested-tag-hierarchy parsing (`f/2` → `f2`).
+- **Fixed: a tag could silently fail to link with no error shown** — the server now verifies each tag-link write actually succeeded against Immich's real per-item result before reporting success, instead of assuming success whenever the request didn't throw.
+- **Fixed: the Library tags row often needed a manual page reload to show a just-added/removed tag** — it now updates from the write the client already knows succeeded, instead of immediately re-reading Immich (whose read-after-write isn't always immediate).
+- **New: dedicated "regenerate" button for just the suggested title** — get a fresh title idea without re-running the whole caption/tag generation.
+
 ## What's new in v1.5.102–103
 
 Two Immich-tab fixes: a smarter Album picker sort, and Immich albums that had gone blank when opened.
