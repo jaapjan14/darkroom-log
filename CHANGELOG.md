@@ -1,5 +1,49 @@
 # Changelog
 
+## v1.5.108 (2026-09-15)
+
+### Fix: Library tags row often needed a manual page reload to show a just-added/removed tag
+
+- **Why:** Jacob reported often needing to refresh the page to see whether a tag add had actually taken. Root cause: `addLibraryTag`/`removeLibraryTag`/`addSuggestedTag` all re-rendered the tags row by re-fetching `/api/immich/photo/:id` (`refreshLibraryTags()`) immediately after the write completed — but Immich's own read-after-write for a just-linked/unlinked tag isn't always immediate, so that follow-up GET could return the *pre-write* tag list, making a genuinely successful write look like it silently failed until a later reload caught up with Immich's own propagation.
+- Fix (`public/app.js`): all three functions now update the tags row **optimistically** from what the client already knows it just wrote — reading the currently-displayed chips (new `currentDisplayedLibraryTags()` helper) and splicing in the add/remove locally — instead of re-fetching Immich at all. This is safe to trust now that v1.5.106 made the server actually verify each write against Immich's real per-item result before reporting success (previously that wasn't checked either, so trusting a "success" response alone would have been premature). `refreshLibraryTags()` is now unused and removed.
+- Client-only change: `public/app.js` (`?v=284` → `?v=285` in `index.html`), `public/sw.js` (`SHELL_CACHE` `darkroom-v153` → `darkroom-v154`). package.json 1.5.107 → 1.5.108.
+
+## v1.5.107 (2026-09-15)
+
+### New: dedicated "regenerate" button for just the suggested title
+
+- **Why:** Jacob wanted a way to get a fresh title idea without re-running the whole Tags & Captions generation — the only "Regenerate" button re-ran captions + tags + title together in one Claude call, so rerolling a title you didn't like also churned suggested tags you might not have acted on yet.
+- New `↻` icon button next to "Use this title" in the Suggested Title block, wired to a new endpoint `POST /api/generate-tags/:assetId/title` (`server.js`) that calls a lighter `suggestTitleOnly()` AI function — same image/context, smaller schema (`{suggestedTitle}` only), smaller `max_tokens` — and merges just the new `suggestedTitle` into the existing cached record, leaving `standardCaption`/`lomography`/`flickr`/`instagram`/`suggestedTags` untouched. Passes the previous suggestion in the prompt ("give a different idea, don't repeat this") so back-to-back clicks don't converge on the same title.
+- Also fixes a staleness gap surfaced while building this: the client's in-memory `ctx.tags` (used as AI context) only gets updated by the individual suggested-tag `+` chips (`addSuggestedTag`) — the manual "+ tag" paste input (`addLibraryTag`/`addTag`, see v1.5.104-106) never touches it, so a same-session Regenerate right after a paste would use a stale tag list. The new title-only endpoint sidesteps this by pulling tags live at call time — Immich's asset tags for Library, `prints.json` for Prints — instead of trusting whatever the client last had in memory.
+- Client + server change: `public/app.js` (`?v=283` → `?v=284` in `index.html`), `public/sw.js` (`SHELL_CACHE` `darkroom-v152` → `darkroom-v153`), `server.js`. package.json 1.5.106 → 1.5.107.
+
+## v1.5.106 (2026-09-15)
+
+### Fix: v1.5.105's new link-status check false-alarmed on already-linked tags
+
+- **Why:** Immediately after v1.5.105 shipped, re-pasting an 11-tag list that was mostly already on the asset reported "Failed to add 8 tag(s)" for exactly the 8 already-linked ones — confirmed via server logs the real Immich response was `[{"success":false,"error":"duplicate"}]`, HTTP 200. Immich reports an already-linked tag this way as a no-op, not a real failure; v1.5.105's new check didn't know the difference and treated it as one. (The 3 genuinely-missing tags from the prior bug — rodinal, 35mm film, film photography — did go through clean in the same batch, confirming the underlying data was actually already correct; this was a false-alarm-only regression.)
+- Fix (`server.js`, `/api/library-tags/:id/add`): `item.error === 'duplicate'` is now treated as success alongside `item.success !== false`. Any other per-item error still surfaces as a real failure.
+- Server-only change, no cache-bust needed. package.json 1.5.105 → 1.5.106.
+
+## v1.5.105 (2026-09-15)
+
+### Fix: tags could silently fail to link during a batch "+ tag" paste, with no error shown
+
+- **Why:** After v1.5.104's paste-splitting fix, Jacob pasted an 11-tag Flickr-generated list into the Library tab and found `rodinal` missing afterward — confirmed against Immich's postgres directly (`tag_asset` join) that it genuinely never got linked, despite the server log showing `add="rodinal"` with no error. Re-pasting the same list didn't fix it; adding `rodinal` by itself (single tag, not part of a paste) worked.
+- Root cause #1 (server, `server.js`): `POST /api/library-tags/:id/add` never checked whether the Immich `PUT /tags/{id}/assets` link call actually succeeded — `fetch()` doesn't throw on a 4xx/5xx status, and Immich's bulk tag-assets endpoint can additionally return HTTP 200 with a per-item `[{id, success, error}]` body even when an individual link fails. The code logged "added" and returned `{ok: true}` regardless. `resolveOrCreateTagId`'s tag-create POST had the same gap (checked `created.id` but not `r.ok`). Fixed: both now check the real HTTP status, and the link call additionally inspects the per-item result array when Immich returns one, before declaring success.
+- Root cause #2 (client, `public/app.js`): `addLibraryTag()`'s per-tag loop `return`ed immediately on the first failed request, which — combined with root cause #1 always looking like success — meant a genuine failure would abort the whole batch and silently drop everything pasted after it. Now the loop runs through the entire batch, collects failures, always calls `refreshLibraryTags()` at the end (previously skipped if the loop returned early), and reports one alert listing every tag that failed instead of stopping at the first one.
+- Still open: why Immich's link call specifically rejected `rodinal` mid-batch while the same tag succeeded standalone is not yet root-caused — this fix makes the real error (status + response body) visible in server logs and in the client alert next time it happens, rather than diagnosing blind.
+- Client + server change: `public/app.js` (`?v=282` → `?v=283` in `index.html`), `public/sw.js` (`SHELL_CACHE` `darkroom-v151` → `darkroom-v152`), `server.js`. package.json 1.5.104 → 1.5.105.
+
+## v1.5.104 (2026-09-15)
+
+### Fix: pasting a multi-word tag list into the Library/Prints "+ tag" input shredded every tag into single words
+
+- **Why:** Jacob copied the generated Flickr tag block (comma-separated multi-word tags like "Kentmere PAN 400", "black and white film") and pasted it into the Library tab's "+ tag" input to bulk-add real tags. Every tag came out wrong — split into individual words ("kentmere", "pan", "400", "black", "and", "white", "film", ...) instead of staying intact. One of the mangled fragments, `"f/2"` (from "Voigtlander Ultron 35mm f/2"), also failed outright with a 500 — Immich parses `/` in a tag name as a nested-tag-hierarchy separator (same gotcha documented for LR keyword writes: `75mm f/3.5` → `75mm f` → `3.5`).
+- Root cause: `addLibraryTag()` and `addTag()` (Prints tab) both split pasted input on `/[\s,]+/` — any whitespace OR comma — instead of commas only, so spaces *inside* a tag phrase were treated as separators too.
+- Fix (`public/app.js`): both functions now split on `/,+/` only, preserving multi-word tags. `addLibraryTag()` additionally strips `/` from each tag before sending (`f/2` → `f2`), matching the slash-free convention already used for LR keyword writes, since Library tags write through to real Immich tags. `addTag()` (Prints) didn't get the slash-strip — Prints tags are a plain JSON field (`prints.json`), not Immich tags, so the hierarchy-parsing issue doesn't apply there.
+- Client-only change: `public/app.js` (`?v=281` → `?v=282` in `index.html`), `public/sw.js` (`SHELL_CACHE` `darkroom-v150` → `darkroom-v151`). package.json 1.5.103 → 1.5.104.
+
 ## Environment note (2026-09-13)
 
 ### Immich upgraded v3.1.0 → v3.2.0

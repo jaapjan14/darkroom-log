@@ -4036,6 +4036,18 @@ function cancelEditLibraryTitle(original) {
 // over the outer span since it's the more specific match) — nested inside a
 // <span>, not a <button>, since a <button> can't validly contain another
 // interactive element (Prints avoids this the same way with .print-tag).
+// Reads the tags actually shown in the row right now (not a re-fetch) — used
+// to build an optimistic post-add/remove update. See addLibraryTag's comment
+// for why: re-fetching Immich immediately after a write can return the
+// pre-write tag list (Immich's read-after-write isn't always immediate),
+// which made a real, successful add look like it silently failed until a
+// manual page reload caught up.
+function currentDisplayedLibraryTags() {
+  return Array.from(document.querySelectorAll('#library-tags-row .immich-tag'))
+    .map(el => el.dataset.tag)
+    .filter(Boolean);
+}
+
 function libraryTagsInnerHtml(tags) {
   const chips = (tags || []).map(t => {
     const esc = t.replace(/"/g, '&quot;');
@@ -4065,20 +4077,42 @@ function handleLibraryTagKey(e) {
 async function addLibraryTag() {
   const assetId = state.currentRecentId;
   const inp = document.getElementById('library-tag-add-input');
-  const newTags = inp.value.split(/[\s,]+/).map(t => t.trim().toLowerCase()).filter(Boolean);
+  // Comma-only split preserves multi-word tags pasted from the generated
+  // Flickr block (e.g. "Kentmere PAN 400, black and white film"); a
+  // whitespace split shredded every word apart. Slash strip avoids Immich
+  // parsing "/" as a nested-tag separator (e.g. "f/2" -> stray "2" tag) --
+  // matches the slash-free convention already used for LR keyword writes.
+  const newTags = inp.value.split(/,+/).map(t => t.trim().toLowerCase().replace(/\//g, '')).filter(Boolean);
   if (!newTags.length) return;
   inp.value = '';
   inp.classList.remove('visible');
+  // Continue through the whole batch and report failures together at the
+  // end, instead of aborting (and silently dropping everything after) on
+  // the first failed tag — a pasted list can have one bad tag among many
+  // good ones, and the earlier abort-on-first-error behavior meant a
+  // single failure silently discarded every tag after it in the paste.
+  const failed = [];
+  const added = [];
   for (const t of newTags) {
     const res = await fetch(`/api/library-tags/${assetId}/add`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tag: t })
     });
-    if (!res.ok) {
-      alert(`Failed to add tag "${t}" (${res.status}). Your session may have expired — try reloading the page.`);
-      return;
-    }
+    if (!res.ok) failed.push(t); else added.push(t);
   }
-  await refreshLibraryTags(assetId);
+  // Update the row from what we know we just wrote instead of re-fetching
+  // Immich — its read-after-write for a just-linked tag can lag a beat
+  // behind the write, which made successful adds look dropped until a
+  // manual reload. Each successful POST here is already confirmed by the
+  // server (v1.5.106+ checks Immich's real per-item link result), so the
+  // client doesn't need to re-verify by reading it back immediately.
+  if (added.length) {
+    const merged = [...new Set([...currentDisplayedLibraryTags(), ...added])];
+    const row = document.getElementById('library-tags-row');
+    if (row) row.innerHTML = libraryTagsInnerHtml(merged);
+  }
+  if (failed.length) {
+    alert(`Failed to add ${failed.length} tag(s): ${failed.join(', ')}. Check the darkroom container logs for the real error, or try reloading and re-adding just these.`);
+  }
 }
 
 async function removeLibraryTag(tag) {
@@ -4090,14 +4124,9 @@ async function removeLibraryTag(tag) {
     alert(`Failed to remove tag "${tag}" (${res.status}). Your session may have expired — try reloading the page.`);
     return;
   }
-  await refreshLibraryTags(assetId);
-}
-
-async function refreshLibraryTags(assetId) {
-  const res = await fetch(`/api/immich/photo/${assetId}`);
-  const meta = await res.json();
+  const remaining = currentDisplayedLibraryTags().filter(t => t !== tag);
   const row = document.getElementById('library-tags-row');
-  if (row) row.innerHTML = libraryTagsInnerHtml(Array.isArray(meta.tags) ? meta.tags : []);
+  if (row) row.innerHTML = libraryTagsInnerHtml(remaining);
 }
 
 function openAddPrintModal() {
@@ -4242,7 +4271,8 @@ function handleTagKey(e) {
 
 async function addTag() {
   const inp = document.getElementById('tag-add-input');
-  const newTags = inp.value.split(/[\s,]+/).map(t => t.trim().toLowerCase()).filter(Boolean);
+  // Comma-only split preserves multi-word tags (see addLibraryTag's same fix).
+  const newTags = inp.value.split(/,+/).map(t => t.trim().toLowerCase()).filter(Boolean);
   if (!newTags.length) return;
   const print = state.prints.find(p => p.id === state.currentPrintId);
   const tags = [...new Set([...(print.tags || []), ...newTags])];
@@ -4326,6 +4356,7 @@ function renderGeneratedTagsPanel(gt, allowAddTag, ctx) {
         <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap">
           <div style="font-size:13px;color:var(--text)">${escapeHtmlLite(gt.suggestedTitle)}</div>
           <button class="btn-icon" data-action="useSuggestedTitle" data-title="${encodeURIComponent(gt.suggestedTitle)}" style="font-size:11px;color:var(--safe)">Use this title</button>
+          <button id="regenerate-title-btn" class="btn-icon" data-action="regenerateSuggestedTitle" style="font-size:11px;color:var(--text-dim)" title="Get a different title suggestion">&#8635;</button>
         </div>
       </div>
     ` : ''}
@@ -4410,8 +4441,7 @@ function copyGeneratedText(field) {
 // Dispatches on ctx.kind: 'prints' writes print.tags via the existing PUT
 // /api/prints/:id path (same as the manual "+ tag" input); 'library' writes
 // a real Immich tag via /api/library-tags/:id/add (see server.js) and
-// refreshes the Tags row above using the same refreshLibraryTags() the
-// manual Library "+ tag" input uses.
+// updates the Tags row above optimistically, same pattern as addLibraryTag.
 async function addSuggestedTag(tag) {
   const ctx = state.currentGeneratedCtx;
   if (!ctx) return;
@@ -4423,7 +4453,9 @@ async function addSuggestedTag(tag) {
       alert(`Failed to add tag "${tag}" (${res.status}). Your session may have expired — try reloading the page.`);
       return;
     }
-    await refreshLibraryTags(ctx.assetId);
+    const merged = [...new Set([...currentDisplayedLibraryTags(), tag.trim().toLowerCase()])];
+    const row = document.getElementById('library-tags-row');
+    if (row) row.innerHTML = libraryTagsInnerHtml(merged);
     ctx.tags = [...(ctx.tags || []), tag.trim().toLowerCase()];
   } else {
     const print = state.prints.find(p => p.id === state.currentPrintId);
@@ -4467,6 +4499,33 @@ async function useSuggestedTitle(title) {
   if (state.currentGeneratedTags) {
     const panel = document.getElementById(ctx.panelId);
     if (panel) panel.innerHTML = renderGeneratedTagsPanel(state.currentGeneratedTags, ctx.allowAddTag, ctx);
+  }
+}
+
+// Regenerates only suggestedTitle via POST /api/generate-tags/:assetId/title
+// (server pulls live tags itself — see that endpoint's comment) — leaves
+// Standard Caption/Lomography/Flickr/Instagram/suggested-tags untouched, so
+// getting a fresh title idea doesn't cost a full re-generation.
+async function regenerateSuggestedTitle() {
+  const ctx = state.currentGeneratedCtx;
+  if (!ctx) return;
+  const btn = document.getElementById('regenerate-title-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  try {
+    const r = await fetch(`/api/generate-tags/${ctx.assetId}/title`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ title: ctx.title, kind: ctx.kind })
+    });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'Request failed');
+    const gt = await r.json();
+    if (state.currentGeneratedCtx !== ctx) return; // moved on to a different photo
+    state.currentGeneratedTags = gt;
+    const panel = document.getElementById(ctx.panelId);
+    if (panel) panel.innerHTML = renderGeneratedTagsPanel(gt, ctx.allowAddTag, ctx);
+  } catch (e) {
+    alert(`Failed to regenerate title: ${e.message}`);
+    if (btn) { btn.disabled = false; btn.textContent = '↻'; }
   }
 }
 
@@ -5379,6 +5438,7 @@ case 'shareSelected': shareSelected(id, el.dataset.filename, el.dataset.desc); b
     case 'copyGeneratedText': copyGeneratedText(el.dataset.field); break;
     case 'addSuggestedTag': addSuggestedTag(el.dataset.tag); break;
     case 'useSuggestedTitle': useSuggestedTitle(decodeURIComponent(el.dataset.title)); break;
+    case 'regenerateSuggestedTitle': regenerateSuggestedTitle(); break;
 
     // Immich search
     case 'selectImmich':

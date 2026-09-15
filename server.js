@@ -1351,26 +1351,48 @@ async function resolveOrCreateTagId(desiredName) {
     headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
     body: JSON.stringify({ name: normalized })
   });
-  const created = await r.json();
-  if (!created || !created.id) throw new Error(`tag create failed: ${JSON.stringify(created)}`);
+  const created = await r.json().catch(() => null);
+  if (!r.ok || !created || !created.id) {
+    throw new Error(`tag create failed (status=${r.status}): ${JSON.stringify(created)}`);
+  }
   return created.id;
 }
 
+// Immich's bulk PUT /tags/{id}/assets can return HTTP 200 with a per-item
+// [{id, success, error}] array even when the individual link failed (e.g.
+// already-linked, not-found) — status alone isn't a reliable success check,
+// so both the HTTP status AND the per-item result (when present) are
+// verified before this is reported as a success. Previously neither was
+// checked at all, so a failed link silently logged/responded as "added"
+// (see CHANGELOG v1.5.105 — this is what dropped "rodinal" from a batch
+// paste while individual adds of the same tag worked).
 app.post('/api/library-tags/:id/add', requireAuth, async (req, res) => {
   const assetId = req.params.id;
   const { tag } = req.body || {};
   if (!tag || typeof tag !== 'string' || !tag.trim()) return res.status(400).json({ error: 'tag required' });
+  const normalized = tag.trim().toLowerCase();
   try {
     const tagId = await resolveOrCreateTagId(tag);
-    await fetch(`${IMMICH_URL}/tags/${tagId}/assets`, {
+    const linkRes = await fetch(`${IMMICH_URL}/tags/${tagId}/assets`, {
       method: 'PUT',
       headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
       body: JSON.stringify({ ids: [assetId] })
     });
+    const linkBody = await linkRes.json().catch(() => null);
+    const item = Array.isArray(linkBody) ? linkBody.find(x => x && x.id === assetId) : null;
+    // Immich reports an already-linked tag as {success:false, error:'duplicate'}
+    // with HTTP 200 — that's a no-op (goal already achieved), not a real
+    // failure, so it's treated as success. Any other per-item error still
+    // surfaces as a genuine failure.
+    const linked = linkRes.ok && (!Array.isArray(linkBody) || (item && (item.success !== false || item.error === 'duplicate')));
+    if (!linked) {
+      throw new Error(`tag link failed (status=${linkRes.status}): ${JSON.stringify(linkBody)}`);
+    }
     bustUploadSweepCache();
-    console.log(`library-tags: asset=${assetId} add="${tag.trim().toLowerCase()}"`);
-    res.json({ ok: true, tag: tag.trim().toLowerCase() });
+    console.log(`library-tags: asset=${assetId} add="${normalized}"`);
+    res.json({ ok: true, tag: normalized });
   } catch (e) {
+    console.error(`library-tags: asset=${assetId} add="${normalized}" FAILED: ${e.message}`);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2217,6 +2239,58 @@ async function rankTagsWithAI({ imageBase64, title, camera, film, city, state, t
   };
 }
 
+const TITLE_ONLY_SCHEMA = {
+  type: 'object',
+  properties: { suggestedTitle: { type: 'string' } },
+  required: ['suggestedTitle'],
+  additionalProperties: false,
+};
+
+// Lighter sibling of rankTagsWithAI for the title-only "regenerate" button —
+// same image + context, but skips the tag-ranking/suggestion work entirely
+// (smaller schema, smaller max_tokens) since the caller only wants a new
+// title idea, not a full re-generation of captions/tags. previousSuggestion
+// is passed so back-to-back regenerates don't just return the same idea.
+async function suggestTitleOnly({ imageBase64, title, camera, film, city, state, tags, previousSuggestion }) {
+  if (!anthropic) throw new Error('ANTHROPIC_API_KEY not configured');
+  const context = [
+    title ? `Current title: ${title}` : null,
+    camera ? `Camera: ${camera}` : null,
+    film ? `Film: ${film}` : null,
+    (city || state) ? `Location: ${[city, state].filter(Boolean).join(', ')}` : null,
+    tags.length ? `Tags: ${tags.join(', ')}` : null,
+    previousSuggestion ? `Previous suggestion (give a different idea, don't repeat this): ${previousSuggestion}` : null,
+  ].filter(Boolean).join('\n');
+
+  const response = await anthropic.messages.create({
+    model: 'claude-sonnet-5',
+    max_tokens: 256,
+    output_config: {
+      effort: 'low',
+      format: { type: 'json_schema', schema: TITLE_ONLY_SCHEMA },
+    },
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: imageBase64 } },
+        {
+          type: 'text',
+          text: `This is a scanned black-and-white or color film photograph being tagged for posting to ` +
+            `Lomography, Flickr, and Instagram.\n${context}\n\n` +
+            `Suggest a short, evocative title for the photo in the style of a Flickr post title — 2-4 ` +
+            `words, concrete and specific to what's actually in the frame (e.g. "Steel Quills", "Empty ` +
+            `Schoolyard", "Deck Ironwork"). Never generic ("Untitled", "Street Scene", "Nice Photo").`,
+        },
+      ],
+    }],
+  });
+
+  if (response.stop_reason === 'refusal') throw new Error('Model declined the request');
+  const textBlock = response.content.find(b => b.type === 'text');
+  const parsed = JSON.parse(textBlock.text);
+  return typeof parsed.suggestedTitle === 'string' ? parsed.suggestedTitle : '';
+}
+
 // Cached result only — used to populate the panel on open without regenerating.
 app.get('/api/generate-tags/:assetId', requireAuth, (req, res) => {
   const store = loadGeneratedTagsStore();
@@ -2289,6 +2363,61 @@ app.post('/api/generate-tags/:assetId', requireAuth, async (req, res) => {
     res.json(generatedTags);
   } catch (e) {
     console.error('generate-tags failed:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Regenerates only suggestedTitle, leaving the cached captions/tags
+// untouched — the dedicated "↻" button next to Suggested Title, so a fresh
+// title idea doesn't cost a full re-generation. Pulls tags LIVE at call
+// time (Immich for Library, prints.json for Prints) instead of trusting
+// whatever tag list the client had in memory, since addLibraryTag/addTag's
+// manual "+ tag" paste path never updates the client's in-memory ctx.tags
+// (only the individual suggested-tag chips do) — see CHANGELOG v1.5.107.
+app.post('/api/generate-tags/:assetId/title', requireAuth, async (req, res) => {
+  try {
+    const assetId = req.params.assetId;
+    const title = req.body.title || '';
+    const kind = req.body.kind === 'prints' ? 'prints' : 'library';
+
+    const store = loadGeneratedTagsStore();
+    const existing = store[assetId];
+    if (!existing) return res.status(400).json({ error: 'Generate the full set first' });
+
+    const assetRes = await fetch(`${IMMICH_URL}/assets/${assetId}`, {
+      headers: { 'x-api-key': IMMICH_KEY }
+    });
+    const asset = await assetRes.json();
+    const description = asset.exifInfo?.description || '';
+    const city = asset.exifInfo?.city || '';
+    const state = asset.exifInfo?.state || '';
+    const { camera, film } = tagFormat.parseDescription(description);
+
+    let tags = [];
+    if (kind === 'prints') {
+      const print = loadData().find(p => p.immichId === assetId);
+      tags = print && Array.isArray(print.tags) ? print.tags : [];
+    } else {
+      tags = Array.isArray(asset.tags) ? asset.tags.map(t => t.name).filter(Boolean) : [];
+    }
+
+    const imgRes = await fetch(`${IMMICH_URL}/assets/${assetId}/thumbnail?size=preview`, {
+      headers: { 'x-api-key': IMMICH_KEY }
+    });
+    const imageBase64 = Buffer.from(await imgRes.arrayBuffer()).toString('base64');
+
+    const suggestedTitle = await suggestTitleOnly({
+      imageBase64, title, camera, film, city, state, tags,
+      previousSuggestion: existing.suggestedTitle || '',
+    });
+
+    const generatedTags = { ...existing, suggestedTitle, generatedAt: new Date().toISOString() };
+    store[assetId] = generatedTags;
+    saveGeneratedTagsStore(store);
+
+    res.json(generatedTags);
+  } catch (e) {
+    console.error('generate-tags title-only failed:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
