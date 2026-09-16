@@ -19,6 +19,14 @@ header, optional slideshow, and pinch-zoom on every photo. No login required for
 
 **Immich compatibility:** actively run in production against **Immich v3.2.0** (upgraded 2026-09-13, audited clean against this image). Talks to Immich entirely through its REST API (asset/search/album/tag endpoints), so it isn't tied to Immich's internal ML/vector-search backend — the v3 migration (pgvecto.rs → VectorChord) needed no changes on Darkroom's side. Not tested against Immich versions older than v3. Note: Immich v3.2.0 formally deprecated the "flat" search endpoints this app's Immich integration is built on, with removal planned for a future Immich v4 — no impact today, but a v4 upgrade will require a search-layer rewrite here.
 
+## What's new in v1.5.109–113
+
+Renamed the Library/Immich tabs to match what's actually in them, plus a mode-toggle and Prints sort cleanup.
+
+- **Renamed tabs: Library → Analog, Immich → Digital** — the old names didn't reflect content. "Analog" is film work exclusively; "Digital" is digital-camera work (organized into Immich's native albums), once cleared of redundant film-scan albums now covered by this app's own Albums tab.
+- **New Print/Analog mode toggle** in the header — swap which of Prints/Analog opens first and reads first in the tab bar, since the right default depends on whether you're printing or working through scans that day. Persisted, so it's a one-time flip.
+- **Prints tab's Sort** is now a compact dropdown at the end of the search bar instead of an always-visible button row, matching the Analog tab's existing pattern.
+
 ## What's new in v1.5.104–108
 
 Library tag-add bug fixes plus a dedicated title regenerate button.
