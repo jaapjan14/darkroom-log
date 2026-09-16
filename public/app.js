@@ -75,13 +75,58 @@ async function login() {
   if (r.ok) {
     document.getElementById('login-screen').style.display = 'none';
     document.getElementById('app').style.display = 'block';
-    loadGallery();
+    loadInitialTab();
   } else {
     document.getElementById('login-error').textContent = 'Incorrect password';
   }
 }
 
 async function logout() { await fetch('/api/logout', {method:'POST'}); location.reload(); }
+
+// Which of Prints/Library opens first and reads first left-to-right in the
+// tab bar — a self-service toggle (persisted in localStorage) rather than a
+// hardcoded default, since which one Jacob wants first depends on whether
+// he's printing that day (Prints) or working through digital/film scans
+// (Library), not something with one permanently-correct answer.
+function getTabOrderMode() {
+  try { return localStorage.getItem('darkroom-tab-order') === 'library-first' ? 'library-first' : 'prints-first'; }
+  catch (e) { return 'prints-first'; }
+}
+
+// Two explicit buttons (Print/Digital) rather than one toggle that names
+// the mode you'd switch TO — that read like a status label for the mode
+// you're already in, backwards from what it meant. Each button sets its
+// own mode directly; .active marks whichever is actually current, same
+// visual language as the main tab buttons.
+function applyTabOrder(mode) {
+  const printsBtn = document.getElementById('tab-prints');
+  const recentBtn = document.getElementById('tab-recent');
+  const bar = printsBtn.parentElement;
+  if (mode === 'library-first') bar.insertBefore(recentBtn, printsBtn);
+  else bar.insertBefore(printsBtn, recentBtn);
+  document.getElementById('mode-prints-first')?.classList.toggle('active', mode === 'prints-first');
+  document.getElementById('mode-library-first')?.classList.toggle('active', mode === 'library-first');
+}
+
+function setTabOrder(mode) {
+  if (mode === getTabOrderMode()) return;
+  try { localStorage.setItem('darkroom-tab-order', mode); } catch (e) {}
+  applyTabOrder(mode);
+  switchTab(mode === 'library-first' ? 'recent' : 'prints');
+}
+applyTabOrder(getTabOrderMode());
+
+// Shared app-visible/first-load path used by both login() and the
+// auto-auth-check IIFE below — loads whichever tab the order toggle above
+// currently points to, instead of always assuming Prints.
+function loadInitialTab() {
+  if (getTabOrderMode() === 'library-first') {
+    switchTab('recent');
+  } else {
+    switchTab('prints');
+    loadGallery();
+  }
+}
 
 // TAB SWITCHING
 function switchTab(tab) {
@@ -607,21 +652,24 @@ function toggleFiltersPopup() {
 }
 
 // Sort-reveal panel (Sort options on top, Full Sweep/Thumbnails maintenance
-// below) — opens/closes via the Sort chip, same backdrop-close pattern.
-function openSortPopup() {
-  const popup = document.getElementById('sort-popup');
+// below on Library's) — opens/closes via a Sort chip, backdrop-close
+// pattern. Shared by Library's popup (default ids) and Prints' own
+// gallery-sort-popup/gallery-sort-backdrop (separate ids since both views'
+// markup coexists in the DOM at once, just toggled via .view.active).
+function openSortPopup(popupId = 'sort-popup', backdropId = 'sort-backdrop') {
+  const popup = document.getElementById(popupId);
   if (popup.style.display !== 'none') return;
   popup.style.display = 'block';
-  document.getElementById('sort-backdrop').style.display = 'block';
+  document.getElementById(backdropId).style.display = 'block';
 }
-function closeSortPopup() {
-  document.getElementById('sort-popup').style.display = 'none';
-  document.getElementById('sort-backdrop').style.display = 'none';
+function closeSortPopup(popupId = 'sort-popup', backdropId = 'sort-backdrop') {
+  document.getElementById(popupId).style.display = 'none';
+  document.getElementById(backdropId).style.display = 'none';
 }
-function toggleSortPopup() {
-  const popup = document.getElementById('sort-popup');
-  if (popup.style.display === 'none') openSortPopup();
-  else closeSortPopup();
+function toggleSortPopup(popupId = 'sort-popup', backdropId = 'sort-backdrop') {
+  const popup = document.getElementById(popupId);
+  if (popup.style.display === 'none') openSortPopup(popupId, backdropId);
+  else closeSortPopup(popupId, backdropId);
 }
 
 function updateRecentFilterChips() {
@@ -1872,7 +1920,7 @@ function renderAlbumDetail() {
   `;
 
   if (!album.assets.length) {
-    grid.innerHTML = '<div class="album-empty" style="grid-column:1/-1;padding:3rem;text-align:center;color:var(--text-dim);font-family:IBM Plex Mono,monospace;font-size:11px">No photos yet.<br>Add photos from the Library tab.</div>';
+    grid.innerHTML = '<div class="album-empty" style="grid-column:1/-1;padding:3rem;text-align:center;color:var(--text-dim);font-family:IBM Plex Mono,monospace;font-size:11px">No photos yet.<br>Add photos from the Analog tab.</div>';
     grid.className = 'gallery-grid';
     return;
   }
@@ -3663,7 +3711,7 @@ document.getElementById('login-password').addEventListener('keydown', e => { if 
   if (d.authenticated) {
     document.getElementById('login-screen').style.display = 'none';
     document.getElementById('app').style.display = 'block';
-    loadGallery();
+    loadInitialTab();
     fetch('/api/albums').then(r => r.json()).then(a => state.albums = a);
   }
 })();
@@ -5090,6 +5138,8 @@ function wireListeners() {
   }
 
   // Tabs
+  w('mode-prints-first', 'click', () => setTabOrder('prints-first'));
+  w('mode-library-first', 'click', () => setTabOrder('library-first'));
   w('tab-prints', 'click', () => switchTab('prints'));
   w('tab-recent', 'click', () => switchTab('recent'));
   w('tab-albums', 'click', () => switchTab('albums'));
@@ -5097,10 +5147,12 @@ function wireListeners() {
 
   // Prints
   w('gallery-search', 'input', () => applyFilters());
-  w('sort-recent', 'click', () => setSort('recent'));
-  w('sort-oldest', 'click', () => setSort('oldest'));
-  w('sort-title', 'click', () => setSort('title'));
-  w('sort-sessions', 'click', () => setSort('sessions'));
+  w('sort-recent', 'click', () => { setSort('recent'); closeSortPopup('gallery-sort-popup', 'gallery-sort-backdrop'); });
+  w('sort-oldest', 'click', () => { setSort('oldest'); closeSortPopup('gallery-sort-popup', 'gallery-sort-backdrop'); });
+  w('sort-title', 'click', () => { setSort('title'); closeSortPopup('gallery-sort-popup', 'gallery-sort-backdrop'); });
+  w('sort-sessions', 'click', () => { setSort('sessions'); closeSortPopup('gallery-sort-popup', 'gallery-sort-backdrop'); });
+  w('gallery-sort-chip-btn', 'click', () => toggleSortPopup('gallery-sort-popup', 'gallery-sort-backdrop'));
+  w('gallery-sort-backdrop', 'click', () => closeSortPopup('gallery-sort-popup', 'gallery-sort-backdrop'));
 
   // Library
   w('recent-search', 'input', (e) => {

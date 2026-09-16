@@ -1,5 +1,48 @@
 # Changelog
 
+## v1.5.113 (2026-09-15)
+
+### Change: renamed Library → Analog and Immich → Digital (tab bar + mode toggle)
+
+- **Why:** the old names didn't match content. "Library" holds Jacob's film work exclusively (any Z8 involvement there is just as a scanning rig, not a digital capture) — "Analog" says that directly. "Immich" named the tab after the platform serving *every* tab's photos, not what's distinctly in it — once the redundant film-scan albums are cleared out of Immich's native albums (separate cleanup, in progress), what's left there is genuinely his digital-camera work (Z8, Merrill, Fuji, old Sony), archived out of the main Analog feed and organized into Immich albums by practice.
+- `public/index.html`: tab bar labels `Library` → `Analog`, `Immich` → `Digital`; header mode-toggle's second button `Digital` → `Analog` (it activates the renamed Analog tab, so the label needed to track the rename). Left the Add-to-Album modal's "Immich" sub-tab and every reference to the actual Immich platform/backend (settings, confirm dialogs, "Immich library/albums" as a mechanism) untouched — those correctly name the real backend service regardless of what the browsing tab is called, and Trash/Archive/Refresh living under "Digital" are accepted as Immich-wide housekeeping tools rather than content-scoped ones.
+- `public/app.js`: updated the one user-visible string referencing the old tab name ("No photos yet. Add photos from the Library tab." → "...Analog tab."). Internal ids (`tab-recent`, `tab-immich`, `mode-library-first`) and the `localStorage` mode values (`library-first`/`prints-first`) are unchanged — this is a display-label-only rename.
+- Client-only change: `public/app.js` (`?v=288` → `?v=289` in `index.html`), `public/sw.js` (`SHELL_CACHE` `darkroom-v158` → `darkroom-v159`). package.json 1.5.112 → 1.5.113.
+
+## v1.5.112 (2026-09-15)
+
+### Change: Prints tab's Sort is now a dropdown at the end of the search bar, matching Library
+
+- **Why:** Jacob asked for Prints' always-visible Sort row (Recent/Oldest/Title A→Z/Most Sessions on its own line under the search bar) to collapse into a compact dropdown, same pattern as Library's Sort chip.
+- `public/index.html`: replaced the `.gallery-controls`/`.sort-bar` block with a "Sort" chip button + popup panel inside `.gallery-toolbar`, right of the search input — same `.filter-popup` styling and backdrop-click-to-close behavior as Library's existing sort popup, under its own ids (`gallery-sort-popup`/`gallery-sort-backdrop`) so it doesn't collide with Library's. Removed the now-unused `.gallery-controls`/`.sort-bar` CSS rules (`.sort-label` stays — still used by the Immich tab).
+- `public/app.js`: `openSortPopup`/`closeSortPopup`/`toggleSortPopup` now take optional popup/backdrop id params (defaulting to Library's existing ids, so all prior call sites are unchanged) instead of being hardcoded to Library's popup — Prints' sort buttons now close the popup on selection, same as Library's.
+- Client-only change: `public/app.js` (`?v=287` → `?v=288` in `index.html`), `public/sw.js` (`SHELL_CACHE` `darkroom-v157` → `darkroom-v158`). package.json 1.5.111 → 1.5.112.
+
+## v1.5.111 (2026-09-15)
+
+### Change: moved the Print/Digital mode buttons from the tab bar to the header
+
+- **Why:** Jacob reported the Prints tab's own Sort control got pushed to a second line and lost its dropdown behavior after v1.5.109 added the Print/Digital buttons into the tab bar — width pressure from the extra buttons squeezed the Prints toolbar. Library's Sort dropdown was unaffected (different toolbar/layout), but Prints' wasn't. Moving the mode buttons out of the tab bar entirely (into the header's existing `.header-actions`, next to "+ Print"/"Out") removes that pressure regardless of which tab's toolbar is showing.
+- HTML-only change (`public/index.html`) — same `.tab-btn`/`.tab-btn.active` styling and element ids, so no `app.js` changes needed.
+- `public/sw.js` (`SHELL_CACHE` `darkroom-v156` → `darkroom-v157`) to bust the cached `/` shell. package.json 1.5.110 → 1.5.111.
+
+## v1.5.110 (2026-09-15)
+
+### Fix: v1.5.109's mode toggle button read backwards (named the mode you'd switch to, not the one you're in)
+
+- **Why:** Jacob pointed out the single toggle button always showed the *other* mode's name (e.g. "Print Mode" while already in Digital Mode), which reads like a status label for the current state rather than an action — backwards from what it meant.
+- Replaced the single toggle with two small buttons, **Print** / **Digital**, styled like the main tab buttons — `.active` marks whichever is actually current, same visual language already used for the tab bar itself. Clicking a button sets that mode directly (`setTabOrder(mode)`) instead of flipping between two states.
+- Client-only change: `public/app.js` (`?v=286` → `?v=287` in `index.html`), `public/sw.js` (`SHELL_CACHE` `darkroom-v155` → `darkroom-v156`). package.json 1.5.109 → 1.5.110.
+
+## v1.5.109 (2026-09-15)
+
+### New: toggle to swap Prints/Library default tab and tab-bar order
+
+- **Why:** Jacob wanted Library to open first when working through digital/film scans, but Prints to open first on a printing day — one hardcoded default doesn't fit both, and he wanted to flip it himself without asking for a code change each time.
+- New "Print Mode" / "Digital Mode" button at the right edge of the tab bar (`public/index.html`, `public/app.js`). Clicking it swaps Prints and Library's left-to-right position in the tab bar *and* which one loads as the active tab on next app open — persisted in `localStorage` (`darkroom-tab-order`), so it's a one-time flip, not a per-session setting. Button label always shows the mode you'd switch *to*.
+- `login()` and the auto-auth-check startup path both now call a shared `loadInitialTab()` (reads the saved mode) instead of unconditionally calling `loadGallery()`/defaulting to Prints.
+- Client-only change: `public/app.js` (`?v=285` → `?v=286` in `index.html`), `public/sw.js` (`SHELL_CACHE` `darkroom-v154` → `darkroom-v155`). package.json 1.5.108 → 1.5.109.
+
 ## v1.5.108 (2026-09-15)
 
 ### Fix: Library tags row often needed a manual page reload to show a just-added/removed tag

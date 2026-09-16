@@ -113,8 +113,6 @@
   .split-grade-fields, .single-grade-fields { display: none; }
   .split-grade-fields.visible, .single-grade-fields.visible { display: block; }
   /* SORT & TAGS */
-  .gallery-controls { max-width: 720px; margin: 0 auto; border-bottom: 1px solid var(--border); }
-  .sort-bar { padding: 0.75rem 1rem; display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
   .sort-label { font-family: 'IBM Plex Mono', monospace; font-size: 9px; letter-spacing: 0.15em; text-transform: uppercase; color: var(--text-dim); margin-right: 0.25rem; }
   .sort-btn { font-family: 'IBM Plex Mono', monospace; font-size: 10px; padding: 0.3rem 0.6rem; background: transparent; border: 1px solid var(--border); color: var(--text-dim); cursor: pointer; transition: all 0.15s; }
   .sort-btn.active { border-color: var(--safe); color: var(--safe); background: var(--safe-glow); }
@@ -313,6 +311,10 @@
         <div class="header-title" id="header-title">Darkroom Log</div>
       </div>
       <div class="header-actions">
+        <div style="display:flex;gap:2px;align-items:center" title="Which tab opens first">
+          <button class="tab-btn" id="mode-prints-first" style="font-size:10px;padding:0.4rem 0.6rem">Print</button>
+          <button class="tab-btn" id="mode-library-first" style="font-size:10px;padding:0.4rem 0.6rem">Analog</button>
+        </div>
         <button class="btn btn-ghost btn-sm" id="add-print-btn" >+ Print</button>
         <button class="btn btn-ghost btn-sm" id="btn-logout" >Out</button>
       </div>
@@ -322,23 +324,25 @@
   <div class="tab-bar">
     <div class="tab-bar-inner">
       <button class="tab-btn active" id="tab-prints" >Prints</button>
-      <button class="tab-btn" id="tab-recent" >Library</button>
+      <button class="tab-btn" id="tab-recent" >Analog</button>
       <button class="tab-btn" id="tab-albums" >Albums</button>
-      <button class="tab-btn" id="tab-immich" >Immich</button>
+      <button class="tab-btn" id="tab-immich" >Digital</button>
     </div>
   </div>
 
   <div class="view active" id="gallery-view">
     <div class="gallery-toolbar">
       <input type="text" placeholder="Search prints..." id="gallery-search" >
-    </div>
-    <div class="gallery-controls">
-      <div class="sort-bar">
-        <span class="sort-label">Sort</span>
-        <button class="sort-btn active" id="sort-recent">Recent</button>
-        <button class="sort-btn" id="sort-oldest">Oldest</button>
-        <button class="sort-btn" id="sort-title">Title A→Z</button>
-        <button class="sort-btn" id="sort-sessions">Most Sessions</button>
+      <div style="position:relative">
+        <button class="sort-btn" id="gallery-sort-chip-btn" style="white-space:nowrap">Sort</button>
+        <div id="gallery-sort-backdrop" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:100"></div>
+        <div id="gallery-sort-popup" class="filter-popup" style="display:none;z-index:101">
+          <div class="filter-section-label">Sort</div>
+          <button class="sort-btn active" id="sort-recent" style="width:100%;margin-bottom:0.4rem">Recent</button>
+          <button class="sort-btn" id="sort-oldest" style="width:100%;margin-bottom:0.4rem">Oldest</button>
+          <button class="sort-btn" id="sort-title" style="width:100%;margin-bottom:0.4rem">Title A→Z</button>
+          <button class="sort-btn" id="sort-sessions" style="width:100%">Most Sessions</button>
+        </div>
       </div>
     </div>
     <div class="gallery-grid" id="gallery-grid">
@@ -825,7 +829,7 @@
 
 <script src="/zoom.js?v=2" defer></script>
 <script src="/audio-engine.js?v=10" defer></script>
-<script src="/app.js?v=285" defer></script>
+<script src="/app.js?v=289" defer></script>
 <script>
 // Service worker - registers sw.js for thumb stale-while-revalidate + shell
 // cache. Was actively unregistered v1.3.0 -> v1.5.61; re-enabled v1.5.62.
