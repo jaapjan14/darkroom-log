@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.5.114 (2026-09-18)
+
+### Fix: Analog tab's Sort button did nothing; Prints tab could get stuck on "Loading..." forever
+
+- **Why:** Jacob reported the Sort button under the Analog tab wasn't working, and the Prints tab sometimes showed its loading state indefinitely. Reproduced both live.
+- **Sort button:** `wireListeners()` wired Library's Sort chip directly to the function reference — `w('sort-chip-btn', 'click', toggleSortPopup)` — instead of an arrow-wrapped call. `toggleSortPopup(popupId = 'sort-popup', ...)` relies on its default parameter when called with no arguments, but as a raw event handler the browser calls it with the click `Event` object as the first argument, silently overriding the default. `document.getElementById(<Event>)` then returns `null`, and `popup.style.display` throws — killing the popup before it opens. Prints' own Sort chip was unaffected because it was already wired through an arrow function (`() => toggleSortPopup('gallery-sort-popup', 'gallery-sort-backdrop')`). Fixed by wrapping Library's Sort chip and its backdrop the same way: `() => toggleSortPopup()` / `() => closeSortPopup()`.
+- **Prints tab stuck loading:** `switchTab()` never had a lazy-load branch for `tab === 'prints'` — it only lazy-loads `recent`/`albums`/`immich` on first visit. `loadGallery()` (which fetches `/api/prints`) was only ever invoked from `loadInitialTab()`'s prints-first branch. Since Jacob's tab-order setting is library-first (Analog opens by default), that branch never runs, so `loadGallery()` was never called at all on a normal session — clicking into Prints just revealed the static `Loading...` placeholder with no fetch ever firing. Added a `state.printsLoaded` guard (matching the existing `recentLoaded`/`immichAlbumsLoaded` pattern) and a `loadGallery()` call in `switchTab()`.
+- `public/app.js`: added `printsLoaded: false` to initial state, set `state.printsLoaded = true` at the end of `loadGallery()`, added `if (tab === 'prints' && !state.printsLoaded) loadGallery();` to `switchTab()`, fixed the two `sort-chip-btn`/`sort-backdrop` wiring lines.
+- Client-only change: `public/app.js` (`?v=289` → `?v=290` in `index.html`), `public/sw.js` (`SHELL_CACHE` `darkroom-v159` → `darkroom-v160`). package.json 1.5.113 → 1.5.114.
+
 ## v1.5.113 (2026-09-15)
 
 ### Change: renamed Library → Analog and Immich → Digital (tab bar + mode toggle)

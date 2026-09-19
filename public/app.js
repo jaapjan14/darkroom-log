@@ -17,6 +17,7 @@ let state = {
   recentPage: 1,
   recentItems: [],
   recentLoaded: false,
+  printsLoaded: false,
   // Render-generation token. Bumped on any navigation away from the live Library
   // grid (tab switch, opening an album, opening a photo detail). Async grid
   // loaders capture it at call time and skip their repaint if it changed — so a
@@ -160,6 +161,7 @@ function switchTab(tab) {
   document.getElementById('header-title').textContent = 'Darkroom Log';
   if (tab === 'recent' && !state.recentLoaded) loadRecent();
   else if (tab === 'recent') applyRecentFilters();
+  if (tab === 'prints' && !state.printsLoaded) loadGallery();
   if (tab === 'albums') loadAlbumsTab();
   if (tab === 'immich' && !state.immichAlbumsLoaded) loadImmichTab();
 }
@@ -3719,6 +3721,7 @@ document.getElementById('login-password').addEventListener('keydown', e => { if 
 async function loadGallery() {
   const r = await fetch('/api/prints');
   state.prints = await r.json();
+  state.printsLoaded = true;
   renderTagFilterBar();
   applyFilters();
 }
@@ -5175,8 +5178,8 @@ function wireListeners() {
   w('lib-sort-edited', 'click', () => { setLibrarySort('edited'); closeSortPopup(); });
   w('lib-sort-dir', 'click', () => toggleLibrarySortDir());
   w('lib-sort-mode', 'click', () => toggleRecentMode());
-  w('sort-chip-btn', 'click', toggleSortPopup);
-  w('sort-backdrop', 'click', closeSortPopup);
+  w('sort-chip-btn', 'click', () => toggleSortPopup());
+  w('sort-backdrop', 'click', () => closeSortPopup());
   w('people-filter-input', 'input', () => filterPeopleChips());
   w('filter-camera', 'change', (e) => setFilterDropdown('cameras', e.target.value));
   w('filter-lens', 'change', (e) => setFilterDropdown('lenses', e.target.value));
