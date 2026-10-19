@@ -19,6 +19,16 @@ header, optional slideshow, and pinch-zoom on every photo. No login required for
 
 **Immich compatibility:** actively run in production against **Immich v3.3.1** (upgraded 2026-10-12, audited clean against this image). Talks to Immich entirely through its REST API (asset/search/album/tag endpoints), so it isn't tied to Immich's internal ML/vector-search backend — the v3 migration (pgvecto.rs → VectorChord) needed no changes on Darkroom's side. Not tested against Immich versions older than v3. Note: Immich v3.2.0 formally deprecated the "flat" search endpoints this app's Immich integration is built on, with removal planned for a future Immich v4 — no impact today, but a v4 upgrade will require a search-layer rewrite here.
 
+## What's new in v1.5.122–126
+
+Digital photos get first-class treatment, search reaches inside albums, and Archive works again on Immich v3.
+
+- **Fixed: Archive and Restore did nothing on Immich v3.** v3 replaced the asset's `isArchived` flag with `visibility`, and silently ignores the old field while still answering success, so a photo archived from Darkroom vanished on screen and came back on refresh. Darkroom now sends `visibility`, and the detail page correctly shows Restore on archived photos.
+- **Camera tabs and album search.** Albums you pin (by name, in `PINNED_ALBUMS`) get their own tab in the header, for example one album per digital body kept out of the main library. Inside any album, search now has a **Text / ✦ Smart** toggle using the same search as the main library (titles, tags, places, gear, filenames; or CLIP "describe a scene"), scoped to that album and including archived photos. Text mode also matches any part of a lens or camera name, which Immich's own metadata search can't. The old Digital tab is now **Archive**.
+- **Archive from multi-select.** Select several photos in the main library and archive them in one go.
+- **Tags & Captions for digital photos.** Photos without the film description (`Camera | Film | Developer | Lens`) are treated as digital: camera and lens come from EXIF, a black-and-white frame is detected from the image itself, and film-only tags and hashtags are left out. Film scans are unchanged. Lightroom workflow keywords (anything ending `-immich`, and `flickr-pool`) are no longer treated as photo tags.
+- **Several title suggestions.** The title generator offers five ideas drawn from both the tags and the image, refreshes when you edit the title, and rebuilds the captions with the new title.
+
 ## What's new in v1.5.118–121
 
 A tag-loss fix and a security pass. `npm audit` is now clean.
