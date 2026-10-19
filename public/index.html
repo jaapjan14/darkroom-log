@@ -177,6 +177,8 @@
   .exif-row-label { font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-dim); width: 90px; flex-shrink: 0; padding-top: 2px; }
   .exif-row-value { font-family: 'IBM Plex Mono', monospace; font-size: 15px; color: var(--text); flex: 1; }
   .exif-row-sub { font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+  .person-chip { display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.15rem 0.7rem 0.15rem 0.15rem; border-radius: 999px; background: var(--surface2); font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: var(--text); }
+  .person-chip img { width: 24px; height: 24px; border-radius: 50%; object-fit: cover; background: var(--border); }
   /* NAV ARROWS */
   .recent-nav-bar { display: flex; gap: 0.5rem; padding: 0.75rem 1rem; border-bottom: 1px solid var(--border); }
   .nav-arrow { background: var(--surface2); border: 1px solid var(--border); color: var(--text-mid); font-size: 16px; width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all 0.15s; }
@@ -489,40 +491,65 @@
 
   <!-- Immich album photo view -->
   <div class="view" id="immich-album-view">
-    <div style="max-width:1200px;margin:0 auto;padding:0.5rem 1rem;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border)">
+    <div style="max-width:1200px;margin:0 auto;padding:0.5rem 1rem 0;display:flex;justify-content:space-between;align-items:center">
       <span id="immich-album-name" style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text-dim)"></span>
-      <div style="display:flex;gap:0.4rem">
-        <button class="btn btn-ghost btn-sm" id="immich-select-mode-btn" data-action="toggleImmichSelectMode">Select</button>
-        <button class="btn btn-danger btn-sm" data-action="deleteImmichAlbum">Delete</button>
-      </div>
+      <button class="btn btn-danger btn-sm" data-action="deleteImmichAlbum">Delete</button>
     </div>
-    <div id="immich-select-toolbar" style="max-width:1200px;margin:0.5rem auto 0;width:100%;gap:0.5rem;align-items:center;padding:0 1rem;display:none">
-      <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--text-dim)" id="immich-select-count">0 selected</span>
-      <button class="btn btn-ghost btn-sm" data-action="openImmichAddToAlbum">+ Album</button>
-      <button class="btn btn-danger btn-sm" id="btn-immich-archive-toggle" data-action="archiveImmichSelected">Archive</button>
-      <button class="btn btn-ghost btn-sm" data-action="removeImmichSelectedFromAlbum">− Remove</button>
-      <button class="btn btn-danger btn-sm" id="btn-immich-perm-delete" data-action="permanentDeleteImmichSelected" style="display:none">🗑 Delete Forever</button>
-      <button class="btn btn-ghost btn-sm" data-action="downloadImmichSelected">↓ DL</button>
-      <button class="btn btn-ghost btn-sm" data-action="exitImmichSelectMode">✕ Done</button>
-    </div>
-    <div style="max-width:1200px;margin:0 auto;padding:0.4rem 1rem;display:flex;gap:0.4rem;align-items:center;border-bottom:1px solid var(--border)">
-      <span class="sort-label">Sort</span>
-      <button class="sort-btn active" id="immich-sort-taken">Date Taken</button>
-      <button class="sort-btn" id="immich-sort-upload">Upload Date</button>
-      <button class="sort-btn" id="immich-sort-dir" style="margin-left:0.5rem">↓ Newest</button>
-    </div>
-    <div style="max-width:1200px;margin:0 auto;padding:0.25rem 1rem;display:flex;gap:0.5rem;align-items:center;position:relative">
-      <button class="sort-btn" id="immich-filters-btn" style="font-size:10px;flex-shrink:0">⊞ Filters</button>
-      <input type="text" id="immich-album-search" placeholder="Search filename..." autocomplete="off" style="flex:1;font-size:12px;padding:0.3rem 0.6rem;max-width:240px">
-      <div id="immich-search-mode" style="display:none;gap:2px;flex-shrink:0">
-        <button class="tag-filter" id="immich-search-mode-text">Text</button>
-        <button class="tag-filter active" id="immich-search-mode-smart">✦ Smart</button>
+    <!-- Same layout as the Analog tab's search bar (#recent-search-bar): tap the
+         search input for the Search Mode / Select / filters panel, Sort chip on
+         the right, select toolbar in the same row. No Film filter here. -->
+    <div id="immich-search-bar" style="max-width:1200px;margin:0 auto;padding:0.75rem 1rem;border-bottom:1px solid var(--border);display:flex;gap:0.5rem;align-items:center;position:relative;flex-wrap:wrap">
+      <div style="position:relative;flex:1;min-width:120px">
+        <input type="text" id="immich-album-search" placeholder="Search..." autocomplete="off" style="width:100%;font-size:13px;padding-right:2.2rem">
+        <button id="btn-clear-immich-search" title="Clear search and filters" style="display:none;position:absolute;right:0.3rem;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--text-dim);font-size:15px;line-height:1;cursor:pointer;padding:0.4rem;width:auto">✕</button>
+        <div id="immich-filter-backdrop" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:100"></div>
+        <div id="immich-filter-popup" class="filter-popup" style="display:none;left:0;right:auto;z-index:101">
+          <div id="immich-search-mode" style="display:none">
+            <div class="filter-section-label">Search Mode</div>
+            <div style="display:flex;gap:0.4rem;margin-bottom:1rem">
+              <button class="tag-filter" id="immich-search-mode-text" style="flex:1">Text</button>
+              <button class="tag-filter active" id="immich-search-mode-smart" style="flex:1">✦ Smart</button>
+            </div>
+          </div>
+          <button class="btn btn-ghost btn-sm" id="immich-select-mode-btn" data-action="toggleImmichSelectMode" style="width:100%;margin-bottom:1rem">Select</button>
+          <div class="filter-section-label">Camera</div>
+          <select id="immich-filter-camera" class="filter-dropdown"><option value="">All cameras</option></select>
+          <div class="filter-section-label">Lens</div>
+          <select id="immich-filter-lens" class="filter-dropdown"><option value="">All lenses</option></select>
+          <div class="filter-section-label">State</div>
+          <select id="immich-filter-state" class="filter-dropdown"><option value="">All states</option></select>
+          <div class="filter-section-label">City</div>
+          <select id="immich-filter-city" class="filter-dropdown"><option value="">All cities</option></select>
+          <div class="filter-section-label">People</div>
+          <input type="text" id="immich-people-filter-input" placeholder="Filter people..." autocomplete="off" style="margin-bottom:0.6rem">
+          <div id="immich-chip-people" class="people-avatar-grid"></div>
+          <div style="margin-top:1rem;text-align:right">
+            <button class="btn btn-ghost btn-sm" id="immich-btn-clear-filters">Clear</button>
+            <button class="btn btn-sm" id="immich-filters-done-btn">Done</button>
+          </div>
+        </div>
       </div>
-      <span id="immich-active-chip-label" style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--safe)"></span>
-      <div id="immich-filter-backdrop" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:100"></div>
-      <div id="immich-filter-popup" style="display:none;position:absolute;top:2rem;left:0;background:var(--surface);border:1px solid var(--border);padding:1rem;z-index:101;min-width:320px;max-width:500px;max-height:60vh;overflow-y:auto">
-        <div id="immich-filter-popup-content"></div>
+      <div style="position:relative">
+        <button class="sort-btn" id="immich-sort-chip-btn" style="white-space:nowrap">Sort</button>
+        <div id="immich-sort-backdrop" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:100"></div>
+        <div id="immich-sort-popup" class="filter-popup" style="display:none;z-index:101">
+          <div class="filter-section-label">Sort</div>
+          <button class="sort-btn" id="immich-sort-upload" style="width:100%;margin-bottom:0.4rem">Upload Date</button>
+          <button class="sort-btn active" id="immich-sort-taken" style="width:100%;margin-bottom:0.4rem">Date Taken</button>
+          <button class="sort-btn" id="immich-sort-edited" style="width:100%;margin-bottom:0.4rem" title="Last time this photo's asset was replaced/republished">Last Edited</button>
+          <button class="sort-btn" id="immich-sort-dir" style="width:100%">↓ Newest</button>
+        </div>
       </div>
+      <div id="immich-select-toolbar" style="display:none;gap:0.5rem;align-items:center;flex-wrap:wrap">
+        <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--text-dim)" id="immich-select-count">0 selected</span>
+        <button class="btn btn-ghost btn-sm" data-action="openImmichAddToAlbum">+ Album</button>
+        <button class="btn btn-danger btn-sm" id="btn-immich-archive-toggle" data-action="archiveImmichSelected">Archive</button>
+        <button class="btn btn-ghost btn-sm" data-action="removeImmichSelectedFromAlbum">− Remove</button>
+        <button class="btn btn-danger btn-sm" id="btn-immich-perm-delete" data-action="permanentDeleteImmichSelected" style="display:none">🗑 Delete Forever</button>
+        <button class="btn btn-ghost btn-sm" data-action="downloadImmichSelected">↓ DL</button>
+        <button class="btn btn-ghost btn-sm" data-action="exitImmichSelectMode">✕ Done</button>
+      </div>
+      <span id="immich-active-chip-label" style="flex-basis:100%;font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--safe)"></span>
     </div>
     <div id="immich-album-gallery" style="max-width:1200px;margin:0 auto;padding:1rem"></div>
   </div>
@@ -836,7 +863,7 @@
 
 <script src="/zoom.js?v=2" defer></script>
 <script src="/audio-engine.js?v=10" defer></script>
-<script src="/app.js?v=296" defer></script>
+<script src="/app.js?v=298" defer></script>
 <script>
 // Service worker - registers sw.js for thumb stale-while-revalidate + shell
 // cache. Was actively unregistered v1.3.0 -> v1.5.61; re-enabled v1.5.62.

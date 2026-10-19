@@ -1,5 +1,27 @@
 # Changelog
 
+## v1.5.128 (2026-10-18)
+
+### People row in the photo detail column
+
+- **Asked by Jacob:** when a photo has a person tagged, show it in the detail column next to Date / File / Camera / Lens / Tags.
+- **Server (`server.js`):** `/api/immich/photo/:id` now returns `people` — the people Immich's face recognition found in the photo (`id`, `name`), leaving out anyone hidden in Immich. Checked live: a Z8 photo returned Aiko and Eli.
+- **Client (`public/app.js` `peopleRowHtml`):** a 👤 **People** row above Tags with a round face thumbnail and name per person (named people, alphabetical); unnamed faces are summarised as "N unnamed". The row only appears when Immich recognised someone. New `.person-chip` style in `index.html`.
+- Display only for now (no click action).
+- **Detail toolbar in album views:** "− Remove" (remove from this album) is now a compact **−** button next to "+ Album" (tooltip "Remove from this album"). The extra wide button pushed 🗑 onto a line of its own, so album photos' detail pages looked different from Analog's; the first row now matches.
+- Client asset bump: `app.js?v=298`, SW `darkroom-v168`. package.json 1.5.127 → 1.5.128.
+
+## v1.5.127 (2026-10-18)
+
+### Album views (M11, Z8, Archive albums) now use the same search bar and menus as Analog
+
+- **Asked by Jacob:** the M11/Z8 tabs should look and work exactly like Analog, minus Film.
+- **Layout (`public/index.html`):** the album view's separate sort row, "⊞ Filters" chip button and side-by-side search box are replaced by Analog's layout: one search box with a ✕ clear button; focusing it opens the same panel (Search Mode Text / ✦ Smart, Select, Camera, Lens, State, City, People avatar grid with name filter, Clear / Done); a Sort chip on the right (Upload Date, Date Taken, **Last Edited**, ↓ Newest); the select toolbar sits in the same row; active filters show underneath. Same CSS classes as Analog (`filter-popup`, `filter-dropdown`, `filter-section-label`, `people-avatar-grid`).
+- **Filters (`public/app.js`):** single-select dropdowns (`state.immichFilters`) built from the album's loaded photos, replacing the old multi-select chips. People lists everyone recognised in the album, named first; tapping a face filters to that person, tapping again clears. The Search Mode block only shows inside real albums (Archived/Trash views keep the filename filter).
+- **Server (`server.js`):** the album photo fetch now asks Immich for `withPeople: true` alongside `withExif`.
+- Removed: `toggleImmichFilterPopup`, `renderImmichFilterPopup`, `toggleImmichChip`, `state.immichActiveChips`, `#immich-filters-btn`.
+- Client asset bump: `app.js?v=297`, SW `darkroom-v167`. package.json 1.5.126 → 1.5.127.
+
 ## v1.5.126 (2026-10-18)
 
 ### Archive several photos at once from Analog

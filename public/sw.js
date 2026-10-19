@@ -1,4 +1,4 @@
-const SHELL_CACHE = 'darkroom-v166';
+const SHELL_CACHE = 'darkroom-v168';
 const THUMB_CACHE = 'darkroom-thumbs-v1';
 const THUMB_MAX = 500;
 

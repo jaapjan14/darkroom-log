@@ -620,6 +620,11 @@ app.get('/api/immich/photo/:id', requireAuth, async (req, res) => {
       height: data.exifInfo?.exifImageHeight || '',
       // Tag names from Immich (synced from LR keywords by the lr-immich plugin)
       tags: Array.isArray(data.tags) ? data.tags.map(t => t.name).filter(Boolean) : [],
+      // People Immich recognised in the photo (face recognition), minus anyone
+      // hidden in Immich. Unnamed people are kept so the row can count them.
+      people: Array.isArray(data.people)
+        ? data.people.filter(p => p && p.id && !p.isHidden).map(p => ({ id: p.id, name: p.name || '' }))
+        : [],
       // Immich v3 replaced isArchived with visibility ('timeline' | 'archive' | …).
       isArchived: data.visibility === 'archive' || data.isArchived === true
     });
@@ -2090,8 +2095,8 @@ app.get('/api/immich/immich-albums/:id', requireAuth, async (req, res) => {
     // Immich (as of v3.1.0) no longer inlines `assets` on GET /albums/:id —
     // only assetCount comes back. Assets now have to be pulled separately via
     // /search/metadata's albumIds filter, paginated with its own page/nextPage
-    // cursor (unrelated to assetCount). withExif:true keeps camera/lens/city
-    // filter chips in the album view working.
+    // cursor (unrelated to assetCount). withExif:true feeds the album view's
+    // Camera/Lens/State/City dropdowns, withPeople:true its People filter.
     const assets = [];
     let page = 1;
     let guard = 0;
@@ -2099,7 +2104,7 @@ app.get('/api/immich/immich-albums/:id', requireAuth, async (req, res) => {
       const sr = await fetch(`${IMMICH_URL}/search/metadata`, {
         method: 'POST',
         headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ albumIds: [req.params.id], size: 1000, page, withExif: true })
+        body: JSON.stringify({ albumIds: [req.params.id], size: 1000, page, withExif: true, withPeople: true })
       });
       const sdata = await sr.json();
       if (!sr.ok) {

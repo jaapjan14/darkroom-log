@@ -70,7 +70,7 @@ let state = {
   immichDisplayedAssets: [],
   immichSort: 'taken',
   immichSortDir: 'desc',
-  immichActiveChips: new Set(),
+  immichFilters: { cameras: '', lenses: '', states: '', cities: '', personId: '' }, // album view dropdowns + person
   immichSearchQuery: '',
 };
 
@@ -873,6 +873,30 @@ async function searchByImmichTag(tagName) {
   }
 }
 
+// People row in the photo detail column: everyone Immich recognised in the
+// photo (named first), each with their face thumbnail. Unnamed faces are
+// summarised as a count rather than shown as blank chips. Nothing renders
+// when Immich found nobody.
+function peopleRowHtml(people) {
+  const list = Array.isArray(people) ? people : [];
+  if (!list.length) return '';
+  const named = list.filter(p => p.name).sort((a, b) => a.name.localeCompare(b.name));
+  const unnamed = list.length - named.length;
+  const chips = named.map(p => {
+    const name = String(p.name).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+    return `<span class="person-chip"><img src="/api/immich/person-thumb/${p.id}" alt="">${name}</span>`;
+  }).join('');
+  const more = unnamed ? `<span class="exif-row-sub" style="margin-top:0">${named.length ? '+ ' : ''}${unnamed} unnamed</span>` : '';
+  return `
+            <div class="exif-row-item">
+              <div class="exif-row-icon">👤</div>
+              <div class="exif-row-label">People</div>
+              <div class="exif-row-value">
+                <div style="display:flex;gap:0.35rem;flex-wrap:wrap;align-items:center">${chips}${more}</div>
+              </div>
+            </div>`;
+}
+
 async function searchByPerson(personId, name) {
   state.recentActivePerson = state.recentActivePerson === personId ? null : personId;
   updateRecentFilterChips();
@@ -1282,8 +1306,8 @@ async function renderRecentDetail(assetId, navGen) {
             ${hasNext ? `<button class="nav-arrow" data-action="navNext">›</button>` : ''}
             <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--text-dim);margin-right:0.25rem">${idx+1} / ${total}</div>
             <button class="btn btn-ghost btn-sm" data-action="openAddToAlbumModal" data-id="${assetId}">+ Album</button>
-            ${state.viewingFromAlbum ? `<button class="btn btn-ghost btn-sm" data-action="removeFromAlbum" data-id="${assetId}">− Remove</button>` : ''}
-            ${state.previousView === 'immich-album-view' && !state.viewingArchived && !state.viewingTrash ? `<button class="btn btn-ghost btn-sm" data-action="removeFromImmichAlbumDetail" data-id="${assetId}">− Remove</button>` : ''}
+            ${state.viewingFromAlbum ? `<button class="btn btn-ghost btn-sm" data-action="removeFromAlbum" data-id="${assetId}" title="Remove from this album">−</button>` : ''}
+            ${state.previousView === 'immich-album-view' && !state.viewingArchived && !state.viewingTrash ? `<button class="btn btn-ghost btn-sm" data-action="removeFromImmichAlbumDetail" data-id="${assetId}" title="Remove from this album">−</button>` : ''}
             ${state.viewingTrash ? `
               <button class="btn btn-ghost btn-sm" data-action="restoreFromTrashDetail" data-id="${assetId}">Restore</button>
               <button class="btn btn-danger btn-sm" data-action="permanentDeleteDetail" data-id="${assetId}" data-filename="${meta.filename}">🗑 Delete Forever</button>
@@ -1349,6 +1373,7 @@ async function renderRecentDetail(assetId, navGen) {
                 </div>
               </div>
             </div>` : ''}
+            ${peopleRowHtml(meta.people)}
             <div class="exif-row-item">
               <div class="exif-row-icon">🏷</div>
               <div class="exif-row-label">Tags</div>
@@ -4797,13 +4822,12 @@ async function openArchivedView() {
   document.getElementById('back-btn').style.display = 'flex';
   document.getElementById('header-title').textContent = 'Archived';
   document.getElementById('immich-select-mode-btn').style.display = 'inline-block';
-  document.getElementById('immich-filters-btn').style.display = 'none';
   const delBtn = document.querySelector('[data-action="deleteImmichAlbum"]');
   if (delBtn) delBtn.style.display = 'none';
   state.viewingArchived = true;
   state.currentImmichAlbumId = null;
   state.currentImmichAlbumAssets = [];
-  state.immichActiveChips = new Set();
+  resetImmichFilters();
   resetImmichAlbumSearch();
   state.immichSelected = new Set();
   state.immichSelectMode = false;
@@ -4812,7 +4836,6 @@ async function openArchivedView() {
     document.getElementById('immich-view').classList.add('active');
     document.getElementById('back-btn').style.display = 'none';
     document.getElementById('header-title').textContent = 'Darkroom Log';
-    document.getElementById('immich-filters-btn').style.display = '';
     const delBtn = document.querySelector('[data-action="deleteImmichAlbum"]');
     if (delBtn) delBtn.style.display = '';
     state.viewingArchived = false;
@@ -4838,14 +4861,13 @@ async function openTrashView() {
   document.getElementById('back-btn').style.display = 'flex';
   document.getElementById('header-title').textContent = 'Trash';
   document.getElementById('immich-select-mode-btn').style.display = 'inline-block';
-  document.getElementById('immich-filters-btn').style.display = 'none';
   const delBtn = document.querySelector('[data-action="deleteImmichAlbum"]');
   if (delBtn) delBtn.style.display = 'none';
   state.viewingTrash = true;
   state.viewingArchived = false;
   state.currentImmichAlbumId = null;
   state.currentImmichAlbumAssets = [];
-  state.immichActiveChips = new Set();
+  resetImmichFilters();
   resetImmichAlbumSearch();
   state.immichSelected = new Set();
   state.immichSelectMode = false;
@@ -4854,7 +4876,6 @@ async function openTrashView() {
     document.getElementById('immich-view').classList.add('active');
     document.getElementById('back-btn').style.display = 'none';
     document.getElementById('header-title').textContent = 'Darkroom Log';
-    document.getElementById('immich-filters-btn').style.display = '';
     const delBtn = document.querySelector('[data-action="deleteImmichAlbum"]');
     if (delBtn) delBtn.style.display = '';
     state.viewingTrash = false;
@@ -4963,7 +4984,7 @@ async function openImmichAlbum(albumId, albumName, { pinnedTab = null } = {}) {
     state.currentImmichAlbumId = albumId;
     updateImmichSearchUi(); // album known now: show Text/Smart toggle
     state.currentImmichAlbumAssets = data.assets || [];
-    state.immichActiveChips = new Set();
+    resetImmichFilters();
     state.immichSelected = new Set();
     state.immichSelectMode = false;
     renderImmichSortBar();
@@ -4974,7 +4995,7 @@ async function openImmichAlbum(albumId, albumName, { pinnedTab = null } = {}) {
 }
 
 function renderImmichSortBar() {
-  ['taken','upload'].forEach(s => {
+  ['taken','upload','edited'].forEach(s => {
     const btn = document.getElementById('immich-sort-' + s);
     if (btn) btn.classList.toggle('active', state.immichSort === s);
   });
@@ -4994,40 +5015,121 @@ function toggleImmichSortDir() {
   applyImmichFiltersAndSort();
 }
 
-function toggleImmichFilterPopup() {
+// Album view filter panel — same layout and behaviour as Analog's
+// (#recent-filter-popup): opens when the search box is focused, closes via
+// backdrop or Done. Single-select dropdowns for Camera/Lens/State/City plus
+// a People avatar grid, all built from the album's loaded assets (fetched
+// withExif + withPeople). No Film here: these albums hold digital frames.
+function openImmichFilterPopup() {
   const popup = document.getElementById('immich-filter-popup');
-  const backdrop = document.getElementById('immich-filter-backdrop');
-  if (popup.style.display === 'none') {
-    renderImmichFilterPopup();
-    popup.style.display = 'block';
-    backdrop.style.display = 'block';
-  } else {
-    popup.style.display = 'none';
-    backdrop.style.display = 'none';
-  }
+  if (popup.style.display !== 'none') return;
+  renderImmichFilterOptions();
+  popup.style.display = 'block';
+  document.getElementById('immich-filter-backdrop').style.display = 'block';
+}
+function closeImmichFilterPopup() {
+  document.getElementById('immich-filter-popup').style.display = 'none';
+  document.getElementById('immich-filter-backdrop').style.display = 'none';
 }
 
-function renderImmichFilterPopup() {
-  const assets = state.currentImmichAlbumAssets;
-  const cameras = [...new Set(assets.map(a => a.exifInfo?.model).filter(Boolean))].sort();
-  const lenses = [...new Set(assets.map(a => a.exifInfo?.lensModel).filter(Boolean))].sort();
-  const cities = [...new Set(assets.map(a => a.exifInfo?.city).filter(Boolean))].sort();
-  const chip = (val) => `<button class="tag-filter${state.immichActiveChips.has(val) ? ' active' : ''}" data-action="toggleImmichChip" data-val="${val.replace(/"/g,'&quot;')}">${val}</button>`;
-  let html = '';
-  if (cameras.length) html += `<div style="font-family:'IBM Plex Mono',monospace;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--text-dim);margin-bottom:0.5rem">Camera</div><div style="display:flex;flex-wrap:wrap;gap:0.3rem;margin-bottom:1rem">${cameras.map(chip).join('')}</div>`;
-  if (lenses.length) html += `<div style="font-family:'IBM Plex Mono',monospace;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--text-dim);margin-bottom:0.5rem">Lens</div><div style="display:flex;flex-wrap:wrap;gap:0.3rem;margin-bottom:1rem">${lenses.map(chip).join('')}</div>`;
-  if (cities.length) html += `<div style="font-family:'IBM Plex Mono',monospace;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--text-dim);margin-bottom:0.5rem">Location</div><div style="display:flex;flex-wrap:wrap;gap:0.3rem;margin-bottom:1rem">${cities.map(chip).join('')}</div>`;
-  if (!html) html = '<div style="color:var(--text-dim);font-size:11px">No filter options available.</div>';
-  document.getElementById('immich-filter-popup-content').innerHTML = html;
+function resetImmichFilters() {
+  state.immichFilters = { cameras: '', lenses: '', states: '', cities: '', personId: '' };
+  const pin = document.getElementById('immich-people-filter-input');
+  if (pin) pin.value = '';
+  updateImmichActiveLabel();
 }
 
-function toggleImmichChip(val) {
-  if (state.immichActiveChips.has(val)) state.immichActiveChips.delete(val);
-  else state.immichActiveChips.add(val);
-  const label = document.getElementById('immich-active-chip-label');
-  if (label) label.textContent = state.immichActiveChips.size ? [...state.immichActiveChips].join(' · ') : '';
-  renderImmichFilterPopup();
+function renderImmichFilterOptions() {
+  const assets = state.currentImmichAlbumAssets || [];
+  const uniq = (vals) => [...new Set(vals.filter(Boolean))].sort((x, y) => String(x).localeCompare(String(y)));
+  const f = state.immichFilters;
+  const fill = (id, values, key, label) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (!values.length) { el.innerHTML = '<option value="">None found</option>'; el.disabled = true; return; }
+    el.disabled = false;
+    el.innerHTML = `<option value="">All ${label}</option>` + values.map(v => {
+      const safe = String(v).replace(/"/g, '&quot;');
+      return `<option value="${safe}"${v === f[key] ? ' selected' : ''}>${v}</option>`;
+    }).join('');
+  };
+  fill('immich-filter-camera', uniq(assets.map(a => a.exifInfo?.model)), 'cameras', 'cameras');
+  fill('immich-filter-lens', uniq(assets.map(a => a.exifInfo?.lensModel)), 'lenses', 'lenses');
+  fill('immich-filter-state', uniq(assets.map(a => a.exifInfo?.state)), 'states', 'states');
+  fill('immich-filter-city', uniq(assets.map(a => a.exifInfo?.city)), 'cities', 'cities');
+
+  // People: everyone recognised in this album's photos, named first.
+  const byId = new Map();
+  for (const a of assets) for (const pp of (a.people || [])) if (pp && pp.id && !byId.has(pp.id)) byId.set(pp.id, pp);
+  const people = [...byId.values()].sort((x, y) => (x.name ? 0 : 1) - (y.name ? 0 : 1) || String(x.name).localeCompare(String(y.name)));
+  const el = document.getElementById('immich-chip-people');
+  if (!el) return;
+  el.innerHTML = people.map(pp => {
+    const hasName = !!pp.name;
+    const name = String(pp.name || '').replace(/"/g, '&quot;');
+    const initial = hasName ? String(pp.name).trim().charAt(0).toUpperCase() : '?';
+    return `<button class="person-avatar-item${!hasName ? ' person-avatar-unnamed' : ''}${f.personId === pp.id ? ' active' : ''}" data-action="filterImmichByPerson" data-id="${pp.id}" data-pname="${name.toLowerCase()}">
+      <span class="person-avatar-fallback">${initial}</span>
+      <img class="person-avatar-img" src="/api/immich/person-thumb/${pp.id}" alt="">
+      <span class="person-avatar-name">${hasName ? name : 'Unnamed'}</span>
+    </button>`;
+  }).join('') || '<span style="color:var(--text-dim);font-size:11px">None found</span>';
+  // CSP forbids inline onload/onerror — attach listeners (as Analog's grid does).
+  el.querySelectorAll('.person-avatar-img').forEach(img => {
+    const show = () => { img.style.display = 'block'; const fb = img.previousElementSibling; if (fb) fb.style.display = 'none'; };
+    if (img.complete && img.naturalWidth > 0) show();
+    else { img.addEventListener('load', show); img.addEventListener('error', () => img.remove()); }
+  });
+  filterImmichPeopleChips();
+}
+
+function filterImmichPeopleChips() {
+  const q = (document.getElementById('immich-people-filter-input')?.value || '').trim().toLowerCase();
+  document.querySelectorAll('#immich-chip-people .person-avatar-item').forEach(el => {
+    el.style.display = !q || (el.dataset.pname || '').includes(q) ? '' : 'none';
+  });
+}
+
+function setImmichFilter(key, value) {
+  state.immichFilters[key] = value || '';
+  updateImmichActiveLabel();
   applyImmichFiltersAndSort();
+}
+
+function filterImmichByPerson(personId) {
+  state.immichFilters.personId = state.immichFilters.personId === personId ? '' : personId;
+  renderImmichFilterOptions();
+  updateImmichActiveLabel();
+  applyImmichFiltersAndSort();
+}
+
+function clearImmichFilters() {
+  resetImmichFilters();
+  renderImmichFilterOptions();
+  applyImmichFiltersAndSort();
+}
+
+// Clears search text and every filter (the ✕ inside the search box).
+function clearImmichSearchAndFilters() {
+  resetImmichAlbumSearch();
+  resetImmichFilters();
+  applyImmichFiltersAndSort();
+}
+
+function updateImmichActiveLabel() {
+  const f = state.immichFilters || {};
+  let person = '';
+  if (f.personId) {
+    for (const a of state.currentImmichAlbumAssets || []) {
+      const hit = (a.people || []).find(pp => pp.id === f.personId);
+      if (hit) { person = hit.name || 'Unnamed'; break; }
+    }
+  }
+  const parts = [f.cameras, f.lenses, f.states, f.cities, person].filter(Boolean);
+  const label = document.getElementById('immich-active-chip-label');
+  if (label) label.textContent = parts.join(' · ');
+  const clearBtn = document.getElementById('btn-clear-immich-search');
+  if (clearBtn) clearBtn.style.display = parts.length || (state.immichSearchQuery || '').trim() ? 'block' : 'none';
 }
 
 // Album search uses the same server search as the Analog tab (text: titles,
@@ -5041,6 +5143,7 @@ function resetImmichAlbumSearch() {
   const searchEl = document.getElementById('immich-album-search');
   if (searchEl) searchEl.value = '';
   updateImmichSearchUi();
+  updateImmichActiveLabel();
 }
 
 function updateImmichSearchUi() {
@@ -5048,8 +5151,7 @@ function updateImmichSearchUi() {
   const modeEl = document.getElementById('immich-search-mode');
   if (modeEl) modeEl.style.display = inAlbum ? 'flex' : 'none';
   const searchEl = document.getElementById('immich-album-search');
-  if (searchEl) searchEl.placeholder = !inAlbum ? 'Search filename...'
-    : state.immichSearchMode === 'smart' ? 'Describe a scene…' : 'Search titles, tags, places…';
+  if (searchEl) searchEl.placeholder = inAlbum ? 'Search...' : 'Search filename...';
   document.getElementById('immich-search-mode-text')?.classList.toggle('active', state.immichSearchMode === 'text');
   document.getElementById('immich-search-mode-smart')?.classList.toggle('active', state.immichSearchMode === 'smart');
 }
@@ -5057,6 +5159,7 @@ function updateImmichSearchUi() {
 let immichSearchTimer = null;
 function onImmichAlbumSearchInput(value) {
   state.immichSearchQuery = value;
+  updateImmichActiveLabel();
   clearTimeout(immichSearchTimer);
   if (!state.currentImmichAlbumId || state.viewingArchived || state.viewingTrash) {
     applyImmichFiltersAndSort();
@@ -5122,15 +5225,17 @@ function applyImmichFiltersAndSort() {
     const q = state.immichSearchQuery.toLowerCase();
     assets = assets.filter(a => (a.originalFileName || '').toLowerCase().includes(q));
   }
-  if (state.immichActiveChips.size) {
-    assets = assets.filter(a => {
-      const vals = [a.exifInfo?.model, a.exifInfo?.lensModel, a.exifInfo?.city].filter(Boolean);
-      return [...state.immichActiveChips].every(chip => vals.includes(chip));
-    });
-  }
+  const f = state.immichFilters || {};
+  if (f.cameras) assets = assets.filter(a => a.exifInfo?.model === f.cameras);
+  if (f.lenses) assets = assets.filter(a => a.exifInfo?.lensModel === f.lenses);
+  if (f.states) assets = assets.filter(a => a.exifInfo?.state === f.states);
+  if (f.cities) assets = assets.filter(a => a.exifInfo?.city === f.cities);
+  if (f.personId) assets = assets.filter(a => (a.people || []).some(pp => pp.id === f.personId));
   const dir = state.immichSortDir === 'asc' ? 1 : -1;
   if (state.immichSort === 'taken') {
     assets.sort((a, b) => dir * (new Date(a.localDateTime || a.fileCreatedAt) - new Date(b.localDateTime || b.fileCreatedAt)));
+  } else if (state.immichSort === 'edited') {
+    assets.sort((a, b) => dir * (new Date(a.updatedAt || a.createdAt) - new Date(b.updatedAt || b.createdAt)));
   } else {
     assets.sort((a, b) => dir * (new Date(a.createdAt) - new Date(b.createdAt)));
   }
@@ -5142,7 +5247,8 @@ function renderImmichGallery(assets) {
   const gallery = document.getElementById('immich-album-gallery');
   if (!assets) assets = state.immichDisplayedAssets.length ? state.immichDisplayedAssets : state.currentImmichAlbumAssets;
   if (!assets.length) {
-    const msg = state.immichSearchQuery ? 'No matches in this album.' : 'No photos in this album.';
+    const filtered = state.immichSearchQuery || Object.values(state.immichFilters || {}).some(Boolean);
+    const msg = filtered ? 'No matches in this album.' : 'No photos in this album.';
     gallery.innerHTML = `<div style="text-align:center;padding:3rem;color:var(--text-dim)">${msg}</div>`;
     return;
   }
@@ -5157,6 +5263,7 @@ function renderImmichGallery(assets) {
 }
 
 function toggleImmichSelectMode() {
+  closeImmichFilterPopup();
   state.immichSelectMode = true;
   state.immichSelected = new Set();
   document.getElementById('immich-select-mode-btn').style.display = 'none';
@@ -5389,11 +5496,22 @@ function wireListeners() {
 
   // Immich sort/filter
   // btn-immich-add-album removed — handled by data-action="openImmichAddToAlbum" delegation
-  w('immich-sort-taken', 'click', () => setImmichSort('taken'));
-  w('immich-sort-upload', 'click', () => setImmichSort('upload'));
+  w('immich-sort-taken', 'click', () => { setImmichSort('taken'); closeSortPopup('immich-sort-popup', 'immich-sort-backdrop'); });
+  w('immich-sort-upload', 'click', () => { setImmichSort('upload'); closeSortPopup('immich-sort-popup', 'immich-sort-backdrop'); });
+  w('immich-sort-edited', 'click', () => { setImmichSort('edited'); closeSortPopup('immich-sort-popup', 'immich-sort-backdrop'); });
   w('immich-sort-dir', 'click', () => toggleImmichSortDir());
-  w('immich-filters-btn', 'click', () => toggleImmichFilterPopup());
-  w('immich-filter-backdrop', 'click', () => toggleImmichFilterPopup());
+  w('immich-sort-chip-btn', 'click', () => toggleSortPopup('immich-sort-popup', 'immich-sort-backdrop'));
+  w('immich-sort-backdrop', 'click', () => closeSortPopup('immich-sort-popup', 'immich-sort-backdrop'));
+  w('immich-album-search', 'focus', openImmichFilterPopup);
+  w('immich-filter-backdrop', 'click', closeImmichFilterPopup);
+  w('immich-filters-done-btn', 'click', closeImmichFilterPopup);
+  w('immich-btn-clear-filters', 'click', () => { clearImmichFilters(); closeImmichFilterPopup(); });
+  w('btn-clear-immich-search', 'click', () => clearImmichSearchAndFilters());
+  w('immich-people-filter-input', 'input', () => filterImmichPeopleChips());
+  w('immich-filter-camera', 'change', (e) => setImmichFilter('cameras', e.target.value));
+  w('immich-filter-lens', 'change', (e) => setImmichFilter('lenses', e.target.value));
+  w('immich-filter-state', 'change', (e) => setImmichFilter('states', e.target.value));
+  w('immich-filter-city', 'change', (e) => setImmichFilter('cities', e.target.value));
   w('immich-album-search', 'input', (e) => onImmichAlbumSearchInput(e.target.value));
   w('immich-search-mode-text', 'click', () => setImmichSearchMode('text'));
   w('immich-search-mode-smart', 'click', () => setImmichSearchMode('smart'));
@@ -5672,8 +5790,7 @@ case 'shareSelected': shareSelected(id, el.dataset.filename, el.dataset.desc); b
     case 'saveImmichSettings': saveImmichSettings(); break;
     case 'setImmichSort': setImmichSort(el.dataset.sort); break;
     case 'toggleImmichSortDir': toggleImmichSortDir(); break;
-    case 'toggleImmichFilterPopup': toggleImmichFilterPopup(); break;
-    case 'toggleImmichChip': toggleImmichChip(el.dataset.val); break;
+    case 'filterImmichByPerson': filterImmichByPerson(id); break;
 
     // Prints
     case 'setTagFilter': setTagFilter(el.dataset.tag); break;
