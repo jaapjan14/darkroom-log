@@ -27,6 +27,9 @@ let state = {
   // slow fetch (e.g. during heavy concurrent album edits) can't paint a stale
   // grid over the view you've since navigated back to. See `recentGen` guards.
   recentGen: 0,
+  // Bumped by Clear/✕ so a search still in flight (or waiting out its 600 ms
+  // debounce) can't repaint its results over the cleared grid.
+  recentSearchGen: 0,
   currentRecentId: null,
   currentRecentIndex: -1,
   fullscreenOpen: false,
@@ -508,7 +511,7 @@ function handleRecentSearch(q) {
 }
 
 async function runMultiChipSearch(chips, personId = null) {
-  const gen = state.recentGen;
+  const gen = state.recentGen, sgen = state.recentSearchGen;
   const grid = document.getElementById('recent-grid');
   grid.innerHTML = '<div class="loading">Searching...</div>';
   try {
@@ -541,7 +544,7 @@ async function runMultiChipSearch(chips, personId = null) {
     // we sort on createdAt/takenAt which are present).
     state.recentSmartResults = sortRecentResults(items);
     state.searchPage = 1;
-    if (state.recentGen !== gen) return; // navigated away mid-search; don't repaint
+    if (state.recentGen !== gen || state.recentSearchGen !== sgen) return; // navigated away or cleared mid-search; don't repaint
     renderRecentGrid(state.recentSmartResults);
     loadRecentMetaBatch(items.map(a => a.id));
     const loadMoreBtn = document.getElementById('load-more-btn');
@@ -568,7 +571,7 @@ async function runMultiChipSearch(chips, personId = null) {
 }
 
 async function runTextSearch(q, append = false) {
-  const gen = state.recentGen;
+  const gen = state.recentGen, sgen = state.recentSearchGen;
   const grid = document.getElementById('recent-grid');
   if (!append) {
     state.searchPage = 1;
@@ -587,7 +590,7 @@ async function runTextSearch(q, append = false) {
     state.searchTotal = data.total || newItems.length;
     absorbAssetMeta(newItems);
     state.recentSmartResults = append ? [...state.recentSmartResults, ...newItems] : newItems;
-    if (state.recentGen !== gen) return; // navigated away mid-search; don't repaint
+    if (state.recentGen !== gen || state.recentSearchGen !== sgen) return; // navigated away or cleared mid-search; don't repaint
     renderRecentGrid(state.recentSmartResults);
     loadRecentMetaBatch(newItems.map(a => a.id));
     // Show load more if we got a full page (likely more results)
@@ -605,7 +608,7 @@ async function runTextSearch(q, append = false) {
 }
 
 async function runSmartSearch(q, append = false) {
-  const gen = state.recentGen;
+  const gen = state.recentGen, sgen = state.recentSearchGen;
   const grid = document.getElementById('recent-grid');
   if (!append) {
     state.searchPage = 1;
@@ -624,7 +627,7 @@ async function runSmartSearch(q, append = false) {
     state.searchTotal = data.total || newItems.length;
     absorbAssetMeta(newItems);
     state.recentSmartResults = append ? [...state.recentSmartResults, ...newItems] : newItems;
-    if (state.recentGen !== gen) return; // navigated away mid-search; don't repaint
+    if (state.recentGen !== gen || state.recentSearchGen !== sgen) return; // navigated away or cleared mid-search; don't repaint
     renderRecentGrid(state.recentSmartResults);
     loadRecentMetaBatch(newItems.map(a => a.id));
     const loadMoreBtn = document.getElementById('load-more-btn');
@@ -845,7 +848,7 @@ async function searchByImmichTag(tagName) {
   state.searchPage = 1;
   // Captured AFTER the switchTab('recent') above (which bumps recentGen) so the
   // guard reflects navigation that happens during the fetch, not the tab switch.
-  const gen = state.recentGen;
+  const gen = state.recentGen, sgen = state.recentSearchGen;
 
   try {
     const r = await fetch('/api/immich/tag-search', {
@@ -857,7 +860,7 @@ async function searchByImmichTag(tagName) {
     const items = data.assets || [];
     state.recentSmartResults = items;
     absorbAssetMeta(items);
-    if (state.recentGen !== gen) return; // navigated away mid-search; don't repaint
+    if (state.recentGen !== gen || state.recentSearchGen !== sgen) return; // navigated away or cleared mid-search; don't repaint
     renderRecentGrid(items);
     loadRecentMetaBatch(items.map(a => a.id));
 
@@ -938,7 +941,7 @@ async function searchByPerson(personId, name) {
     runMultiChipSearch([...state.recentActiveChips], state.recentActivePerson);
     return;
   }
-  const gen = state.recentGen;
+  const gen = state.recentGen, sgen = state.recentSearchGen;
   const grid = document.getElementById('recent-grid');
   grid.innerHTML = '<div class="loading">Searching...</div>';
   try {
@@ -950,7 +953,7 @@ async function searchByPerson(personId, name) {
     const data = await r.json();
     state.recentSmartResults = data.assets || [];
     absorbAssetMeta(state.recentSmartResults);
-    if (state.recentGen !== gen) return; // navigated away mid-search; don't repaint
+    if (state.recentGen !== gen || state.recentSearchGen !== sgen) return; // navigated away or cleared mid-search; don't repaint
     renderRecentGrid(state.recentSmartResults);
     loadRecentMetaBatch(state.recentSmartResults.map(a => a.id));
     const loadMoreBtn = document.getElementById('load-more-btn');
@@ -1042,29 +1045,42 @@ function updateRecentClearButton() {
   btn.style.display = typed || state.recentActiveChips.size || state.recentActivePerson ? 'block' : 'none';
 }
 
-function clearRecentChip() {
-  state.recentActiveChips = new Set();
-  state.recentActivePerson = null;
-  state.recentSmartResults = [];
-  updateActiveChipLabel();
-  updateRecentFilterChips();
+// The panel's Clear and the ✕ in the search box both reset the search
+// completely: text, chips, person, a tag search from the detail view (and its
+// "Tag: …" header), any search still pending or in flight, and Load More,
+// which a search re-points at its own next page.
+function resetRecentSearch() {
+  clearTimeout(smartSearchTimer);
+  state.recentSearchGen++;
   const searchEl = document.getElementById('recent-search');
   if (searchEl) searchEl.value = '';
+  state.recentActivePerson = null;
+  state.recentActiveChips = new Set();
+  state.recentSmartResults = [];
+  state.recentActiveImmichTag = null;
+  state.searchQuery = '';
+  // The People name filter ("zach") too, or the grid keeps showing just the
+  // matching faces and looks as if that person is still selected. The album
+  // views' resetImmichFilters already does this.
+  const peopleFilterEl = document.getElementById('people-filter-input');
+  if (peopleFilterEl) peopleFilterEl.value = '';
+  state.searchPage = 1;
+  const headerTitle = document.getElementById('header-title');
+  if (headerTitle && headerTitle.textContent.startsWith('Tag: ')) headerTitle.textContent = 'Darkroom Log';
+  updateRecentFilterChips();
+  updateActiveChipLabel();
   applyRecentFilters();
+  const loadMoreBtn = document.getElementById('load-more-btn');
+  if (loadMoreBtn) {
+    const n = (state.recentItems || []).length;
+    loadMoreBtn.style.display = n && n % 250 === 0 ? 'block' : 'none';
+    loadMoreBtn.onclick = loadMoreRecent;
+  }
 }
 
-function clearRecentSearch() {
-  const searchEl = document.getElementById('recent-search');
-  if (searchEl) searchEl.value = '';
-  const clearBtn = document.getElementById('btn-clear-recent-search');
-  if (clearBtn) clearBtn.style.display = 'none';
-  state.recentActivePerson = null;
-  state.recentActiveChips = new Set();
-  state.recentSmartResults = [];
-  updateRecentFilterChips();
-  updateActiveChipLabel();
-  applyRecentFilters();
-}
+function clearRecentChip() { resetRecentSearch(); }
+
+function clearRecentSearch() { resetRecentSearch(); }
 
 // --- Thumbnail URL builder + manual refresh ------------------------------
 // Darkroom proxies Immich's thumbnails verbatim, so it inherits whatever

@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.5.134 (2026-10-19)
+
+### Clear also empties the People name filter (Analog)
+
+- Typing a name in the People section's "Filter people..." box (for example "zach") and then pressing Clear left the name in the box. The avatar grid kept showing only that person, so they still looked selected. Clear and ✕ now empty that box too, matching the album views.
+
+## v1.5.133 (2026-10-19)
+
+### Clear resets the Analog search completely
+
+- **Clear and ✕ now reset everything.** The panel's Clear and the ✕ in the search box share one reset. It clears the text, the Camera, Lens and place filters and the person, as before. It also clears:
+  - a tag search started from the detail view, and its "Tag: …" header title, which used to stay;
+  - a search still waiting out its 600 ms pause, or still loading. Before, it could land after Clear and fill the grid with results for text that was no longer in the box;
+  - Load More, which a search points at its own next page. It now goes back to loading the library.
+- The ✕ now hides after the panel's Clear; it used to stay visible.
+
 ## v1.5.132 (2026-10-19)
 
 ### Archived photos no longer come back on refresh
