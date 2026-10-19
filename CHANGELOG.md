@@ -20,7 +20,7 @@
 
 ### Archived photos no longer come back on refresh
 
-- **Archive and Restore now clear the Analog feed cache.** The "All" view serves from a 5-minute cache of the whole library, and Archive and Restore never cleared it. A refresh within 5 minutes therefore showed archived photos again, even though Immich had archived them. Both endpoints now clear the cache, as title and tag edits already did. Server-side change: recreate the container.
+- **Archive and Restore now clear the Analog feed cache.** The "All" view serves from a 5-minute cache of the whole library, and Archive and Restore never cleared it. A refresh within 5 minutes therefore showed archived photos again, even though Immich had archived them. Both endpoints now clear the cache, as title and tag edits already did. Server-side change: restart the container to pick it up.
 
 ## v1.5.131 (2026-10-19)
 

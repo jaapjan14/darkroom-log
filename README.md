@@ -15,6 +15,63 @@ header, optional slideshow, and pinch-zoom on every photo. No login required for
 
 ![Public album with branded header](screenshots/03-public-album.png)
 
+## What's new in v1.5.129–134
+
+Search behaves the same everywhere, Clear really clears, and archived photos stay archived.
+
+- **Clear resets the search completely.** In the main library, the search panel's Clear and the ✕ in the search box now reset everything. That covers the text, filters, the person, the People name filter, and a tag search opened from a photo's details along with its "Tag: …" title. They also cancel a search that is still loading, so its results can't fill the grid after you've cleared it, and Load More goes back to loading the library.
+- **Fixed: archived photos came back on refresh.** The main library's "All" view keeps a 5-minute copy of the library list, and Archive and Restore weren't clearing it. Photos were archived in Immich straight away, but a quick refresh showed them again until the copy expired. Archive and Restore now clear it.
+- **One search mode, remembered.** The Text / ✦ Smart choice is shared between the main library and the album views, and kept after a reload.
+- **Switching search mode keeps your filters.** Changing between Text and Smart in the main library keeps your Camera, Lens, place and People filters and re-runs the search, as album views already did. The ✕ in the search box appears whenever a filter is set, not only after typing, since it clears everything.
+- **Album views tidied to match the main library:** the Search Mode layout in the panel, the selection tick, grid width, the panel's Clear button, search timing, the active-filter label and the empty-results message.
+
+## What's new in v1.5.122–128
+
+Digital photos get first-class treatment, search reaches inside albums, and Archive works again on Immich v3.
+
+- **Fixed: Archive and Restore did nothing on Immich v3.** v3 replaced the asset's `isArchived` flag with `visibility`, and silently ignores the old field while still answering success, so a photo archived from Darkroom vanished on screen and came back on refresh. Darkroom now sends `visibility`, and the detail page correctly shows Restore on archived photos.
+- **Camera tabs and album search.** Albums you pin (by name, in `PINNED_ALBUMS`) get their own tab in the header, for example one album per digital body kept out of the main library. Inside any album, search now has a **Text / ✦ Smart** toggle using the same search as the main library (titles, tags, places, gear, filenames; or CLIP "describe a scene"), scoped to that album and including archived photos. Text mode also matches any part of a lens or camera name, which Immich's own metadata search can't. The old Digital tab is now **Archive**.
+- **Album views match the main library.** Pinned camera tabs and every album now use the same search bar and menus as the main library: one search box that opens the panel (Search Mode, Select, Camera / Lens / State / City, People with face avatars), a Sort chip (Upload Date, Date Taken, Last Edited), and the select toolbar in the same row.
+- **People in the photo details.** Everyone Immich's face recognition found in a photo is shown with their face in the detail column (people hidden in Immich are left out).
+- **Archive from multi-select.** Select several photos in the main library and archive them in one go.
+- **Tags & Captions for digital photos.** Photos without the film description (`Camera | Film | Developer | Lens`) are treated as digital: camera and lens come from EXIF, a black-and-white frame is detected from the image itself, and film-only tags and hashtags are left out. Film scans are unchanged. Lightroom workflow keywords (anything ending `-immich`, and `flickr-pool`) are no longer treated as photo tags.
+- **Several title suggestions.** The title generator offers five ideas drawn from both the tags and the image, refreshes when you edit the title, and rebuilds the captions with the new title.
+
+## What's new in v1.5.118–121
+
+A tag-loss fix and a security pass. `npm audit` is now clean.
+
+- **Fixed: pasting several tags onto a Library photo could silently lose one of them.** Linking tags one call at a time triggers a race in Immich's sidecar writes (upstream immich#32306, present in v3.2 and v3.3) that can delete a tag after its link call reported success. A pasted list is now linked in a single Immich call. The one-click suggested-tag chips still add one tag at a time.
+- **sharp 0.33.5 → 0.35.5**, picking up libvips, libheif and librsvg security fixes. Rendered output was compared before and after on real photos: byte-identical in 25 of 28 renders, the rest not visibly different.
+- **Patched advisories in `compression`** (memory leak when a client drops a compressed response early) **and `proxy-addr`.**
+- **Login rate limit hardened.** Forwarding headers are now believed only from a trusted proxy (the `cloudflared` container by default; override with the new optional `TRUSTED_PROXY_HOSTS`). Previously a client reaching the app without going through Cloudflare could send a made-up header on each attempt and never be limited. **If you run behind a different reverse proxy, set `TRUSTED_PROXY_HOSTS` to it**, otherwise all clients share one login-attempt bucket (10 per 15 minutes).
+
+## What's new in v1.5.114–117
+
+Security hardening plus a handful of fixes.
+
+- **Breaking: `APP_PASSWORD` (or `PASSWORD_HASH`) is now required.** The server refuses to start if neither is set, instead of silently falling back to a built-in default password. If you already set one, nothing changes.
+- **Patched dependency DoS advisories** in express, body-parser, qs and multer.
+- **Fixed: the "+ Album" picker didn't move the album you'd just added to back to the top until a page reload.** It now updates immediately. Removing, reordering and renaming also keep the Albums tab's "Recently updated" sort current. The picker's Immich-albums tab is now sorted by most recently updated too.
+- **Fixed: the Analog tab's Sort button did nothing, and the Prints tab could get stuck on "Loading..."** when Analog was the default tab.
+
+## What's new in v1.5.109–113
+
+Renamed the Library/Immich tabs to match what's actually in them, plus a mode-toggle and Prints sort cleanup.
+
+- **Renamed tabs: Library → Analog, Immich → Digital** — the old names didn't reflect content. "Analog" is film work exclusively; "Digital" is digital-camera work (organized into Immich's native albums), once cleared of redundant film-scan albums now covered by this app's own Albums tab.
+- **New Print/Analog mode toggle** in the header — swap which of Prints/Analog opens first and reads first in the tab bar, since the right default depends on whether you're printing or working through scans that day. Persisted, so it's a one-time flip.
+- **Prints tab's Sort** is now a compact dropdown at the end of the search bar instead of an always-visible button row, matching the Analog tab's existing pattern.
+
+## What's new in v1.5.104–108
+
+Library tag-add bug fixes plus a dedicated title regenerate button.
+
+- **Fixed: pasting a multi-word tag list into a "+ tag" input shredded every tag into single words** — the paste handler split on any whitespace instead of just commas. Multi-word tags (e.g. "black and white film") now paste correctly, and slashes are stripped from Library tags to avoid Immich's nested-tag-hierarchy parsing (`f/2` → `f2`).
+- **Fixed: a tag could silently fail to link with no error shown** — the server now verifies each tag-link write actually succeeded against Immich's real per-item result before reporting success, instead of assuming success whenever the request didn't throw.
+- **Fixed: the Library tags row often needed a manual page reload to show a just-added/removed tag** — it now updates from the write the client already knows succeeded, instead of immediately re-reading Immich (whose read-after-write isn't always immediate).
+- **New: dedicated "regenerate" button for just the suggested title** — get a fresh title idea without re-running the whole caption/tag generation.
+
 ## What's new in v1.5.102–103
 
 - **Album picker sorts most-recently-used first** — the "+ Album" picker now surfaces whichever album you were just filing photos into, instead of an unsorted list.
