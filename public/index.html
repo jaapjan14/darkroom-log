@@ -326,7 +326,9 @@
       <button class="tab-btn active" id="tab-prints" >Prints</button>
       <button class="tab-btn" id="tab-recent" >Analog</button>
       <button class="tab-btn" id="tab-albums" >Albums</button>
-      <button class="tab-btn" id="tab-immich" >Digital</button>
+      <button class="tab-btn" id="tab-m11" title="Leica M11 album">M11</button>
+      <button class="tab-btn" id="tab-z8" title="Nikon Z8 album">Z8</button>
+      <button class="tab-btn" id="tab-immich" >Archive</button>
     </div>
   </div>
 
@@ -405,6 +407,7 @@
         <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--text-dim)" id="select-count">0 selected</span>
         <button class="btn btn-ghost btn-sm" id="btn-add-selection-album" >+ Album</button>
         <button class="btn btn-ghost btn-sm" id="btn-download-selection" >↓ DL</button>
+        <button class="btn btn-ghost btn-sm" id="btn-archive-selection" >Archive</button>
         <button class="btn btn-danger btn-sm" id="btn-exit-select" >✕ Done</button>
       </div>
       <span id="active-chip-label" style="flex-basis:100%;font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--safe)"></span>
@@ -510,7 +513,11 @@
     </div>
     <div style="max-width:1200px;margin:0 auto;padding:0.25rem 1rem;display:flex;gap:0.5rem;align-items:center;position:relative">
       <button class="sort-btn" id="immich-filters-btn" style="font-size:10px;flex-shrink:0">⊞ Filters</button>
-      <input type="text" id="immich-album-search" placeholder="Search filename..." style="flex:1;font-size:12px;padding:0.3rem 0.6rem;max-width:240px">
+      <input type="text" id="immich-album-search" placeholder="Search filename..." autocomplete="off" style="flex:1;font-size:12px;padding:0.3rem 0.6rem;max-width:240px">
+      <div id="immich-search-mode" style="display:none;gap:2px;flex-shrink:0">
+        <button class="tag-filter" id="immich-search-mode-text">Text</button>
+        <button class="tag-filter active" id="immich-search-mode-smart">✦ Smart</button>
+      </div>
       <span id="immich-active-chip-label" style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--safe)"></span>
       <div id="immich-filter-backdrop" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:100"></div>
       <div id="immich-filter-popup" style="display:none;position:absolute;top:2rem;left:0;background:var(--surface);border:1px solid var(--border);padding:1rem;z-index:101;min-width:320px;max-width:500px;max-height:60vh;overflow-y:auto">
@@ -829,7 +836,7 @@
 
 <script src="/zoom.js?v=2" defer></script>
 <script src="/audio-engine.js?v=10" defer></script>
-<script src="/app.js?v=292" defer></script>
+<script src="/app.js?v=296" defer></script>
 <script>
 // Service worker - registers sw.js for thumb stale-while-revalidate + shell
 // cache. Was actively unregistered v1.3.0 -> v1.5.61; re-enabled v1.5.62.

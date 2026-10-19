@@ -1,5 +1,66 @@
 # Changelog
 
+## v1.5.126 (2026-10-18)
+
+### Archive several photos at once from Analog
+
+- **Asked by Jacob:** with digital frames now kept in archived camera albums (M11/Z8 tabs), he wants to archive straight from Analog's multi-select.
+- **Added:** an **Archive** button in Analog's select toolbar (`+ Album · ↓ DL · Archive · ✕ Done`). It uses the existing `archiveImmichAssets()` (the album toolbar's Archive, which v1.5.125 fixed to send `visibility: 'archive'`): one confirm, one Immich call for all selected photos, then they drop out of the Analog grid and select mode closes.
+- `archiveImmichAssets()` now returns whether the archive happened (false on cancel or failure), so select mode stays open if you cancel.
+- Client asset bump: `app.js?v=296`, SW `darkroom-v166`. package.json 1.5.125 → 1.5.126.
+
+## v1.5.125 (2026-10-18)
+
+### Fix: Archive and Restore did nothing since the Immich v3 upgrade
+
+- **Bug (Jacob):** archiving a photo from Darkroom hid it on screen, but after a refresh it was back in Analog.
+- **Cause:** Immich v3 replaced the asset's `isArchived` flag with `visibility` (`timeline` | `archive` | `hidden` | `locked`). Darkroom still sent `{ ids, isArchived: true }` to `PUT /assets`. Immich silently drops the unknown field and still answers 204, so Darkroom reported success and removed the photo locally while nothing changed in Immich. Checked live with empty id lists (no photos touched): `isArchived: true` → 204 ignored, `visibility: "archive"` → 204 accepted, `visibility: "bogus"` → 400 listing the valid values. Restore (`isArchived: false`) failed the same way.
+- **Also wrong since v3:** the Archive/Restore button on the photo detail page read `isArchived` from the asset, which v3 no longer returns, so it always showed "Archive" (never "Restore") on archived photos; same for the album select toolbar's Archive/Restore label.
+- **Fix:** `server.js` archive/restore send `visibility: 'archive'` / `'timeline'`; the asset mappers derive `isArchived` from `visibility === 'archive'` (old flag kept as fallback). `public/app.js`: the select-toolbar check reads `visibility` on raw Immich assets, and a local restore also sets `visibility: 'timeline'`.
+- Client asset bump: `app.js?v=295`, SW `darkroom-v165`. package.json 1.5.124 → 1.5.125.
+
+## v1.5.124 (2026-10-18)
+
+### M11 and Z8 tabs in the header; album search uses the Analog search engine; Digital tab renamed Archive
+
+- **Why:** Jacob keeps digital frames out of the Analog library by putting each body's frames in its own Immich album and archiving them. Darkroom's strong search (titles, tags, places, gear, smart/CLIP) only ever searched the Analog timeline (`visibility: 'timeline'` in every search call), and album views only matched filenames.
+- **Header:** tab bar is now Analog/Prints (existing first-tab switcher unchanged) · Albums · **M11** · **Z8** · **Archive**. M11 and Z8 open the "Leica M11" and "Nikon Z8" Immich albums directly (`PINNED_ALBUMS` in `public/app.js`, matched by album name). They're top-level tabs: no back button, and the album's Delete button is hidden there.
+- **Archive** is the old Digital tab, renamed. Same grid of configured Immich albums, same Archived/Trash entries.
+- **Album search (`public/app.js`):** inside any Immich album the search box now has a **Text / ✦ Smart** toggle (Smart default, like Analog). Text = titles (Darkroom title index), tags, places, camera, description, filenames; Smart = CLIP ("describe a scene"). Results are limited to the album and keep the album's sort and Filters chips. 400 ms debounce; stale responses are dropped. Archived and Trash views keep the simple filename filter.
+- **Server (`server.js`):** `/api/immich/text-search` and `/api/immich/smart-search` take an optional `albumId`; new `searchScope()` sends `albumIds: [albumId]` instead of `visibility: 'timeline'`. With no visibility Immich searches the album's timeline + archived photos (checked against Immich v3.3.1 source and live: smart search for "pier at sunset" in the M11 album returned archived frames). Analog behaviour is unchanged when no albumId is sent.
+- **Partial lens/camera/place matching:** Immich's metadata search only matches lens, camera and place on the exact, case-sensitive full value (live check in the M11 album: `Thypoch Simera 50mm f/1.4 Asph.` → 17, lowercase → 0, `Thypoch` → 0). Text mode therefore also matches any part of lens, camera, make, city, state, description and filename on the album's loaded assets, merged with the server results, so "thypoch", "50mm" or "fle" work.
+- **Known limit:** place search depends on GPS: 11 of 67 M11 frames have a city.
+- Client asset bump: `app.js?v=294`, SW `darkroom-v164`. package.json 1.5.123 → 1.5.124.
+
+## v1.5.123 (2026-10-18)
+
+### Tags & Captions: digital frames, and workflow keywords skipped
+
+- **Bug:** the generator assumed every photo was a film scan. On a digital frame (M11) with no "Camera | Film | Developer | Lens" description it produced a Standard Caption of `Last Cast /  |  |  |`, always added "black and white film, analog photography, film photography" to Flickr, and started Instagram with `#believeinfilm` followed by empty `#` slots. The model was also told every photo was a scanned film photograph.
+- **Bug:** Lightroom workflow keywords (`m11-immich`, `z8-immich`, `flickr-pool`) were treated as real tags. They showed up in Lomography/Flickr/Instagram, and because the photo then counted as tagged, the model's subject suggestions were only offered as chips instead of becoming the tags. That is why digital frames had such weak tags.
+- **Digital detection (`lib/tag-format.js` `digitalInfo`):** a frame is digital when its description has no `|` and EXIF has a camera model. Film scans are untouched; their output is byte-identical to v1.5.122 (checked).
+- **Digital output:** Standard Caption `Title / Leica M11 | Thypoch Simera 50mm f/1.4 Asph.` (camera from EXIF Model via the new `DIGITAL_CAMERAS` table in `lib/gear-catalog.js`, title-cased fallback for unknown bodies; lens from EXIF LensModel as written by m11lens). Flickr: camera, lens, focal length, "digital photography", plus "black and white photography" for a monochrome frame, then the ranked tags. Instagram: gear line `Leica M11 · Thypoch …`, hashtags `#leicam11 #simera50` (+ `#blackandwhitephotography` when monochrome) + location; no `#believeinfilm`.
+- **Monochrome check (`server.js` `isMonochrome`):** an M11 file can be colour or B&W, so the preview's average R/G/B spread is measured with sharp (threshold 4). On real files: in-camera HC B&W JPGs scored 0, colour JPGs 49–61.
+- **Workflow keywords (`isWorkflowTag`):** anything ending `-immich`, and `flickr-pool`, is dropped before ranking, in the full generation, "New ideas" and the title rebuild.
+- **Prompts:** both model prompts now say "digital photograph (Leica M11)" for digital frames and give the lens; "digital photography" joins the list of tags the model shouldn't suggest.
+- `digital` is cached with each generation so a title edit rebuilds the right caption. Entries cached before this release rebuild it from EXIF (B&W unknown until the next full Regenerate). **Existing digital entries need one Regenerate** to pick up the new tags.
+- Server-only change (`server.js`, `lib/tag-format.js`, `lib/gear-catalog.js`); no client files changed, so no asset/SW bump. package.json 1.5.122 → 1.5.123.
+
+## v1.5.122 (2026-10-16)
+
+### Library title generator: resets on title edits, offers several titles, uses tags + image
+
+- **Bug:** deleting a Library title and then asking for a suggestion didn't work. The generator panel kept the title the photo was opened with, so after clearing it the suggestion row stayed hidden (it only showed when the title was empty) and ↻ sent the old title back to the model, which was told to keep a good existing title. The captions also kept the old title.
+- **Fix (`public/app.js`):** new `onLibraryTitleChanged()`, called from both the ✎ editor (`saveLibraryTitle`) and "Use". It updates the panel's copy of the title and re-renders straight away.
+- **Captions follow the title:** new `POST /api/generate-tags/:assetId/retitle` (`server.js`) rebuilds Standard Caption and Instagram (the only outputs that contain the title) with `lib/tag-format.js`. This is templating only, with no model call. Lomography and Flickr don't use the title and are left as they are. Full generations now cache `rankedTags` so this rebuild uses the same tag order. Older cache entries fall back to live Immich tags, then the suggested tags.
+- **Several titles:** the model now returns 5 titles (`suggestedTitles` array, replacing `suggestedTitle`), each with its own "Use" button. "↻ New ideas" fetches a fresh batch and passes the previous batch so they aren't repeated. Duplicates and the current title are filtered out. Old cache entries with a single `suggestedTitle` still render.
+- **Tags + image:** the title prompt (shared `titleBrief()`) asks for at least two titles built on the tags (a place, landmark, subject or theme) and at least two from what's visible in the frame. With no tags, the full call uses its own suggested tags, and the title-only call uses the cached suggested tags.
+- **Shown with or without a title:** the list now appears when a photo already has a title, labelled "Alternative titles". It comes from the same model call as the captions, so it costs nothing extra. Only "↻ New ideas" makes a (small) call. Library only. Prints no longer shows the row at all (before, it could appear on an untitled print, but "Use this title" did nothing there).
+- Client asset bump: `app.js?v=293`, SW `darkroom-v163`. package.json 1.5.121 → 1.5.122.
+- **Verified (2026-10-16):** deployed, and the container restarted cleanly. Run inside the container against a real asset (`e7e9bba6…`, "Diesel Under Thunderheads"), the full call returned 5 titles mixing tag-based and frame-based ideas. The "New ideas" call returned 5 new ones that didn't repeat the first batch. The rebuilt Standard Caption carries the title. That asset's cached caption was missing its title, because the title was added after generation, which is the stale-caption case this release fixes. The in-browser click-through (clear title → suggestions appear → "Use" → captions refresh) was **not** run by Claude, because Chrome wasn't logged in to Darkroom.
+- **Known quirk:** cache entries generated before v1.5.122 have no saved `rankedTags`, so a title edit on one of them rebuilds the Instagram hashtags from the live Immich tag order. The order may differ from the original. One full Regenerate stores `rankedTags` and fixes it.
+- **Status (2026-10-17):** Jacob is testing it in real use. Rollback copies of the v1.5.121 files are at `/share/ProgramData-vol5/Containers/darkroom-backup-1.5.121/`. **Not yet synced** to the local repo, GitHub or Docker Hub. Do that after testing.
+
 ## v1.5.121 (2026-10-12)
 
 ### Security: login rate limit could be dodged with a made-up forwarding header

@@ -14,6 +14,10 @@ let state = {
   sort: 'recent',
   activeTag: null,
   currentTab: 'prints',
+  pinnedAlbumTab: null,      // 'm11' / 'z8' while one of the header album tabs is open
+  immichSearchMode: 'smart', // album search: 'smart' (CLIP) or 'text' (titles, tags, places, gear)
+  immichSearchIds: null,     // ids matching the album search, in result order; null = no server search active
+  immichSearchGen: 0,
   recentPage: 1,
   recentItems: [],
   recentLoaded: false,
@@ -130,10 +134,16 @@ function loadInitialTab() {
 }
 
 // TAB SWITCHING
+// Header tabs that open one Immich album directly (digital bodies live in
+// their own archived albums, outside the Analog library). Matched by album
+// name, so a renamed album needs this table updated.
+const PINNED_ALBUMS = { m11: 'Leica M11', z8: 'Nikon Z8' };
+
 function switchTab(tab) {
   state.recentGen++; // invalidate any in-flight Library grid loader for the prior view
   state.currentTab = tab;
-  ['prints','recent','albums','immich'].forEach(t => {
+  state.pinnedAlbumTab = null;
+  ['prints','recent','albums','m11','z8','immich'].forEach(t => {
     document.getElementById('tab-' + t).classList.toggle('active', t === tab);
   });
   document.getElementById('gallery-view').classList.toggle('active', tab === 'prints');
@@ -164,6 +174,25 @@ function switchTab(tab) {
   if (tab === 'prints' && !state.printsLoaded) loadGallery();
   if (tab === 'albums') loadAlbumsTab();
   if (tab === 'immich' && !state.immichAlbumsLoaded) loadImmichTab();
+  if (PINNED_ALBUMS[tab]) openPinnedAlbum(tab);
+}
+
+async function openPinnedAlbum(tab) {
+  const name = PINNED_ALBUMS[tab];
+  const gallery = document.getElementById('immich-album-gallery');
+  try {
+    if (!state.allImmichAlbums) state.allImmichAlbums = await fetch('/api/immich/immich-albums').then(r => r.json());
+    const album = (state.allImmichAlbums || []).find(a => a.albumName === name);
+    if (state.currentTab !== tab) return; // switched away while the list loaded
+    if (!album) {
+      document.getElementById('immich-album-view').classList.add('active');
+      gallery.innerHTML = `<div style="text-align:center;padding:3rem;color:var(--text-dim)">No Immich album named “${name}”.</div>`;
+      return;
+    }
+    await openImmichAlbum(album.id, album.albumName, { pinnedTab: tab });
+  } catch (e) {
+    gallery.innerHTML = '<div style="color:var(--red);padding:1rem">Error loading album</div>';
+  }
 }
 
 // RECENT UPLOADS
@@ -1086,6 +1115,9 @@ function goBackFromDetail() {
   document.getElementById('back-btn').style.display = 'none';
   if (prev === 'album-detail-view') {
     document.getElementById('header-title').textContent = (state.currentAlbum?.title || 'Album').toUpperCase();
+  } else if (prev === 'immich-album-view' && state.pinnedAlbumTab) {
+    // Header album tab (M11/Z8): it's top-level, so no back button.
+    document.getElementById('header-title').textContent = document.getElementById('immich-album-name').textContent;
   } else if (prev === 'immich-album-view') {
     document.getElementById('header-title').textContent = document.getElementById('immich-album-name').textContent;
     document.getElementById('back-btn').style.display = 'flex';
@@ -2265,7 +2297,7 @@ async function removeFromImmichAlbum(assetId) {
 async function archiveImmichAssets(assetIds) {
   const ids = Array.isArray(assetIds) ? assetIds : [assetIds];
   const count = ids.length;
-  if (!confirm(`Archive ${count} photo${count !== 1 ? 's' : ''}?\n\nThey will be hidden from the main Immich library. You can restore them later.`)) return;
+  if (!confirm(`Archive ${count} photo${count !== 1 ? 's' : ''}?\n\nThey will be hidden from the main Immich library. You can restore them later.`)) return false;
   let serverOk = false;
   try {
     const r = await fetch('/api/immich/assets/archive', {
@@ -2276,7 +2308,7 @@ async function archiveImmichAssets(assetIds) {
     serverOk = true;
   } catch(e) {
     alert('Archive failed.');
-    return;
+    return false;
   }
   // PUT succeeded — UI updates from here on must NOT bubble back as "Archive failed".
   // The detail view is reachable from contexts (search, recent feed) where
@@ -2305,6 +2337,7 @@ async function archiveImmichAssets(assetIds) {
   } catch(e) {
     console.warn('Archive UI refresh hit a snag (server PUT was OK):', e);
   }
+  return true;
 }
 
 async function restoreImmichAssets(assetIds) {
@@ -2326,7 +2359,7 @@ async function restoreImmichAssets(assetIds) {
   try {
     if (Array.isArray(state.currentImmichAlbumAssets)) {
       state.currentImmichAlbumAssets = state.currentImmichAlbumAssets.map(a =>
-        ids.includes(a.id) ? { ...a, isArchived: false } : a
+        ids.includes(a.id) ? { ...a, isArchived: false, visibility: 'timeline' } : a
       );
       applyImmichFiltersAndSort();
     }
@@ -2367,7 +2400,7 @@ function updateImmichArchiveBtn() {
   const assets = state.currentImmichAlbumAssets;
   const allArchived = selectedIds.length > 0 && selectedIds.every(id => {
     const a = assets.find(x => x.id === id);
-    return a && a.isArchived;
+    return a && (a.isArchived || a.visibility === 'archive'); // raw Immich v3 asset: visibility
   });
   btn.textContent = allArchived ? 'Restore' : 'Archive';
   btn.className = allArchived ? 'btn btn-ghost btn-sm' : 'btn btn-danger btn-sm';
@@ -3723,6 +3756,14 @@ function toggleAssetSelect(assetId, e) {
   renderRecentGrid(items);
 }
 
+// Analog multi-select → Archive (same path as the album toolbar's Archive:
+// visibility 'archive' in Immich, then the photos drop out of the Analog grid).
+async function archiveSelection() {
+  if (!state.selectedAssets.size) { alert('Select at least one photo first.'); return; }
+  const done = await archiveImmichAssets([...state.selectedAssets]);
+  if (done && state.selectMode) exitSelectMode();
+}
+
 function addSelectionToAlbum() {
   if (!state.selectedAssets.size) { alert('Select at least one photo first.'); return; }
   openAddToAlbumModal([...state.selectedAssets]);
@@ -4097,6 +4138,7 @@ async function saveLibraryTitle() {
     return;
   }
   document.getElementById('library-title-row').innerHTML = libraryTitleInnerHtml(newTitle);
+  onLibraryTitleChanged(assetId, newTitle);
 }
 
 function cancelEditLibraryTitle(original) {
@@ -4422,25 +4464,36 @@ function renderGeneratedTagsBlock(label, field, text) {
 // this is currently always true from both call sites — kept as a parameter
 // rather than hardcoded in case a future read-only context needs the panel.
 // ctx (optional) is the loadGeneratedTagsPanel context this render is for —
-// only used to decide whether to show the "Use this title" affordance
-// (suppressed once the photo already has a title, via ctx.title).
+// used to decide whether to show the suggested-titles list (Library only;
+// Prints has its own title field) and how to label it: "Suggested titles"
+// when the photo has none, "Alternative titles" once it does.
+// suggestedTitles is an array since v1.5.122; older cache entries only have
+// a single suggestedTitle string, so fall back to that.
 function renderGeneratedTagsPanel(gt, allowAddTag, ctx) {
   if (!gt) return '<div class="loading" style="padding:0.5rem 0;font-size:11px;color:var(--text-dim)">Not generated yet.</div>';
   const flickrText = (gt.flickr || []).join(', ');
   const igText = gt.instagram ? gt.instagram.text : '';
+  const currentTitle = ((ctx && ctx.title) || '').trim().toLowerCase();
+  const titles = (Array.isArray(gt.suggestedTitles) ? gt.suggestedTitles : (gt.suggestedTitle ? [gt.suggestedTitle] : []))
+    .filter(t => t && t.trim().toLowerCase() !== currentTitle);
+  const showTitles = allowAddTag && ctx && ctx.kind === 'library';
   return `
     ${renderGeneratedTagsBlock('Standard Caption', 'standardCaption', gt.standardCaption)}
     ${renderGeneratedTagsBlock('Lomography', 'lomography', gt.lomography)}
     ${renderGeneratedTagsBlock('Flickr', 'flickr', flickrText)}
     ${renderGeneratedTagsBlock('Instagram', 'instagram', igText)}
-    ${(gt.suggestedTitle && allowAddTag && ctx && !ctx.title) ? `
+    ${showTitles ? `
       <div style="margin-top:0.5rem;padding-top:0.5rem;border-top:1px solid var(--border)">
-        <div style="font-size:10px;color:var(--text-dim);margin-bottom:0.3rem">Suggested title</div>
-        <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap">
-          <div style="font-size:13px;color:var(--text)">${escapeHtmlLite(gt.suggestedTitle)}</div>
-          <button class="btn-icon" data-action="useSuggestedTitle" data-title="${encodeURIComponent(gt.suggestedTitle)}" style="font-size:11px;color:var(--safe)">Use this title</button>
-          <button id="regenerate-title-btn" class="btn-icon" data-action="regenerateSuggestedTitle" style="font-size:11px;color:var(--text-dim)" title="Get a different title suggestion">&#8635;</button>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.3rem">
+          <div style="font-size:10px;color:var(--text-dim)">${ctx.title ? 'Alternative titles' : 'Suggested titles'}</div>
+          <button id="regenerate-title-btn" class="btn-icon" data-action="regenerateSuggestedTitle" style="font-size:11px;color:var(--text-dim)" title="Get a fresh batch of title ideas">&#8635; New ideas</button>
         </div>
+        ${titles.length ? titles.map(t => `
+          <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.2rem">
+            <div style="font-size:13px;color:var(--text);flex:1">${escapeHtmlLite(t)}</div>
+            <button class="btn-icon" data-action="useSuggestedTitle" data-title="${encodeURIComponent(t)}" style="font-size:11px;color:var(--safe)">Use</button>
+          </div>
+        `).join('') : '<div style="font-size:11px;color:var(--text-dim)">No suggestions — tap New ideas.</div>'}
       </div>
     ` : ''}
     ${gt.suggestedTags && gt.suggestedTags.length ? `
@@ -4560,12 +4613,37 @@ async function addSuggestedTag(tag) {
   }
 }
 
+// Keeps the generator panel in step with a Library title edit (✎ editor or
+// "Use"). Without this the panel kept the title it was opened with, so after
+// clearing a title the suggestions stayed hidden and ↻ sent the old title
+// back to the model. Rebuilds the title-dependent captions server-side via
+// /retitle (templating only, no model call) when a generated set exists.
+async function onLibraryTitleChanged(assetId, title) {
+  const ctx = state.currentGeneratedCtx;
+  if (!ctx || ctx.kind !== 'library' || ctx.assetId !== assetId) return;
+  ctx.title = title;
+  const panel = document.getElementById(ctx.panelId);
+  if (!state.currentGeneratedTags) return;
+  if (panel) panel.innerHTML = renderGeneratedTagsPanel(state.currentGeneratedTags, ctx.allowAddTag, ctx);
+  try {
+    const r = await fetch(`/api/generate-tags/${assetId}/retitle`, {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ title })
+    });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'Request failed');
+    const gt = await r.json();
+    if (state.currentGeneratedCtx !== ctx) return; // moved on to a different photo
+    state.currentGeneratedTags = gt;
+    if (panel) panel.innerHTML = renderGeneratedTagsPanel(gt, ctx.allowAddTag, ctx);
+  } catch (e) {
+    console.error('Caption refresh after title change failed:', e.message);
+  }
+}
+
 // Library-only (Prints has its own always-editable title field, so there's
-// no "suggested title" affordance there — see the ctx.title gate in
-// renderGeneratedTagsPanel, which only shows this button when Library's
-// title is currently empty). Writes via the same /api/library-title/:id
-// path the ✎ editor uses, then re-renders both the title row and this
-// panel (so the affordance disappears now that a title exists).
+// no suggested-titles list there — see the ctx.kind gate in
+// renderGeneratedTagsPanel). Writes via the same /api/library-title/:id
+// path the ✎ editor uses, then re-renders the title row and hands off to
+// onLibraryTitleChanged to refresh the captions and the list.
 async function useSuggestedTitle(title) {
   const ctx = state.currentGeneratedCtx;
   if (!ctx || ctx.kind !== 'library') return;
@@ -4576,16 +4654,12 @@ async function useSuggestedTitle(title) {
     alert(`Failed to save title (${res.status}). Your session may have expired — try reloading the page.`);
     return;
   }
-  ctx.title = title;
   const titleRow = document.getElementById('library-title-row');
   if (titleRow) titleRow.innerHTML = libraryTitleInnerHtml(title);
-  if (state.currentGeneratedTags) {
-    const panel = document.getElementById(ctx.panelId);
-    if (panel) panel.innerHTML = renderGeneratedTagsPanel(state.currentGeneratedTags, ctx.allowAddTag, ctx);
-  }
+  await onLibraryTitleChanged(ctx.assetId, title);
 }
 
-// Regenerates only suggestedTitle via POST /api/generate-tags/:assetId/title
+// Regenerates only suggestedTitles via POST /api/generate-tags/:assetId/title
 // (server pulls live tags itself — see that endpoint's comment) — leaves
 // Standard Caption/Lomography/Flickr/Instagram/suggested-tags untouched, so
 // getting a fresh title idea doesn't cost a full re-generation.
@@ -4607,8 +4681,8 @@ async function regenerateSuggestedTitle() {
     const panel = document.getElementById(ctx.panelId);
     if (panel) panel.innerHTML = renderGeneratedTagsPanel(gt, ctx.allowAddTag, ctx);
   } catch (e) {
-    alert(`Failed to regenerate title: ${e.message}`);
-    if (btn) { btn.disabled = false; btn.textContent = '↻'; }
+    alert(`Failed to regenerate titles: ${e.message}`);
+    if (btn) { btn.disabled = false; btn.textContent = '↻ New ideas'; }
   }
 }
 
@@ -4730,9 +4804,7 @@ async function openArchivedView() {
   state.currentImmichAlbumId = null;
   state.currentImmichAlbumAssets = [];
   state.immichActiveChips = new Set();
-  state.immichSearchQuery = '';
-  const searchEl = document.getElementById('immich-album-search');
-  if (searchEl) searchEl.value = '';
+  resetImmichAlbumSearch();
   state.immichSelected = new Set();
   state.immichSelectMode = false;
   document.getElementById('back-btn').onclick = () => {
@@ -4774,9 +4846,7 @@ async function openTrashView() {
   state.currentImmichAlbumId = null;
   state.currentImmichAlbumAssets = [];
   state.immichActiveChips = new Set();
-  state.immichSearchQuery = '';
-  const searchEl = document.getElementById('immich-album-search');
-  if (searchEl) searchEl.value = '';
+  resetImmichAlbumSearch();
   state.immichSelected = new Set();
   state.immichSelectMode = false;
   document.getElementById('back-btn').onclick = () => {
@@ -4863,8 +4933,10 @@ async function deleteImmichAlbum() {
   } catch(e) { alert('Failed to delete album.'); }
 }
 
-async function openImmichAlbum(albumId, albumName) {
+async function openImmichAlbum(albumId, albumName, { pinnedTab = null } = {}) {
   const gallery = document.getElementById('immich-album-gallery');
+  state.pinnedAlbumTab = pinnedTab;
+  resetImmichAlbumSearch();
   gallery.innerHTML = '<div class="loading">Loading...</div>';
   document.getElementById('immich-album-name').textContent = albumName;
   document.getElementById('immich-view').classList.remove('active');
@@ -4875,7 +4947,9 @@ async function openImmichAlbum(albumId, albumName) {
   state.viewingArchived = false;
   state.viewingTrash = false;
   const delBtn = document.querySelector('[data-action="deleteImmichAlbum"]');
-  if (delBtn) delBtn.style.display = '';
+  // The camera albums behind the header tabs can't be deleted from there.
+  if (delBtn) delBtn.style.display = pinnedTab ? 'none' : '';
+  document.getElementById('back-btn').style.display = pinnedTab ? 'none' : 'flex';
   document.getElementById('back-btn').onclick = () => {
     document.getElementById('immich-album-view').classList.remove('active');
     document.getElementById('immich-view').classList.add('active');
@@ -4885,7 +4959,9 @@ async function openImmichAlbum(albumId, albumName) {
   };
   try {
     const data = await fetch(`/api/immich/immich-albums/${albumId}`).then(r => r.json());
+    if (pinnedTab && state.pinnedAlbumTab !== pinnedTab) return; // switched tabs mid-load
     state.currentImmichAlbumId = albumId;
+    updateImmichSearchUi(); // album known now: show Text/Smart toggle
     state.currentImmichAlbumAssets = data.assets || [];
     state.immichActiveChips = new Set();
     state.immichSelected = new Set();
@@ -4954,9 +5030,95 @@ function toggleImmichChip(val) {
   applyImmichFiltersAndSort();
 }
 
+// Album search uses the same server search as the Analog tab (text: titles,
+// tags, places, gear, filenames; smart: CLIP), scoped to the open album via
+// albumId, which also reaches archived photos. Archived/Trash views have no
+// album, so they keep the simple filename filter.
+function resetImmichAlbumSearch() {
+  state.immichSearchQuery = '';
+  state.immichSearchIds = null;
+  state.immichSearchGen++;
+  const searchEl = document.getElementById('immich-album-search');
+  if (searchEl) searchEl.value = '';
+  updateImmichSearchUi();
+}
+
+function updateImmichSearchUi() {
+  const inAlbum = !!state.currentImmichAlbumId && !state.viewingArchived && !state.viewingTrash;
+  const modeEl = document.getElementById('immich-search-mode');
+  if (modeEl) modeEl.style.display = inAlbum ? 'flex' : 'none';
+  const searchEl = document.getElementById('immich-album-search');
+  if (searchEl) searchEl.placeholder = !inAlbum ? 'Search filename...'
+    : state.immichSearchMode === 'smart' ? 'Describe a scene…' : 'Search titles, tags, places…';
+  document.getElementById('immich-search-mode-text')?.classList.toggle('active', state.immichSearchMode === 'text');
+  document.getElementById('immich-search-mode-smart')?.classList.toggle('active', state.immichSearchMode === 'smart');
+}
+
+let immichSearchTimer = null;
+function onImmichAlbumSearchInput(value) {
+  state.immichSearchQuery = value;
+  clearTimeout(immichSearchTimer);
+  if (!state.currentImmichAlbumId || state.viewingArchived || state.viewingTrash) {
+    applyImmichFiltersAndSort();
+    return;
+  }
+  if (!value.trim()) {
+    state.immichSearchIds = null;
+    state.immichSearchGen++;
+    applyImmichFiltersAndSort();
+    return;
+  }
+  immichSearchTimer = setTimeout(runImmichAlbumSearch, 400);
+}
+
+function setImmichSearchMode(mode) {
+  state.immichSearchMode = mode;
+  updateImmichSearchUi();
+  if (state.immichSearchQuery.trim()) runImmichAlbumSearch();
+}
+
+async function runImmichAlbumSearch() {
+  const q = state.immichSearchQuery.trim();
+  const albumId = state.currentImmichAlbumId;
+  if (!q || !albumId) return;
+  const gen = ++state.immichSearchGen;
+  const url = state.immichSearchMode === 'smart' ? '/api/immich/smart-search' : '/api/immich/text-search';
+  try {
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: q, size: 250, page: 1, albumId }),
+    });
+    const data = await r.json();
+    if (gen !== state.immichSearchGen || albumId !== state.currentImmichAlbumId) return; // superseded
+    state.immichSearchIds = (data.assets || []).map(a => a.id);
+  } catch (e) {
+    if (gen !== state.immichSearchGen) return;
+    state.immichSearchIds = [];
+  }
+  if (state.immichSearchMode === 'text') {
+    // Immich only matches lens/camera/place fields on the exact, case-sensitive
+    // full value ("Thypoch Simera 50mm f/1.4 Asph."), so also match any part of
+    // them here, on the album's already-loaded assets: "thypoch", "50mm", "fle".
+    const needle = q.toLowerCase();
+    const local = state.currentImmichAlbumAssets.filter(a => {
+      const x = a.exifInfo || {};
+      return [x.lensModel, x.model, x.make, x.city, x.state, x.description, a.originalFileName]
+        .some(v => v && String(v).toLowerCase().includes(needle));
+    }).map(a => a.id);
+    state.immichSearchIds = [...new Set([...state.immichSearchIds, ...local])];
+  }
+  applyImmichFiltersAndSort();
+}
+
 function applyImmichFiltersAndSort() {
   let assets = [...state.currentImmichAlbumAssets];
-  if (state.immichSearchQuery) {
+  if (state.immichSearchQuery && state.immichSearchIds) {
+    // Album search results (text or smart), limited to this album's photos.
+    const ids = new Set(state.immichSearchIds);
+    assets = assets.filter(a => ids.has(a.id));
+  } else if (state.immichSearchQuery && !state.currentImmichAlbumId) {
+    // Archived / Trash views: filename match on what's loaded.
     const q = state.immichSearchQuery.toLowerCase();
     assets = assets.filter(a => (a.originalFileName || '').toLowerCase().includes(q));
   }
@@ -4980,7 +5142,8 @@ function renderImmichGallery(assets) {
   const gallery = document.getElementById('immich-album-gallery');
   if (!assets) assets = state.immichDisplayedAssets.length ? state.immichDisplayedAssets : state.currentImmichAlbumAssets;
   if (!assets.length) {
-    gallery.innerHTML = '<div style="text-align:center;padding:3rem;color:var(--text-dim)">No photos in this album.</div>';
+    const msg = state.immichSearchQuery ? 'No matches in this album.' : 'No photos in this album.';
+    gallery.innerHTML = `<div style="text-align:center;padding:3rem;color:var(--text-dim)">${msg}</div>`;
     return;
   }
   const action = state.immichSelectMode ? 'toggleImmichAsset' : 'openImmichPhoto';
@@ -5179,6 +5342,8 @@ function wireListeners() {
   w('tab-recent', 'click', () => switchTab('recent'));
   w('tab-albums', 'click', () => switchTab('albums'));
   w('tab-immich', 'click', () => switchTab('immich'));
+  w('tab-m11', 'click', () => switchTab('m11'));
+  w('tab-z8', 'click', () => switchTab('z8'));
 
   // Prints
   w('gallery-search', 'input', () => applyFilters());
@@ -5204,6 +5369,7 @@ function wireListeners() {
   w('select-mode-btn', 'click', () => { toggleSelectMode(); closeRecentFilterPopup(); });
   w('btn-add-selection-album', 'click', () => addSelectionToAlbum());
   w('btn-download-selection', 'click', () => downloadSelectedAssets());
+  w('btn-archive-selection', 'click', () => archiveSelection());
   w('btn-exit-select', 'click', () => exitSelectMode());
   w('lib-sort-upload', 'click', () => { setLibrarySort('upload'); closeSortPopup(); });
   w('lib-sort-taken', 'click', () => { setLibrarySort('taken'); closeSortPopup(); });
@@ -5228,7 +5394,9 @@ function wireListeners() {
   w('immich-sort-dir', 'click', () => toggleImmichSortDir());
   w('immich-filters-btn', 'click', () => toggleImmichFilterPopup());
   w('immich-filter-backdrop', 'click', () => toggleImmichFilterPopup());
-  w('immich-album-search', 'input', (e) => { state.immichSearchQuery = e.target.value; applyImmichFiltersAndSort(); });
+  w('immich-album-search', 'input', (e) => onImmichAlbumSearchInput(e.target.value));
+  w('immich-search-mode-text', 'click', () => setImmichSearchMode('text'));
+  w('immich-search-mode-smart', 'click', () => setImmichSearchMode('smart'));
 
   // Albums
   w('btn-create-album', 'click', () => openCreateAlbumModal());

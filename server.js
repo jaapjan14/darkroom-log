@@ -620,7 +620,8 @@ app.get('/api/immich/photo/:id', requireAuth, async (req, res) => {
       height: data.exifInfo?.exifImageHeight || '',
       // Tag names from Immich (synced from LR keywords by the lr-immich plugin)
       tags: Array.isArray(data.tags) ? data.tags.map(t => t.name).filter(Boolean) : [],
-      isArchived: data.isArchived || false
+      // Immich v3 replaced isArchived with visibility ('timeline' | 'archive' | …).
+      isArchived: data.visibility === 'archive' || data.isArchived === true
     });
   } catch(e) {
     res.status(500).json({ error: e.message });
@@ -655,7 +656,7 @@ function mapAssetWithMeta(a) {
     // would be way too expensive for a 500-item grid. Title is fetched
     // lazily in /api/immich/photo/:id (detail view) where the cost is fine.
     tags: Array.isArray(a.tags) ? a.tags.map(t => t.name).filter(Boolean) : [],
-    isArchived: a.isArchived || false,
+    isArchived: a.visibility === 'archive' || a.isArchived === true, // v3: visibility, not isArchived
     // Forwarded so the client can version thumbnail URLs (?v=updatedAt) — a
     // republish/replace bumps updatedAt, which auto-busts stale browser/SW
     // thumbnail caches. See thumbSrc() in app.js.
@@ -1126,9 +1127,18 @@ app.get('/api/immich/filter-options', requireAuth, async (req, res) => {
   }
 });
 
+// Scope for the two search endpoints below: the Analog library (timeline)
+// by default, or one album when the Darkroom album view passes albumId. With
+// albumIds and no visibility, Immich searches the album's timeline AND
+// archived photos — the M11/Z8 albums are archived.
+function searchScope(albumId) {
+  return albumId ? { albumIds: [albumId] } : { visibility: 'timeline' };
+}
+
 // Server-side text search across metadata
 app.post('/api/immich/text-search', requireAuth, async (req, res) => {
-  const { query, size = 60, page = 1, model, lensModel, city, state, film, personId = null } = req.body;
+  const { query, size = 60, page = 1, model, lensModel, city, state, film, personId = null, albumId = null } = req.body;
+  const scope = searchScope(albumId);
   try {
     const chips = {};
     if (model) chips.model = model;
@@ -1143,7 +1153,7 @@ app.post('/api/immich/text-search', requireAuth, async (req, res) => {
     const meta = (fields) => fetch(`${IMMICH_URL}/search/metadata`, {
       method: 'POST',
       headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ size, page, visibility: 'timeline', ...chips, ...fields })
+      body: JSON.stringify({ size, page, ...scope, ...chips, ...fields })
     });
     // Search across fields — skip fields already occupied by a chip filter
     const searches = [
@@ -1181,8 +1191,9 @@ app.post('/api/immich/text-search', requireAuth, async (req, res) => {
             .then(r => r.ok ? r.json() : null).catch(() => null)
         )
       );
+      const inAlbum = a => !albumId || (Array.isArray(a.albums) ? a.albums.some(al => al.id === albumId) : true);
       for (const a of titleAssets) {
-        if (a && !seen.has(a.id)) {
+        if (a && !seen.has(a.id) && inAlbum(a)) {
           seen.add(a.id);
           items.push(mapAssetWithMeta(a));
         }
@@ -1202,7 +1213,7 @@ app.post('/api/immich/text-search', requireAuth, async (req, res) => {
         const tagR = await fetch(`${IMMICH_URL}/search/metadata`, {
           method: 'POST',
           headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ tagIds: matched.map(t => t.id), size, page, visibility: 'timeline' })
+          body: JSON.stringify({ tagIds: matched.map(t => t.id), size, page, ...scope })
         });
         const tagData = await tagR.json();
         for (const a of (tagData.assets?.items || [])) {
@@ -1222,9 +1233,9 @@ app.post('/api/immich/text-search', requireAuth, async (req, res) => {
 
 // Smart search (CLIP)
 app.post('/api/immich/smart-search', requireAuth, async (req, res) => {
-  const { query, size = 60, page = 1, model, lensModel, city, state, film, personId = null } = req.body;
+  const { query, size = 60, page = 1, model, lensModel, city, state, film, personId = null, albumId = null } = req.body;
   try {
-    const body = { query, size, page, visibility: 'timeline' };
+    const body = { query, size, page, ...searchScope(albumId) };
     if (model) body.model = model;
     if (lensModel) body.lensModel = lensModel;
     if (city) body.city = city;
@@ -2211,7 +2222,10 @@ app.delete('/api/immich/immich-albums/:id/assets', requireAuth, async (req, res)
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Archive assets — hides them from the main library (isArchived: true).
+// Archive assets — hides them from the main library (visibility: 'archive').
+// Immich v3 dropped `isArchived` from PUT /assets and silently ignores it
+// (still 204), so from the v3 upgrade until v1.5.125 Archive did nothing:
+// the photo vanished from the screen and came back on refresh.
 // Immich's bulk-update endpoint returns 204 No Content with an empty body, so
 // calling r.json() on it throws "Unexpected end of JSON input" — that was
 // landing us in the catch → 500, which the client surfaced as "Archive failed"
@@ -2223,14 +2237,14 @@ app.put('/api/immich/assets/archive', requireAuth, async (req, res) => {
     const r = await fetch(`${IMMICH_URL}/assets`, {
       method: 'PUT',
       headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ids, isArchived: true })
+      body: JSON.stringify({ ids, visibility: 'archive' })
     });
     if (!r.ok) return res.status(r.status).json({ error: 'Immich archive failed' });
     res.status(204).end();
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Restore assets from archive (isArchived: false). Same 204-no-body shape as
+// Restore assets from archive (visibility: 'timeline'). Same 204-no-body shape as
 // archive above — don't try to parse the response.
 app.put('/api/immich/assets/restore', requireAuth, async (req, res) => {
   try {
@@ -2238,7 +2252,7 @@ app.put('/api/immich/assets/restore', requireAuth, async (req, res) => {
     const r = await fetch(`${IMMICH_URL}/assets`, {
       method: 'PUT',
       headers: { 'x-api-key': IMMICH_KEY, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ids, isArchived: false })
+      body: JSON.stringify({ ids, visibility: 'timeline' })
     });
     if (!r.ok) return res.status(r.status).json({ error: 'Immich restore failed' });
     res.status(204).end();
@@ -2280,22 +2294,75 @@ function saveGeneratedTagsStore(store) {
   fs.writeFileSync(GENERATED_TAGS_FILE, JSON.stringify(store, null, 2));
 }
 
+// Shared title brief for rankTagsWithAI and suggestTitleOnly. Asks for a
+// batch rather than one idea, deliberately mixed between the photo's tags
+// and what's visible in the frame — tags carry things the image alone can't
+// (place names, landmarks, the subject's name), the frame carries the look.
+const TITLE_COUNT = 5;
+function titleBrief(hasTitle) {
+  return `Suggest ${TITLE_COUNT} different short, evocative titles for the photo in the style of a Flickr post ` +
+    `title — 2-4 words each, concrete and specific (e.g. "Steel Quills", "Empty Schoolyard", "Deck Ironwork"). ` +
+    `Draw on both sources: at least two should build on the tags (a place, landmark, subject or theme they ` +
+    `name), and at least two should come from what's actually visible in the frame (shapes, light, texture, ` +
+    `gesture). Make them genuinely different from each other, not variations of one phrase. Never generic ` +
+    `("Untitled", "Street Scene", "Nice Photo").` +
+    (hasTitle ? ` The photo already has a title (given above); these are alternatives, so don't repeat it.` : '');
+}
+function cleanTitles(arr, exclude = []) {
+  const seen = new Set(exclude.map(t => t.trim().toLowerCase()).filter(Boolean));
+  const out = [];
+  for (const t of Array.isArray(arr) ? arr : []) {
+    if (typeof t !== 'string') continue;
+    const v = t.trim();
+    if (!v || seen.has(v.toLowerCase())) continue;
+    seen.add(v.toLowerCase());
+    out.push(v);
+  }
+  return out.slice(0, TITLE_COUNT);
+}
+
+// Black-and-white check for digital frames (an M11 file can be either), so
+// their Flickr/Instagram tags can say so. Measured on the preview: a grey
+// image has R≈G≈B everywhere, so the average channel spread stays near 0.
+async function isMonochrome(jpegBuffer) {
+  try {
+    const { data, info } = await sharp(jpegBuffer).resize(64, 64, { fit: 'inside' }).raw()
+      .toBuffer({ resolveWithObject: true });
+    let spread = 0;
+    for (let i = 0; i < data.length; i += info.channels) {
+      spread += Math.max(data[i], data[i + 1], data[i + 2]) - Math.min(data[i], data[i + 1], data[i + 2]);
+    }
+    return spread / (data.length / info.channels) < 4;
+  } catch (e) {
+    return false;
+  }
+}
+
+// Opening line of both prompts: the model is told what it's looking at.
+function photoKindIntro(digital) {
+  return digital
+    ? `This is a digital photograph (${digital.camera}) being tagged for posting to Flickr, Instagram and Lomography.`
+    : `This is a scanned black-and-white or color film photograph being tagged for posting to ` +
+      `Lomography, Flickr, and Instagram — communities of film photographers.`;
+}
+
 const TAG_RANK_SCHEMA = {
   type: 'object',
   properties: {
     rankedTags: { type: 'array', items: { type: 'string' } },
     suggestedTags: { type: 'array', items: { type: 'string' } },
-    suggestedTitle: { type: 'string' },
+    suggestedTitles: { type: 'array', items: { type: 'string' } },
   },
-  required: ['rankedTags', 'suggestedTags', 'suggestedTitle'],
+  required: ['rankedTags', 'suggestedTags', 'suggestedTitles'],
   additionalProperties: false,
 };
 
-async function rankTagsWithAI({ imageBase64, title, camera, film, city, state, tags }) {
+async function rankTagsWithAI({ imageBase64, title, camera, film, city, state, tags, digital }) {
   if (!anthropic) throw new Error('ANTHROPIC_API_KEY not configured');
   const context = [
     title ? `Title: ${title}` : null,
-    camera ? `Camera: ${camera}` : null,
+    digital ? `Camera: ${digital.camera}` : (camera ? `Camera: ${camera}` : null),
+    digital && digital.lens ? `Lens: ${digital.lens}` : null,
     film ? `Film: ${film}` : null,
     (city || state) ? `Location: ${[city, state].filter(Boolean).join(', ')}` : null,
     tags.length ? `Existing tags: ${tags.join(', ')}` : 'Existing tags: (none)',
@@ -2322,19 +2389,17 @@ async function rankTagsWithAI({ imageBase64, title, camera, film, city, state, t
         { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: imageBase64 } },
         {
           type: 'text',
-          text: `This is a scanned black-and-white or color film photograph being tagged for posting to ` +
-            `Lomography, Flickr, and Instagram — communities of film photographers. ` +
+          text: `${photoKindIntro(digital)} ` +
             `${context}\n\n` +
             `1. Reorder "Existing tags" by how likely a real person would search for this photo using that ` +
             `term on those platforms — most valuable/most-searched first. Return every existing tag, just ` +
             `reordered (don't drop any). Return an empty list if there are no existing tags.\n` +
             `2. Separately, suggest ${suggestionCount} short tags (1-3 words each) ${suggestionPurpose}. ` +
-            `Do not suggest camera, lens, film, or generic tags like "photo" or "film photography" — those ` +
+            `Do not suggest camera, lens, film, or generic tags like "photo", "film photography" or ` +
+            `"digital photography" — those ` +
             `are added automatically elsewhere. If nothing meaningful applies, return an empty list.\n` +
-            `3. Suggest a short, evocative title for the photo in the style of a Flickr post title — 2-4 ` +
-            `words, concrete and specific to what's actually in the frame (e.g. "Steel Quills", "Empty ` +
-            `Schoolyard", "Deck Ironwork"). Never generic ("Untitled", "Street Scene", "Nice Photo"). If a ` +
-            `title is already given above, you may suggest a replacement, but keep it if it's already good.`,
+            `3. ${titleBrief(!!title)} If there are no existing tags, use the tags you suggested in step 2 ` +
+            `as the tag source.`,
         },
       ],
     }],
@@ -2346,36 +2411,37 @@ async function rankTagsWithAI({ imageBase64, title, camera, film, city, state, t
   return {
     rankedTags: Array.isArray(parsed.rankedTags) ? parsed.rankedTags : tags,
     suggestedTags: Array.isArray(parsed.suggestedTags) ? parsed.suggestedTags : [],
-    suggestedTitle: typeof parsed.suggestedTitle === 'string' ? parsed.suggestedTitle : '',
+    suggestedTitles: cleanTitles(parsed.suggestedTitles, [title]),
   };
 }
 
 const TITLE_ONLY_SCHEMA = {
   type: 'object',
-  properties: { suggestedTitle: { type: 'string' } },
-  required: ['suggestedTitle'],
+  properties: { suggestedTitles: { type: 'array', items: { type: 'string' } } },
+  required: ['suggestedTitles'],
   additionalProperties: false,
 };
 
 // Lighter sibling of rankTagsWithAI for the title-only "regenerate" button —
 // same image + context, but skips the tag-ranking/suggestion work entirely
 // (smaller schema, smaller max_tokens) since the caller only wants a new
-// title idea, not a full re-generation of captions/tags. previousSuggestion
-// is passed so back-to-back regenerates don't just return the same idea.
-async function suggestTitleOnly({ imageBase64, title, camera, film, city, state, tags, previousSuggestion }) {
+// batch of title ideas, not a full re-generation of captions/tags.
+// previousSuggestions is passed so back-to-back regenerates don't just
+// return the same ideas.
+async function suggestTitleOnly({ imageBase64, title, camera, film, city, state, tags, digital, previousSuggestions = [] }) {
   if (!anthropic) throw new Error('ANTHROPIC_API_KEY not configured');
   const context = [
     title ? `Current title: ${title}` : null,
-    camera ? `Camera: ${camera}` : null,
+    digital ? `Camera: ${digital.camera}` : (camera ? `Camera: ${camera}` : null),
     film ? `Film: ${film}` : null,
     (city || state) ? `Location: ${[city, state].filter(Boolean).join(', ')}` : null,
     tags.length ? `Tags: ${tags.join(', ')}` : null,
-    previousSuggestion ? `Previous suggestion (give a different idea, don't repeat this): ${previousSuggestion}` : null,
+    previousSuggestions.length ? `Previous suggestions (give different ideas, don't repeat these): ${previousSuggestions.join('; ')}` : null,
   ].filter(Boolean).join('\n');
 
   const response = await anthropic.messages.create({
     model: 'claude-sonnet-5',
-    max_tokens: 256,
+    max_tokens: 512,
     output_config: {
       effort: 'low',
       format: { type: 'json_schema', schema: TITLE_ONLY_SCHEMA },
@@ -2386,11 +2452,7 @@ async function suggestTitleOnly({ imageBase64, title, camera, film, city, state,
         { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: imageBase64 } },
         {
           type: 'text',
-          text: `This is a scanned black-and-white or color film photograph being tagged for posting to ` +
-            `Lomography, Flickr, and Instagram.\n${context}\n\n` +
-            `Suggest a short, evocative title for the photo in the style of a Flickr post title — 2-4 ` +
-            `words, concrete and specific to what's actually in the frame (e.g. "Steel Quills", "Empty ` +
-            `Schoolyard", "Deck Ironwork"). Never generic ("Untitled", "Street Scene", "Nice Photo").`,
+          text: `${photoKindIntro(digital)}\n${context}\n\n` + titleBrief(!!title),
         },
       ],
     }],
@@ -2399,7 +2461,7 @@ async function suggestTitleOnly({ imageBase64, title, camera, film, city, state,
   if (response.stop_reason === 'refusal') throw new Error('Model declined the request');
   const textBlock = response.content.find(b => b.type === 'text');
   const parsed = JSON.parse(textBlock.text);
-  return typeof parsed.suggestedTitle === 'string' ? parsed.suggestedTitle : '';
+  return cleanTitles(parsed.suggestedTitles, [title, ...previousSuggestions]);
 }
 
 // Cached result only — used to populate the panel on open without regenerating.
@@ -2419,7 +2481,10 @@ app.post('/api/generate-tags/:assetId', requireAuth, async (req, res) => {
   try {
     const assetId = req.params.assetId;
     const title = req.body.title || '';
-    const tags = Array.isArray(req.body.tags) ? req.body.tags : [];
+    // Workflow keywords (m11-immich, flickr-pool …) aren't about the photo;
+    // dropping them first also lets a photo tagged only with them count as
+    // untagged, so the model's suggestions become its tags.
+    const tags = (Array.isArray(req.body.tags) ? req.body.tags : []).filter(t => !tagFormat.isWorkflowTag(t));
 
     const assetRes = await fetch(`${IMMICH_URL}/assets/${assetId}`, {
       headers: { 'x-api-key': IMMICH_KEY }
@@ -2433,16 +2498,25 @@ app.post('/api/generate-tags/:assetId', requireAuth, async (req, res) => {
     const imgRes = await fetch(`${IMMICH_URL}/assets/${assetId}/thumbnail?size=preview`, {
       headers: { 'x-api-key': IMMICH_KEY }
     });
-    const imageBase64 = Buffer.from(await imgRes.arrayBuffer()).toString('base64');
+    const imageBuffer = Buffer.from(await imgRes.arrayBuffer());
+    const imageBase64 = imageBuffer.toString('base64');
+    // null for film scans (description carries the gear); for digital frames
+    // the camera/lens come from EXIF and the B&W check from the pixels.
+    const digital = tagFormat.digitalInfo({
+      description,
+      model: asset.exifInfo?.model,
+      lens: asset.exifInfo?.lensModel,
+      monochrome: description.includes('|') ? false : await isMonochrome(imageBuffer),
+    });
 
     let rankedTags = tags;
     let suggestedTags = [];
-    let suggestedTitle = '';
+    let suggestedTitles = [];
     try {
-      const ai = await rankTagsWithAI({ imageBase64, title, camera, film, city, state, tags });
+      const ai = await rankTagsWithAI({ imageBase64, title, camera, film, city, state, tags, digital });
       rankedTags = ai.rankedTags;
       suggestedTags = ai.suggestedTags;
-      suggestedTitle = ai.suggestedTitle;
+      suggestedTitles = ai.suggestedTitles;
     } catch (e) {
       console.error('generate-tags AI ranking failed, falling back to entry order:', e.message);
     }
@@ -2464,9 +2538,13 @@ app.post('/api/generate-tags/:assetId', requireAuth, async (req, res) => {
       city,
       state,
       knownCities: filterCache.cities || [],
+      digital,
     });
 
-    const generatedTags = { ...outputs, suggestedTags, suggestedTitle, generatedAt: new Date().toISOString() };
+    // rankedTags (and digital, for the camera/lens/B&W) are cached so a later
+    // title edit can rebuild the captions without another model call (see
+    // the /retitle endpoint below).
+    const generatedTags = { ...outputs, rankedTags, suggestedTags, suggestedTitles, digital, generatedAt: new Date().toISOString() };
     const store = loadGeneratedTagsStore();
     store[assetId] = generatedTags;
     saveGeneratedTagsStore(store);
@@ -2478,7 +2556,7 @@ app.post('/api/generate-tags/:assetId', requireAuth, async (req, res) => {
   }
 });
 
-// Regenerates only suggestedTitle, leaving the cached captions/tags
+// Regenerates only suggestedTitles, leaving the cached captions/tags
 // untouched — the dedicated "↻" button next to Suggested Title, so a fresh
 // title idea doesn't cost a full re-generation. Pulls tags LIVE at call
 // time (Immich for Library, prints.json for Prints) instead of trusting
@@ -2511,24 +2589,82 @@ app.post('/api/generate-tags/:assetId/title', requireAuth, async (req, res) => {
     } else {
       tags = Array.isArray(asset.tags) ? asset.tags.map(t => t.name).filter(Boolean) : [];
     }
+    tags = tags.filter(t => !tagFormat.isWorkflowTag(t));
+    const digital = existing.digital !== undefined ? existing.digital
+      : tagFormat.digitalInfo({ description, model: asset.exifInfo?.model, lens: asset.exifInfo?.lensModel });
 
     const imgRes = await fetch(`${IMMICH_URL}/assets/${assetId}/thumbnail?size=preview`, {
       headers: { 'x-api-key': IMMICH_KEY }
     });
     const imageBase64 = Buffer.from(await imgRes.arrayBuffer()).toString('base64');
 
-    const suggestedTitle = await suggestTitleOnly({
-      imageBase64, title, camera, film, city, state, tags,
-      previousSuggestion: existing.suggestedTitle || '',
+    // Untagged photo: fall back to the tags the full generation suggested,
+    // same as the full call's "no existing tags" path.
+    if (!tags.length && Array.isArray(existing.suggestedTags)) tags = existing.suggestedTags;
+
+    const previous = Array.isArray(existing.suggestedTitles) ? existing.suggestedTitles
+      : (existing.suggestedTitle ? [existing.suggestedTitle] : []);
+    const suggestedTitles = await suggestTitleOnly({
+      imageBase64, title, camera, film, city, state, tags, digital,
+      previousSuggestions: previous,
     });
 
-    const generatedTags = { ...existing, suggestedTitle, generatedAt: new Date().toISOString() };
+    const { suggestedTitle: _legacy, ...rest } = existing;
+    const generatedTags = { ...rest, suggestedTitles, generatedAt: new Date().toISOString() };
     store[assetId] = generatedTags;
     saveGeneratedTagsStore(store);
 
     res.json(generatedTags);
   } catch (e) {
     console.error('generate-tags title-only failed:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Rebuilds only the title-dependent captions (Standard Caption, Instagram)
+// after a Library title edit — pure templating via lib/tag-format.js, no
+// model call. Lomography/Flickr don't use the title, so they're left as
+// cached. Uses the cached rankedTags; entries generated before v1.5.122
+// don't have them, so fall back to the asset's live Immich tags, then the
+// suggested tags (the same order the full generation uses).
+app.post('/api/generate-tags/:assetId/retitle', requireAuth, async (req, res) => {
+  try {
+    const assetId = req.params.assetId;
+    const title = typeof req.body.title === 'string' ? req.body.title.trim() : '';
+
+    const store = loadGeneratedTagsStore();
+    const existing = store[assetId];
+    if (!existing) return res.status(404).json({ error: 'Not generated yet' });
+
+    const assetRes = await fetch(`${IMMICH_URL}/assets/${assetId}`, {
+      headers: { 'x-api-key': IMMICH_KEY }
+    });
+    const asset = await assetRes.json();
+    const description = asset.exifInfo?.description || '';
+
+    const usable = list => (Array.isArray(list) ? list : []).filter(t => t && !tagFormat.isWorkflowTag(t));
+    let ranked = usable(existing.rankedTags);
+    if (!ranked.length) ranked = usable(Array.isArray(asset.tags) ? asset.tags.map(t => t.name) : []);
+    if (!ranked.length) ranked = usable(existing.suggestedTags);
+    // Entries cached before v1.5.123 have no `digital`; rebuild it from EXIF
+    // (B&W unknown until the next full Regenerate).
+    const digital = existing.digital !== undefined ? existing.digital
+      : tagFormat.digitalInfo({ description, model: asset.exifInfo?.model, lens: asset.exifInfo?.lensModel });
+
+    const filterCache = loadFilterCache() || { cities: [] };
+    const generatedTags = {
+      ...existing,
+      standardCaption: tagFormat.standardCaption({ title, description, digital }),
+      instagram: tagFormat.instagramPost({ title, description, rankedTags: ranked, knownCities: filterCache.cities || [], digital }),
+      // A suggestion that's now the actual title isn't a suggestion any more.
+      suggestedTitles: cleanTitles(existing.suggestedTitles || (existing.suggestedTitle ? [existing.suggestedTitle] : []), [title]),
+    };
+    delete generatedTags.suggestedTitle;
+    store[assetId] = generatedTags;
+    saveGeneratedTagsStore(store);
+    res.json(generatedTags);
+  } catch (e) {
+    console.error('generate-tags retitle failed:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
