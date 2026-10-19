@@ -1,5 +1,44 @@
 # Changelog
 
+## v1.5.132 (2026-10-19)
+
+### Archived photos no longer come back on refresh
+
+- **Archive and Restore now clear the Analog feed cache.** The "All" view serves from a 5-minute cache of the whole library, and Archive and Restore never cleared it. A refresh within 5 minutes therefore showed archived photos again, even though Immich had archived them. Both endpoints now clear the cache, as title and tag edits already did. Server-side change: recreate the container.
+
+## v1.5.131 (2026-10-19)
+
+### Search behaves the same in Analog and the album views (audit items 7–9)
+
+- **Switching Text ↔ Smart keeps your filters (Analog).** It used to clear every chip and the person filter; now it keeps them and re-runs the current search in the new mode (the text and smart searches already send chips and person). Album views already worked this way.
+- **The ✕ in Analog's search box** now appears whenever text, a filter or a person is set, since it clears all three; before, it only appeared once text was typed. Same as the album views.
+- **One Text / ✦ Smart setting** for Analog and every album view (`state.searchMode`, replacing the album's own `state.immichSearchMode`), remembered across reloads (`localStorage` `darkroom-search-mode`). Both panels' buttons are kept in step by `syncSearchModeButtons()`.
+- Client-only. Client asset bump: `app.js?v=301`, SW `darkroom-v171`. package.json 1.5.130 → 1.5.131.
+
+## v1.5.130 (2026-10-19)
+
+### Album views: six differences from Analog fixed (audit)
+
+Jacob asked for an audit after the Search Mode layout fix. Markup and panel behaviour already matched; these did not:
+
+1. **Selection mark:** selected photos in album views showed an empty grey circle (class `active`, which has no style, and no ✓). Now `checked` + ✓, the green mark Analog uses.
+2. **Grid width:** the album grid sat inside an extra 1rem padding, so thumbnails were inset and slightly smaller. Now edge to edge like `#recent-grid`.
+3. **Panel Clear:** cleared only the filters; now also clears the search text, as Analog's Clear does.
+4. **Search timing:** album search ran 400 ms after typing from one character; now 600 ms and from two characters, as Analog's `handleRecentSearch`.
+5. **Active-filter line:** the person is listed first as "👤 Name", as in Analog.
+6. **Empty state:** "No matches / No photos in this album." uses Analog's small `.loading` line instead of a larger custom box.
+
+Items 7–9 (Text/Smart wiping Analog filters, the ✕ visibility, separate Text/Smart choices) followed in v1.5.131.
+
+Client-only. Client asset bump: `app.js?v=300`, SW `darkroom-v170`. package.json 1.5.129 → 1.5.130.
+
+## v1.5.129 (2026-10-18)
+
+### Fix: Search Mode in album panels laid out sideways
+
+- In the M11/Z8/album filter panel the Search Mode block was shown with `display: flex`, so the "Search Mode" label and the Text / ✦ Smart buttons sat on one line with narrow buttons. It is now `display: block`, matching Analog: label on its own line, two full-width buttons below (`updateImmichSearchUi` in `public/app.js`). Spotted by Jacob comparing the two panels.
+- Client-only. Client asset bump: `app.js?v=299`, SW `darkroom-v169`. package.json 1.5.128 → 1.5.129.
+
 ## v1.5.128 (2026-10-18)
 
 ### People row in the photo detail column

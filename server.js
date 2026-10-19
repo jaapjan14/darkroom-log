@@ -2245,6 +2245,9 @@ app.put('/api/immich/assets/archive', requireAuth, async (req, res) => {
       body: JSON.stringify({ ids, visibility: 'archive' })
     });
     if (!r.ok) return res.status(r.status).json({ error: 'Immich archive failed' });
+    // The Analog "All" view reads a 5-min full-sweep cache; without this a
+    // refresh inside that window brought archived photos straight back.
+    bustUploadSweepCache();
     res.status(204).end();
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -2260,6 +2263,7 @@ app.put('/api/immich/assets/restore', requireAuth, async (req, res) => {
       body: JSON.stringify({ ids, visibility: 'timeline' })
     });
     if (!r.ok) return res.status(r.status).json({ error: 'Immich restore failed' });
+    bustUploadSweepCache();
     res.status(204).end();
   } catch(e) { res.status(500).json({ error: e.message }); }
 });

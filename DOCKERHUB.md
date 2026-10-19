@@ -19,6 +19,15 @@ header, optional slideshow, and pinch-zoom on every photo. No login required for
 
 **Immich compatibility:** actively run in production against **Immich v3.3.1** (upgraded 2026-10-12, audited clean against this image). Talks to Immich entirely through its REST API (asset/search/album/tag endpoints), so it isn't tied to Immich's internal ML/vector-search backend — the v3 migration (pgvecto.rs → VectorChord) needed no changes on Darkroom's side. Not tested against Immich versions older than v3. Note: Immich v3.2.0 formally deprecated the "flat" search endpoints this app's Immich integration is built on, with removal planned for a future Immich v4 — no impact today, but a v4 upgrade will require a search-layer rewrite here.
 
+## What's new in v1.5.129–132
+
+Search behaves the same everywhere, and archived photos stay archived.
+
+- **Fixed: archived photos came back on refresh.** The main library's "All" view keeps a 5-minute copy of the library list, and Archive and Restore weren't clearing it. Photos were archived in Immich straight away, but a quick refresh showed them again until the copy expired. Archive and Restore now clear it.
+- **One search mode, remembered.** The Text / ✦ Smart choice is shared between the main library and the album views, and kept after a reload.
+- **Switching search mode keeps your filters.** Changing between Text and Smart in the main library keeps your Camera, Lens, place and People filters and re-runs the search, as album views already did. The ✕ in the search box appears whenever a filter is set, not only after typing, since it clears everything.
+- **Album views tidied to match the main library:** the Search Mode layout in the panel, the selection tick, grid width, the panel's Clear button, search timing, the active-filter label and the empty-results message.
+
 ## What's new in v1.5.122–128
 
 Digital photos get first-class treatment, search reaches inside albums, and Archive works again on Immich v3.

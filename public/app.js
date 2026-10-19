@@ -15,7 +15,6 @@ let state = {
   activeTag: null,
   currentTab: 'prints',
   pinnedAlbumTab: null,      // 'm11' / 'z8' while one of the header album tabs is open
-  immichSearchMode: 'smart', // album search: 'smart' (CLIP) or 'text' (titles, tags, places, gear)
   immichSearchIds: null,     // ids matching the album search, in result order; null = no server search active
   immichSearchGen: 0,
   recentPage: 1,
@@ -41,7 +40,9 @@ let state = {
   previousView: 'recent-view',
   recentActivePerson: null,
   recentActiveChips: new Set(),
-  searchMode: 'smart',
+  // Text / ✦ Smart — one setting shared by Analog and the album views, and
+  // remembered across reloads.
+  searchMode: (() => { try { return localStorage.getItem('darkroom-search-mode') === 'text' ? 'text' : 'smart'; } catch (e) { return 'smart'; } })(),
   recentSmartResults: [],
   searchPage: 1,
   searchQuery: '',
@@ -460,18 +461,31 @@ async function loadRecentMetaBatch(ids) {
 
 let smartSearchTimer = null;
 
+// Saves the shared Text/Smart choice and lights the matching buttons in both
+// the Analog panel and the album panel.
+function storeSearchMode(mode) {
+  state.searchMode = mode === 'text' ? 'text' : 'smart';
+  try { localStorage.setItem('darkroom-search-mode', state.searchMode); } catch (e) {}
+  syncSearchModeButtons();
+}
+function syncSearchModeButtons() {
+  for (const prefix of ['', 'immich-']) {
+    document.getElementById(prefix + 'search-mode-text')?.classList.toggle('active', state.searchMode === 'text');
+    document.getElementById(prefix + 'search-mode-smart')?.classList.toggle('active', state.searchMode === 'smart');
+  }
+}
+
+// Switching Text/Smart keeps the active filters and person (it used to wipe
+// them) and just re-runs the current search in the new mode — the text and
+// smart searches both already send the chips and person along.
 function setSearchMode(mode) {
-  state.searchMode = mode;
-  document.getElementById('search-mode-text').classList.toggle('active', mode === 'text');
-  document.getElementById('search-mode-smart').classList.toggle('active', mode === 'smart');
-  state.recentActiveChips = new Set();
-  state.recentActivePerson = null;
-  state.recentSmartResults = [];
-  updateRecentFilterChips();
-  updateActiveChipLabel();
-  const q = document.getElementById('recent-search').value;
-  if (q) handleRecentSearch(q);
-  else applyRecentFilters();
+  storeSearchMode(mode);
+  const q = (document.getElementById('recent-search').value || '').trim();
+  if (q) {
+    state.recentSmartResults = [];
+    if (state.searchMode === 'smart') runSmartSearch(q);
+    else runTextSearch(q);
+  }
 }
 
 function handleRecentSearch(q) {
@@ -1016,6 +1030,16 @@ function updateActiveChipLabel() {
   }
   parts.push(...[...state.recentActiveChips]);
   label.textContent = parts.join(' · ');
+  updateRecentClearButton();
+}
+
+// The ✕ in Analog's search box clears text, chips and person, so show it
+// whenever any of them is set (it used to appear only once text was typed).
+function updateRecentClearButton() {
+  const btn = document.getElementById('btn-clear-recent-search');
+  if (!btn) return;
+  const typed = (document.getElementById('recent-search')?.value || '').trim();
+  btn.style.display = typed || state.recentActiveChips.size || state.recentActivePerson ? 'block' : 'none';
 }
 
 function clearRecentChip() {
@@ -3796,6 +3820,8 @@ function addSelectionToAlbum() {
 
 document.getElementById('login-password').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
 
+syncSearchModeButtons();
+
 (async () => {
   const r = await fetch('/api/auth/check');
   const d = await r.json();
@@ -5125,7 +5151,7 @@ function updateImmichActiveLabel() {
       if (hit) { person = hit.name || 'Unnamed'; break; }
     }
   }
-  const parts = [f.cameras, f.lenses, f.states, f.cities, person].filter(Boolean);
+  const parts = [person ? '👤 ' + person : '', f.cameras, f.lenses, f.states, f.cities].filter(Boolean);
   const label = document.getElementById('immich-active-chip-label');
   if (label) label.textContent = parts.join(' · ');
   const clearBtn = document.getElementById('btn-clear-immich-search');
@@ -5149,11 +5175,11 @@ function resetImmichAlbumSearch() {
 function updateImmichSearchUi() {
   const inAlbum = !!state.currentImmichAlbumId && !state.viewingArchived && !state.viewingTrash;
   const modeEl = document.getElementById('immich-search-mode');
-  if (modeEl) modeEl.style.display = inAlbum ? 'flex' : 'none';
+  // block, not flex: label above the two buttons, as in Analog's panel
+  if (modeEl) modeEl.style.display = inAlbum ? 'block' : 'none';
   const searchEl = document.getElementById('immich-album-search');
   if (searchEl) searchEl.placeholder = inAlbum ? 'Search...' : 'Search filename...';
-  document.getElementById('immich-search-mode-text')?.classList.toggle('active', state.immichSearchMode === 'text');
-  document.getElementById('immich-search-mode-smart')?.classList.toggle('active', state.immichSearchMode === 'smart');
+  syncSearchModeButtons();
 }
 
 let immichSearchTimer = null;
@@ -5171,11 +5197,12 @@ function onImmichAlbumSearchInput(value) {
     applyImmichFiltersAndSort();
     return;
   }
-  immichSearchTimer = setTimeout(runImmichAlbumSearch, 400);
+  // Same as Analog (handleRecentSearch): wait 600 ms, and only from 2 characters.
+  if (value.trim().length > 1) immichSearchTimer = setTimeout(runImmichAlbumSearch, 600);
 }
 
 function setImmichSearchMode(mode) {
-  state.immichSearchMode = mode;
+  storeSearchMode(mode);
   updateImmichSearchUi();
   if (state.immichSearchQuery.trim()) runImmichAlbumSearch();
 }
@@ -5185,7 +5212,7 @@ async function runImmichAlbumSearch() {
   const albumId = state.currentImmichAlbumId;
   if (!q || !albumId) return;
   const gen = ++state.immichSearchGen;
-  const url = state.immichSearchMode === 'smart' ? '/api/immich/smart-search' : '/api/immich/text-search';
+  const url = state.searchMode === 'smart' ? '/api/immich/smart-search' : '/api/immich/text-search';
   try {
     const r = await fetch(url, {
       method: 'POST',
@@ -5199,7 +5226,7 @@ async function runImmichAlbumSearch() {
     if (gen !== state.immichSearchGen) return;
     state.immichSearchIds = [];
   }
-  if (state.immichSearchMode === 'text') {
+  if (state.searchMode === 'text') {
     // Immich only matches lens/camera/place fields on the exact, case-sensitive
     // full value ("Thypoch Simera 50mm f/1.4 Asph."), so also match any part of
     // them here, on the album's already-loaded assets: "thypoch", "50mm", "fle".
@@ -5249,7 +5276,7 @@ function renderImmichGallery(assets) {
   if (!assets.length) {
     const filtered = state.immichSearchQuery || Object.values(state.immichFilters || {}).some(Boolean);
     const msg = filtered ? 'No matches in this album.' : 'No photos in this album.';
-    gallery.innerHTML = `<div style="text-align:center;padding:3rem;color:var(--text-dim)">${msg}</div>`;
+    gallery.innerHTML = `<div class="loading">${msg}</div>`;
     return;
   }
   const action = state.immichSelectMode ? 'toggleImmichAsset' : 'openImmichPhoto';
@@ -5257,7 +5284,7 @@ function renderImmichGallery(assets) {
     <div class="gallery-item ${state.immichSelectMode ? 'selectable' : ''} ${state.immichSelected.has(a.id) ? 'selected' : ''}"
          data-action="${action}" data-id="${a.id}" data-idx="${idx}">
       <img src="${thumbSrc(a.id, {ver:a.updatedAt})}" loading="lazy" style="width:100%;height:100%;object-fit:cover">
-      ${state.immichSelectMode ? `<div class="select-check${state.immichSelected.has(a.id) ? ' active' : ''}"></div>` : ''}
+      ${state.immichSelectMode ? `<div class="select-check${state.immichSelected.has(a.id) ? ' checked' : ''}">✓</div>` : ''}
     </div>
   `).join('') + '</div>';
 }
@@ -5464,7 +5491,7 @@ function wireListeners() {
   // Library
   w('recent-search', 'input', (e) => {
     handleRecentSearch(e.target.value);
-    document.getElementById('btn-clear-recent-search').style.display = e.target.value ? 'block' : 'none';
+    updateRecentClearButton();
   });
   // Tap into the search bar to reveal Search Mode/Select/Filters — stays
   // open while typing (closes via its backdrop or the Done button instead).
@@ -5505,7 +5532,7 @@ function wireListeners() {
   w('immich-album-search', 'focus', openImmichFilterPopup);
   w('immich-filter-backdrop', 'click', closeImmichFilterPopup);
   w('immich-filters-done-btn', 'click', closeImmichFilterPopup);
-  w('immich-btn-clear-filters', 'click', () => { clearImmichFilters(); closeImmichFilterPopup(); });
+  w('immich-btn-clear-filters', 'click', () => { clearImmichSearchAndFilters(); renderImmichFilterOptions(); closeImmichFilterPopup(); });
   w('btn-clear-immich-search', 'click', () => clearImmichSearchAndFilters());
   w('immich-people-filter-input', 'input', () => filterImmichPeopleChips());
   w('immich-filter-camera', 'change', (e) => setImmichFilter('cameras', e.target.value));
