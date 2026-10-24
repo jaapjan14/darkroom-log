@@ -17,7 +17,27 @@ header, optional slideshow, and pinch-zoom on every photo. No login required for
 
 **Source:** https://github.com/jaapjan14/darkroom-log
 
-**Immich compatibility:** actively run in production against **Immich v3.3.1** (upgraded 2026-10-12, audited clean against this image). Talks to Immich entirely through its REST API (asset/search/album/tag endpoints), so it isn't tied to Immich's internal ML/vector-search backend — the v3 migration (pgvecto.rs → VectorChord) needed no changes on Darkroom's side. Not tested against Immich versions older than v3. Note: Immich v3.2.0 formally deprecated the "flat" search endpoints this app's Immich integration is built on, with removal planned for a future Immich v4 — no impact today, but a v4 upgrade will require a search-layer rewrite here.
+**Immich compatibility:** actively run in production against **Immich v3.3.4** (upgraded 2026-10-20, audited clean against this image). Talks to Immich entirely through its REST API (asset/search/album/tag endpoints), so it isn't tied to Immich's internal ML/vector-search backend — the v3 migration (pgvecto.rs → VectorChord) needed no changes on Darkroom's side. Not tested against Immich versions older than v3. Note: Immich v3.2.0 formally deprecated the "flat" search endpoints this app's Immich integration is built on, with removal planned for a future Immich v4 — no impact today, but a v4 upgrade will require a search-layer rewrite here.
+
+## What's new in v1.5.135–142
+
+Name the people in your photos without leaving Darkroom, and a few fixes.
+
+- **Name faces from a photo's details.** The People row shows a crop of every face Immich found. Click one to name it: existing people are suggested, any capitalisation reuses the same person, and a new name creates the person in Immich. For a face Immich grouped but never named, one save can name every photo of that face, and if the name already exists the group is merged into that person. **Hide** hides a stranger's group in Immich. Everything goes through the Immich API and can be undone in Immich.
+- **Add a face Immich missed.** The "Add face" tile at the end of the People row lets you drag a box around a face, with a mouse or a finger, and name it. Immich stores it as a manually added face.
+- **"Not yet named" and "Hide named"** in the People filter. "Not yet named" lists only photos with faces nobody has named yet, including faces Immich never grouped, which don't appear on Immich's own People page. "Hide named" leaves out every photo where someone is named, in any search or filter. For example, a ✦ Smart search for "person" with Hide named on finds people Immich didn't detect. Both need read-only database access (see below). Naming and adding faces work without it.
+- **Fixed: a photo's Albums row could be empty** after logging in, so a photo already in an album looked as if it was in none. The row now waits for the album list and says "Couldn't check albums" if that fails.
+- **Fixed:** "Add to album" sometimes showed "No albums yet"; the grid jumped to the top after naming someone while Hide named was on; and the People row had no divider line above Tags.
+
+**Database access for "Not yet named" and "Hide named":** these read Immich's database through the optional least-privilege role described in the changelog (`.immich-db-creds.json`). That role needs read-only access to a few more columns:
+
+```sql
+GRANT SELECT ("id","ownerId","deletedAt","visibility","localDateTime") ON asset TO darkroom_svc;
+GRANT SELECT ("assetId","personGroupId","deletedAt","isVisible") ON asset_face TO darkroom_svc;
+GRANT SELECT ("personGroupId","ownerId","name","isHidden") ON person TO darkroom_svc;
+```
+
+If your Immich API key is scoped to specific permissions, face naming and Add face also need `face.read`, `face.create`, `face.update`, `person.read`, `person.create`, `person.update`, `person.merge`, `person.statistics` and `person.delete`. The last one only removes a just-created person left with no faces after Immich refuses a face.
 
 ## What's new in v1.5.129–134
 

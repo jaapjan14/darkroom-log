@@ -1,5 +1,93 @@
 # Changelog
 
+## v1.5.142 (2026-10-20)
+
+### Fix: no divider line under the People row
+
+- On a photo's page, every detail row has a line under it except People, so People and Tags ran together. The People row sits in its own wrapper (it refreshes as you name faces), so the "no line under the last row" rule treated it as the last row and removed its line. Now it gets the same line as the other rows.
+- Client-only: just reload.
+
+## v1.5.141 (2026-10-19)
+
+### Fix: album chips missing on a photo's page
+
+- A photo's (and a print's) **Albums** row could be missing even though the photo was in an album. For example, "Zipper Lights" didn't show Leica Forum Uploads, although it had been in that album since at least June, so it looked like it had never been posted.
+- **Cause:** Darkroom kept its album list as an empty list until a one-time load at page start. That load only ran when you were already logged in, never after logging in from the password screen, and a failed load was also left empty. The pages only re-loaded when the list was missing altogether, not when it was empty, so "not loaded" looked like "in no albums".
+- **Fix:** Darkroom now tracks whether the album list has really been loaded. The photo and print pages load it before deciding which chips to show, and logging in loads it too. If it can't be loaded, the row says "Couldn't check albums" instead of disappearing.
+- (Version 1.5.140 was a held, unreleased change, so the numbering skips to 1.5.141.)
+- Client-only: just reload.
+
+## v1.5.139 (2026-10-19)
+
+### Fixes: grid jumped to the top after naming; "Add to album" sometimes empty
+
+- **Hide named: the grid no longer jumps to the top after you name someone.** Going back to the grid forgot which photos were named and briefly swapped the whole grid for a "Leaving out photos…" message while it rechecked. The grid collapsed and the scroll position was lost. Now the grid stays as it was while the check runs in the background, and only the newly named photo drops out.
+- **"Add to album" (Darkroom tab) no longer shows "No albums yet" when you have albums.** The album list started out empty and was only fetched once, when the page loaded. That fetch never ran after a fresh login, and could still be in flight on a quick tap. An empty list then looked like "no albums" until a page refresh. The picker now fetches the list every time it opens, showing the last known list meanwhile, and says so if loading fails.
+- Client-only: just reload.
+
+## v1.5.138 (2026-10-19)
+
+### "Hide named" in the People panel (Analog)
+
+- **Hide named** sits next to "Not yet named". It leaves out every photo where someone is already named, in whatever the grid shows: the library, a Text or ✦ Smart search, the Camera/Lens/State/City filters, any sort. For example, search ✦ Smart for "human" and turn it on to find people Immich never picked up as faces, then add them with Add face.
+- Photos are checked in batches as they load, including Load More. Until a batch is checked it's held back, so named photos never flash up.
+- When you name someone and go back to the grid, that photo drops out.
+- Picking a person turns Hide named off, and turning it on clears a picked person, because a picked person is named by definition. ✕ and Clear turn it off.
+- **Server:** new endpoint `POST /api/immich/named-check`. It's a read-only query through `darkroom_svc` and needs no new database access beyond the 1.5.135 grants.
+- Restart the container (server change).
+
+## v1.5.137 (2026-10-19)
+
+### Add a face Immich missed
+
+- **"Add face" tile** at the end of a photo's People row, the same idea as Immich's own "+" tool:
+  - Tap it and a drawing layer covers the photo.
+  - Drag a box around the face, with a mouse or a finger.
+  - Type the name: an existing person (any case) or a new one.
+  - Save adds the face to Immich, marked as added manually.
+  - Redraw starts the box again; Esc or Cancel stops, without leaving the photo. A tap that isn't a drag is ignored.
+- The row now appears on every photo, even when Immich found no faces, so a face can always be added.
+- The box goes to Immich in the shown image's pixel space, which is what Immich's own tool sends. A small phone thumbnail is scaled up so the box stays precise. Boxes that don't fit the image are refused before anything reaches Immich.
+- **Safety:** if Immich refuses a face after Darkroom has just created a new person for it, that person (still with no faces) is deleted again, so no empty people are left behind. Naming an existing face gets the same safeguard.
+- **Server:** new `POST /api/immich/assets/:assetId/faces` endpoint.
+- Restart the container (server change).
+
+## v1.5.136 (2026-10-19)
+
+### Fix: naming a face failed with "Not found or no person.update access"
+
+- Immich's reassign call (`PUT /faces/{id}`) takes the **person** id in the path and the **face** id in the body. 1.5.135 sent them the other way round, so Immich refused every assignment. It refused before changing anything, so no faces or people were affected. Naming a whole unnamed group was unaffected, because it uses a different call.
+- Merging an unnamed group into an existing person now uses Immich's current `POST /people/merge`. The old per-person merge route has been deprecated since Immich v3.2.1.
+- Restart the container (server change).
+
+## v1.5.135 (2026-10-19)
+
+### Name people in Darkroom: "Not yet named" view and face naming
+
+- **"Not yet named" in the People panel (Analog).** Shows only photos with faces where nobody is named. That includes faces Immich found but never grouped into a person, which don't appear on Immich's own People page. Strangers you've hidden in Immich are left out. The text search and the Camera, Lens, State and City filters narrow the list, and the usual sort applies. ✕ or Clear turns it off; picking a person also turns it off.
+- **Every face in the photo detail.** The People row now shows a crop of each face Immich found. Named faces show the name; unnamed ones show "+ Name". This works in Analog, Albums and the M11/Z8 tabs.
+- **Naming a face:**
+  - Click the face and type a name. Existing people are suggested, and typing an existing name in any case reuses that person.
+  - A new name creates the person in Immich.
+  - For a face in an unnamed group, "Name all N photos of this face" (on by default) names the whole group. If the name already exists, the group is merged into that person.
+  - **Hide** hides an unnamed group in Immich, for strangers.
+  - Clicking a named face lets you change who it is.
+- When you go back to the grid, photos where someone is now named drop out of "Not yet named".
+- Naming uses the Immich API only. It never deletes faces or photos, and everything can be undone in Immich (rename, reassign, unhide).
+- **Server:** new endpoints:
+  - `GET /api/immich/unnamed-faces`
+  - `GET /api/immich/faces/:assetId`
+  - `POST /api/immich/faces/:faceId/name`
+  - `POST /api/immich/people/:id/hide`
+- **Database access:** the list reads Immich's database through the existing least-privilege `darkroom_svc` role. That role needs read-only access to a few more columns:
+  ```sql
+  GRANT SELECT ("id","ownerId","deletedAt","visibility","localDateTime") ON asset TO darkroom_svc;
+  GRANT SELECT ("assetId","personGroupId","deletedAt","isVisible") ON asset_face TO darkroom_svc;
+  GRANT SELECT ("personGroupId","ownerId","name","isHidden") ON person TO darkroom_svc;
+  ```
+  Without these grants (or without `.immich-db-creds.json`), "Not yet named" shows a message; naming faces still works.
+- Restart the container (server change).
+
 ## v1.5.134 (2026-10-19)
 
 ### Clear also empties the People name filter (Analog)

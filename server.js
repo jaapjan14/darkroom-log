@@ -857,6 +857,235 @@ app.get('/api/immich/person-thumb/:id', requireAuth, async (req, res) => {
   }
 });
 
+// ---- Naming faces from Darkroom (v1.5.135) ------------------------------
+// Immich finds faces and groups them into people, but only its own UI can
+// name them. These endpoints let the photo detail view do it in place, all
+// through the Immich API (people data only; never deletes faces or photos).
+
+async function immichJson(method, urlPath, body) {
+  const r = await fetch(`${IMMICH_URL}${urlPath}`, {
+    method,
+    headers: { 'x-api-key': IMMICH_KEY, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  const text = await r.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch (e) { data = text; }
+  if (!r.ok) {
+    const msg = (data && data.message) || `Immich ${method} ${urlPath} → ${r.status}`;
+    throw Object.assign(new Error(Array.isArray(msg) ? msg.join('; ') : msg), { status: r.status });
+  }
+  return data;
+}
+
+// Photos where Immich found faces but nobody is named yet: every face is
+// either not grouped into a person at all (these never show on Immich's
+// People page) or in an unnamed group, and strangers already hidden in Immich
+// are left out. Immich's API can't answer this, so it's one read-only query
+// on Immich's database through the least-privilege darkroom_svc role (needs
+// SELECT on the columns below; see CHANGELOG 1.5.135).
+let _ownerId = null;
+async function immichOwnerId() {
+  if (!_ownerId) _ownerId = (await immichJson('GET', '/users/me')).id;
+  return _ownerId;
+}
+const UNNAMED_FACES_SQL = `
+  SELECT a.id
+  FROM asset a
+  JOIN asset_face af ON af."assetId" = a.id AND af."deletedAt" IS NULL AND af."isVisible"
+  LEFT JOIN person p ON p."personGroupId" = af."personGroupId" AND p."ownerId" = a."ownerId"
+  WHERE a."ownerId" = $1 AND a."deletedAt" IS NULL AND a.visibility IN ('timeline', 'archive')
+  GROUP BY a.id, a."localDateTime"
+  HAVING NOT coalesce(bool_or(p.name <> '' AND NOT p."isHidden"), false)
+     AND bool_or(af."personGroupId" IS NULL OR (p.name = '' AND NOT p."isHidden"))
+  ORDER BY a."localDateTime" DESC`;
+
+app.get('/api/immich/unnamed-faces', requireAuth, async (req, res) => {
+  const pool = getImmichDbPool();
+  if (!pool) return res.status(503).json({ error: 'Immich database access is not set up (.immich-db-creds.json).' });
+  try {
+    const ownerId = await immichOwnerId();
+    const { rows } = await pool.query(UNNAMED_FACES_SQL, [ownerId]);
+    const ids = rows.map(r => r.id);
+    // Full asset records for the grid (exif folded in), 8 at a time.
+    const assets = new Array(ids.length);
+    let next = 0;
+    async function worker() {
+      while (next < ids.length) {
+        const i = next++;
+        try { assets[i] = await immichJson('GET', `/assets/${ids[i]}`); } catch (e) { assets[i] = null; }
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(8, ids.length) }, worker));
+    const list = assets.filter(Boolean).map(mapAssetWithMeta);
+    res.json({ assets: list, total: list.length });
+  } catch (e) {
+    const denied = /permission denied/i.test(e.message);
+    res.status(denied ? 503 : 500).json({ error: denied ? 'Darkroom\'s database role can\'t read faces yet (see CHANGELOG 1.5.135).' : e.message });
+  }
+});
+
+// Which of these photos already have a named person ("Hide named photos" in
+// the People panel filters any search with it). Same read-only darkroom_svc
+// access as the list above; hidden people don't count as named.
+const NAMED_CHECK_SQL = `
+  SELECT DISTINCT af."assetId" AS id
+  FROM asset_face af
+  JOIN person p ON p."personGroupId" = af."personGroupId" AND p."ownerId" = $1
+  WHERE af."assetId" = ANY($2::uuid[]) AND af."deletedAt" IS NULL AND af."isVisible"
+    AND p.name <> '' AND NOT p."isHidden"`;
+
+app.post('/api/immich/named-check', requireAuth, async (req, res) => {
+  const ids = Array.isArray((req.body || {}).ids) ? req.body.ids.filter(id => /^[0-9a-f-]{36}$/i.test(id)) : [];
+  if (!ids.length) return res.json({ named: [] });
+  if (ids.length > 2000) return res.status(400).json({ error: 'Too many ids (max 2000)' });
+  const pool = getImmichDbPool();
+  if (!pool) return res.status(503).json({ error: 'Immich database access is not set up (.immich-db-creds.json).' });
+  try {
+    const { rows } = await pool.query(NAMED_CHECK_SQL, [await immichOwnerId(), ids]);
+    res.json({ named: rows.map(r => r.id) });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Every face in one photo, with its box (for the crop) and person.
+app.get('/api/immich/faces/:assetId', requireAuth, async (req, res) => {
+  try {
+    const faces = await immichJson('GET', `/faces?id=${encodeURIComponent(req.params.assetId)}`);
+    const out = (faces || []).map(f => ({
+      id: f.id,
+      box: { x1: f.boundingBoxX1, y1: f.boundingBoxY1, x2: f.boundingBoxX2, y2: f.boundingBoxY2, w: f.imageWidth, h: f.imageHeight },
+      person: f.person ? { id: f.person.id, name: f.person.name || '', isHidden: !!f.person.isHidden } : null,
+    }));
+    // An unnamed group can be named in one go, so say how many photos it covers.
+    await Promise.all(out.filter(f => f.person && !f.person.name).map(async f => {
+      try { f.person.photoCount = (await immichJson('GET', `/people/${f.person.id}/statistics`)).assets; } catch (e) {}
+    }));
+    res.json({ faces: out });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
+// A person Darkroom created a moment ago but couldn't give a face to would sit
+// empty in Immich, so remove it — only if it really has no faces.
+async function deleteEmptyNewPerson(personId) {
+  try {
+    const stats = await immichJson('GET', `/people/${personId}/statistics`);
+    if (stats && stats.assets === 0) await immichJson('DELETE', `/people/${personId}`, {});
+  } catch (e) {
+    console.error('cleanup of empty new person failed:', personId, e.message);
+  }
+}
+
+// Name a face. Note Immich's PUT /faces/{id} takes the PERSON id in the path
+// and the face id in the body (1.5.135 had them swapped; Immich refused it).
+// Picks the least surprising Immich action:
+//   • personId given            → assign this face to that person
+//   • name matches a person     → assign to them (or, with wholeGroup, merge
+//                                 the face's unnamed group into them)
+//   • new name + wholeGroup     → name the face's unnamed group
+//   • new name otherwise        → create the person, assign this face
+app.post('/api/immich/faces/:faceId/name', requireAuth, async (req, res) => {
+  const faceId = req.params.faceId;
+  const { personId = null, wholeGroup = false, currentPersonId = null } = req.body || {};
+  const name = String((req.body || {}).name || '').trim();
+  try {
+    let result;
+    if (personId) {
+      await immichJson('PUT', `/faces/${personId}`, { id: faceId });
+      result = { action: 'assigned', personId };
+    } else {
+      if (!name) return res.status(400).json({ error: 'name required' });
+      const found = await immichJson('GET', `/people?withHidden=true&size=50&name=${encodeURIComponent(name)}`);
+      const match = (found.people || []).find(p => (p.name || '').toLowerCase() === name.toLowerCase());
+      if (match) {
+        if (wholeGroup && currentPersonId && currentPersonId !== match.id) {
+          // Ordered list, target first (POST /people/{id}/merge is deprecated since v3.2.1).
+          await immichJson('POST', '/people/merge', { ids: [match.id, currentPersonId] });
+          result = { action: 'merged', personId: match.id };
+        } else {
+          await immichJson('PUT', `/faces/${match.id}`, { id: faceId });
+          result = { action: 'assigned', personId: match.id };
+        }
+        if (match.isHidden) await immichJson('PUT', `/people/${match.id}`, { isHidden: false });
+      } else if (wholeGroup && currentPersonId) {
+        await immichJson('PUT', `/people/${currentPersonId}`, { name, isHidden: false });
+        result = { action: 'named-group', personId: currentPersonId };
+      } else {
+        const created = await immichJson('POST', '/people', { name });
+        try {
+          await immichJson('PUT', `/faces/${created.id}`, { id: faceId });
+        } catch (e) {
+          await deleteEmptyNewPerson(created.id);
+          throw e;
+        }
+        result = { action: 'created', personId: created.id };
+      }
+    }
+    refreshPeopleCache().catch(e => console.log('refresh-people after naming failed:', e.message));
+    res.json({ ok: true, ...result });
+  } catch (e) {
+    console.error('name face failed:', faceId, e.message);
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
+// Add a face Immich didn't detect: the user drags a box on the photo and
+// names it (Immich's own "+" face tool does the same call). Immich wants the
+// box in the pixel space of the image the user drew on (imageWidth ×
+// imageHeight), as integers, and an existing person — so the name resolves
+// to an existing person first (any case), else a new person is created.
+app.post('/api/immich/assets/:assetId/faces', requireAuth, async (req, res) => {
+  const assetId = req.params.assetId;
+  const { personId = null, box = {} } = req.body || {};
+  const name = String((req.body || {}).name || '').trim();
+  const nums = ['x', 'y', 'width', 'height', 'imageWidth', 'imageHeight'].map(k => Math.round(Number(box[k])));
+  const [x, y, width, height, imageWidth, imageHeight] = nums;
+  if (nums.some(n => !Number.isFinite(n)) || width < 2 || height < 2 || imageWidth < 1 || imageHeight < 1 ||
+      x < 0 || y < 0 || x + width > imageWidth || y + height > imageHeight) {
+    return res.status(400).json({ error: 'Invalid face box' });
+  }
+  if (!personId && !name) return res.status(400).json({ error: 'name required' });
+  try {
+    let pid = personId, action = 'assigned';
+    if (!pid) {
+      const found = await immichJson('GET', `/people?withHidden=true&size=50&name=${encodeURIComponent(name)}`);
+      const match = (found.people || []).find(p => (p.name || '').toLowerCase() === name.toLowerCase());
+      if (match) {
+        pid = match.id;
+        if (match.isHidden) await immichJson('PUT', `/people/${match.id}`, { isHidden: false });
+      } else {
+        pid = (await immichJson('POST', '/people', { name })).id;
+        action = 'created';
+      }
+    }
+    try {
+      await immichJson('POST', '/faces', { assetId, personId: pid, imageWidth, imageHeight, x, y, width, height });
+    } catch (e) {
+      if (action === 'created') await deleteEmptyNewPerson(pid);
+      throw e;
+    }
+    refreshPeopleCache().catch(e => console.log('refresh-people after add face failed:', e.message));
+    res.json({ ok: true, action, personId: pid });
+  } catch (e) {
+    console.error('add face failed:', assetId, e.message);
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
+// Hide an unnamed group of faces (strangers), as Immich's own Hide does.
+app.post('/api/immich/people/:id/hide', requireAuth, async (req, res) => {
+  try {
+    await immichJson('PUT', `/people/${req.params.id}`, { isHidden: true });
+    refreshPeopleCache().catch(e => console.log('refresh-people after hide failed:', e.message));
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
 // Immich proxy - full image
 app.get('/api/immich/original/:id', requireAuth, async (req, res) => {
   try {
@@ -1085,19 +1314,23 @@ async function buildFilterCache() {
 // Refresh just the people list from Immich (fast — single API call).
 // Used by the Library "Full sweep" button to surface newly-tagged faces
 // without a full filter-cache rebuild. Camera/lens/city stays cached.
+async function refreshPeopleCache() {
+  const cache = loadFilterCache() || { cameras: [], lenses: [], cities: [], states: [], films: [], people: [], builtAt: new Date().toISOString() };
+  const pr = await fetch(`${IMMICH_URL}/people?withHidden=false&size=500`, {
+    headers: { 'x-api-key': IMMICH_KEY }
+  });
+  const pd = await pr.json();
+  cache.people = (pd.people || [])
+    .map(p => ({ name: p.name || '', id: p.id }))
+    .sort((a, b) => (a.name ? 0 : 1) - (b.name ? 0 : 1));
+  fs.writeFileSync(FILTER_CACHE_FILE, JSON.stringify(cache));
+  return cache.people.length;
+}
 app.post('/api/filters/refresh-people', requireAuth, async (req, res) => {
   try {
-    const cache = loadFilterCache() || { cameras: [], lenses: [], cities: [], states: [], films: [], people: [], builtAt: new Date().toISOString() };
-    const pr = await fetch(`${IMMICH_URL}/people?withHidden=false&size=500`, {
-      headers: { 'x-api-key': IMMICH_KEY }
-    });
-    const pd = await pr.json();
-    cache.people = (pd.people || [])
-      .map(p => ({ name: p.name || '', id: p.id }))
-      .sort((a, b) => (a.name ? 0 : 1) - (b.name ? 0 : 1));
-    fs.writeFileSync(FILTER_CACHE_FILE, JSON.stringify(cache));
-    console.log('People refreshed:', cache.people.length);
-    res.json({ ok: true, count: cache.people.length });
+    const count = await refreshPeopleCache();
+    console.log('People refreshed:', count);
+    res.json({ ok: true, count });
   } catch (e) {
     console.log('refresh-people failed:', e.message);
     res.status(500).json({ error: e.message });

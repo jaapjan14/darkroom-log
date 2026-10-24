@@ -173,12 +173,36 @@
   .exif-table { width: 100%; margin-top: 0.75rem; }
   .exif-row-item { display: flex; align-items: flex-start; padding: 0.4rem 0; border-bottom: 1px solid var(--border); gap: 1rem; }
   .exif-row-item:last-child { border-bottom: none; }
+  /* the People row sits in its own wrapper, so :last-child above would drop its line; Tags always follows it */
+  #faces-row-slot > .exif-row-item { border-bottom: 1px solid var(--border); }
   .exif-row-icon { color: var(--text-dim); font-size: 14px; width: 20px; flex-shrink: 0; padding-top: 2px; }
   .exif-row-label { font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-dim); width: 90px; flex-shrink: 0; padding-top: 2px; }
   .exif-row-value { font-family: 'IBM Plex Mono', monospace; font-size: 15px; color: var(--text); flex: 1; }
   .exif-row-sub { font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--text-dim); margin-top: 2px; }
   .person-chip { display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.15rem 0.7rem 0.15rem 0.15rem; border-radius: 999px; background: var(--surface2); font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: var(--text); }
   .person-chip img { width: 24px; height: 24px; border-radius: 50%; object-fit: cover; background: var(--border); }
+  /* Faces in the photo detail's People row (v1.5.135) */
+  .face-tiles { display: flex; gap: 0.6rem; flex-wrap: wrap; }
+  .face-tile { display: flex; flex-direction: column; align-items: center; gap: 0.3rem; width: 64px; background: none; border: none; padding: 0; cursor: pointer; font-family: 'IBM Plex Mono', monospace; }
+  .face-crop { width: 52px; height: 52px; border-radius: 50%; background-color: var(--surface2); background-repeat: no-repeat; border: 2px solid var(--border); transition: border-color 0.15s; }
+  .face-tile:hover .face-crop { border-color: var(--text-mid); }
+  .face-tile.unnamed .face-crop { border-style: dashed; }
+  .face-tile.editing .face-crop { border-color: var(--safe); box-shadow: 0 0 0 2px var(--safe-glow); }
+  .face-label { font-size: 11px; color: var(--text); text-align: center; line-height: 1.2; word-break: break-word; }
+  .face-tile.unnamed .face-label { color: var(--safe); }
+  .face-editor { margin-top: 0.7rem; display: flex; flex-direction: column; gap: 0.5rem; max-width: min(280px, calc(100vw - 160px)); }
+  .face-editor input[type=text] { width: 100%; }
+  .face-group-opt { font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--text-mid); display: flex; align-items: center; gap: 0.4rem; cursor: pointer; }
+  .face-group-opt input { accent-color: var(--safe); }
+  .face-editor-btns { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
+  .face-editor-msg { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--text-dim); }
+  /* Adding a face by hand (v1.5.137) */
+  .face-add-icon { display: flex; align-items: center; justify-content: center; font-size: 22px; color: var(--text-mid); border-style: dashed; }
+  .face-tile.face-add .face-label { color: var(--text-mid); }
+  .face-draw-hint { font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--text-mid); }
+  .face-draw-layer { position: absolute; z-index: 40; overflow: hidden; cursor: crosshair; touch-action: none; user-select: none; -webkit-user-select: none; background: rgba(0,0,0,0.15); outline: 1px dashed var(--safe); }
+  .face-draw-box { position: absolute; border: 2px solid var(--safe); box-shadow: 0 0 0 9999px rgba(0,0,0,0.35); border-radius: 4px; pointer-events: none; }
+  .face-draw-tip { position: absolute; left: 50%; top: 12px; transform: translateX(-50%); background: rgba(10,10,10,0.85); color: var(--text); font-family: 'IBM Plex Mono', monospace; font-size: 12px; padding: 0.35rem 0.7rem; border: 1px solid var(--border); pointer-events: none; white-space: nowrap; }
   /* NAV ARROWS */
   .recent-nav-bar { display: flex; gap: 0.5rem; padding: 0.75rem 1rem; border-bottom: 1px solid var(--border); }
   .nav-arrow { background: var(--surface2); border: 1px solid var(--border); color: var(--text-mid); font-size: 16px; width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all 0.15s; }
@@ -382,6 +406,10 @@
           <div class="filter-section-label">Film</div>
           <select id="filter-film" class="filter-dropdown"><option value="">All films</option></select>
           <div class="filter-section-label">People</div>
+          <div style="display:flex;gap:0.4rem;margin-bottom:0.6rem">
+            <button class="tag-filter" id="btn-unnamed-faces" title="Photos with faces nobody has named yet" style="flex:1">Not yet named</button>
+            <button class="tag-filter" id="btn-hide-named" title="Leave out photos where someone is already named, in any search" style="flex:1">Hide named</button>
+          </div>
           <input type="text" id="people-filter-input" placeholder="Filter people..." autocomplete="off" style="margin-bottom:0.6rem">
           <div id="chip-people" class="people-avatar-grid"></div>
           <div style="margin-top:1rem;text-align:right">
@@ -863,7 +891,7 @@
 
 <script src="/zoom.js?v=2" defer></script>
 <script src="/audio-engine.js?v=10" defer></script>
-<script src="/app.js?v=303" defer></script>
+<script src="/app.js?v=308" defer></script>
 <script>
 // Service worker - registers sw.js for thumb stale-while-revalidate + shell
 // cache. Was actively unregistered v1.3.0 -> v1.5.61; re-enabled v1.5.62.

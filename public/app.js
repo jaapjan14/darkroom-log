@@ -30,6 +30,12 @@ let state = {
   // Bumped by Clear/✕ so a search still in flight (or waiting out its 600 ms
   // debounce) can't repaint its results over the cleared grid.
   recentSearchGen: 0,
+  // "Not yet named" (People panel): photos with faces nobody has named.
+  recentUnnamedOnly: false,
+  recentUnnamedItems: null,
+  unnamedDirty: false,
+  // "Hide named photos": filters whatever the grid shows (any search/filter).
+  recentHideNamed: false,
   currentRecentId: null,
   currentRecentIndex: -1,
   fullscreenOpen: false,
@@ -51,6 +57,9 @@ let state = {
   searchQuery: '',
   searchTotal: 0,
   albums: [],
+  // True once /api/albums has really been read. state.albums starts as [], so
+  // "empty" alone can't tell "no albums" from "not loaded yet" (1.5.141).
+  albumsLoaded: false,
   currentAlbumId: null,
   albumSelectMode: false,
   albumSelected: new Set(),
@@ -85,6 +94,7 @@ async function login() {
     document.getElementById('login-screen').style.display = 'none';
     document.getElementById('app').style.display = 'block';
     loadInitialTab();
+    ensureAlbumsLoaded(); // the boot-time load only runs when already logged in
   } else {
     document.getElementById('login-error').textContent = 'Incorrect password';
   }
@@ -210,7 +220,7 @@ async function openPinnedAlbum(tab) {
 // darkroom CHANGELOG v1.5.57 write-up.
 function isRecentFilterActive() {
   const q = (document.getElementById('recent-search')?.value || '').trim();
-  return !!(state.recentSmartResults?.length && (q || state.recentActiveChips.size || state.recentActivePerson));
+  return !!(state.recentSmartResults?.length && (q || state.recentActiveChips.size || state.recentActivePerson || state.recentUnnamedOnly));
 }
 
 // Sort asset objects by the current library sort/dir using fields that ARE
@@ -493,6 +503,7 @@ function setSearchMode(mode) {
 
 function handleRecentSearch(q) {
   clearTimeout(smartSearchTimer);
+  if (state.recentUnnamedOnly) { applyRecentFilters(); return; }
   if (!q.trim()) {
     state.recentSmartResults = [];
     if (state.recentActivePerson) {
@@ -646,6 +657,25 @@ async function runSmartSearch(q, append = false) {
 function applyRecentFilters() {
   const q = (document.getElementById('recent-search')?.value || '').toLowerCase();
   const chips = state.recentActiveChips;
+  if (state.recentUnnamedOnly) {
+    // Text and Camera/Lens/State/City narrow the "Not yet named" list here, on
+    // the client, using the exif folded into each asset.
+    const list = (state.recentUnnamedItems || []).filter(a => {
+      const meta = state.recentMeta[a.id] || {};
+      const searchable = [a.originalFileName, meta.description, meta.model, meta.lens, meta.city, meta.state].join(' ').toLowerCase();
+      return (!q.trim() || searchable.includes(q.trim())) && [...chips].every(c => searchable.includes(c.toLowerCase()));
+    });
+    state.recentSmartResults = sortRecentResults(list);
+    const loadMoreBtn = document.getElementById('load-more-btn');
+    if (loadMoreBtn) loadMoreBtn.style.display = 'none';
+    if (!state.recentSmartResults.length) {
+      const grid = document.getElementById('recent-grid');
+      if (grid) grid.innerHTML = `<div class="loading">${(state.recentUnnamedItems || []).length ? 'No unnamed faces match these filters.' : 'Everyone has a name. Nothing left to tag.'}</div>`;
+      return;
+    }
+    renderRecentGrid(state.recentSmartResults);
+    return;
+  }
   // Use smart/text results if we have them and there's a query or active chips
   const hasResults = state.recentSmartResults?.length && (q.trim() || chips.size);
   let items = hasResults ? state.recentSmartResults : state.recentItems;
@@ -914,7 +944,388 @@ function peopleRowHtml(people) {
             </div>`;
 }
 
+// ─── Naming faces in Darkroom (v1.5.135) ────────────────────────────────────
+// "Not yet named" in the People panel lists photos whose faces nobody has
+// named (including faces Immich never grouped, which its People page can't
+// show). The photo detail's People row shows every face as a crop, and each
+// can be named there: an existing person, a new one, or a whole unnamed group.
+
+function syncUnnamedButton() {
+  const btn = document.getElementById('btn-unnamed-faces');
+  if (btn) btn.classList.toggle('active', !!state.recentUnnamedOnly);
+}
+
+function setUnnamedOnly(on, { rerun = true } = {}) {
+  state.recentUnnamedOnly = !!on;
+  syncUnnamedButton();
+  if (on) {
+    state.recentActivePerson = null;
+    updateRecentFilterChips();
+  }
+  updateActiveChipLabel();
+  if (on) { loadUnnamedFaces(); return; }
+  state.recentSmartResults = [];
+  if (!rerun) return;
+  const q = (document.getElementById('recent-search')?.value || '').trim();
+  if (q) { state.searchMode === 'smart' ? runSmartSearch(q) : runTextSearch(q); }
+  else if (state.recentActiveChips.size) runMultiChipSearch([...state.recentActiveChips]);
+  else applyRecentFilters();
+}
+
+// Re-run whatever the search box, filters and person currently ask for.
+function rerunRecentSearch() {
+  state.recentSmartResults = [];
+  const q = (document.getElementById('recent-search')?.value || '').trim();
+  if (q) { state.searchMode === 'smart' ? runSmartSearch(q) : runTextSearch(q); }
+  else if (state.recentActiveChips.size || state.recentActivePerson) runMultiChipSearch([...state.recentActiveChips], state.recentActivePerson);
+  else applyRecentFilters();
+}
+
+function syncHideNamedButton() {
+  const btn = document.getElementById('btn-hide-named');
+  if (btn) btn.classList.toggle('active', !!state.recentHideNamed);
+}
+
+// A picked person is by definition named, so the two can't be on together.
+function setHideNamed(on) {
+  state.recentHideNamed = !!on;
+  syncHideNamedButton();
+  const hadPerson = !!state.recentActivePerson;
+  if (on && hadPerson) { state.recentActivePerson = null; updateRecentFilterChips(); }
+  updateActiveChipLabel();
+  if (on && hadPerson) rerunRecentSearch();
+  else renderRecentGrid(_lastGridItems);
+}
+
+async function loadUnnamedFaces({ quiet = false } = {}) {
+  const gen = state.recentGen, sgen = state.recentSearchGen;
+  const grid = document.getElementById('recent-grid');
+  if (!quiet && grid) grid.innerHTML = '<div class="loading">Finding photos with faces nobody has named…</div>';
+  try {
+    const r = await fetch('/api/immich/unnamed-faces');
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || 'Failed');
+    if (state.recentGen !== gen || state.recentSearchGen !== sgen || !state.recentUnnamedOnly) return;
+    const items = data.assets || [];
+    absorbAssetMeta(items);
+    state.recentUnnamedItems = items;
+    applyRecentFilters();
+  } catch (e) {
+    if (state.recentGen !== gen || state.recentSearchGen !== sgen) return;
+    if (grid) grid.innerHTML = `<div class="loading">${escapeFaceText(e.message || 'Could not load the list.')}</div>`;
+  }
+}
+
+function escapeFaceText(v) {
+  return String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// Square crop around a face, drawn from the photo's mid-size preview with CSS
+// background sizing. Box coordinates are in the face detector's image space
+// (box.w × box.h), which has the photo's own aspect ratio, so they scale.
+function faceCropStyle(assetId, box, size) {
+  const bw = box.x2 - box.x1, bh = box.y2 - box.y1;
+  const side = Math.min(Math.max(bw, bh) * 1.6, box.w, box.h);
+  const cx = (box.x1 + box.x2) / 2, cy = (box.y1 + box.y2) / 2;
+  const left = Math.min(Math.max(cx - side / 2, 0), box.w - side);
+  const top = Math.min(Math.max(cy - side / 2, 0), box.h - side);
+  const k = size / side;
+  return `background-image:url('${thumbSrc(assetId)}');background-size:${(box.w * k).toFixed(1)}px ${(box.h * k).toFixed(1)}px;background-position:${(-left * k).toFixed(1)}px ${(-top * k).toFixed(1)}px`;
+}
+
+const faceRowState = { assetId: null, faces: [], editing: null, drawn: null };
+
+async function loadFacesRow(assetId) {
+  const slot = document.getElementById('faces-row-slot');
+  if (!slot || slot.dataset.asset !== assetId) return;
+  try {
+    const r = await fetch('/api/immich/faces/' + encodeURIComponent(assetId));
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || 'Failed');
+    const cur = document.getElementById('faces-row-slot');
+    if (!cur || cur.dataset.asset !== assetId) return; // moved on to another photo
+    faceRowState.assetId = assetId;
+    faceRowState.faces = (data.faces || []).filter(f => !(f.person && f.person.isHidden));
+    faceRowState.editing = null;
+    stopFaceDrawing();
+    renderFacesRow();
+  } catch (e) {
+    console.warn('faces row:', e.message); // keep the plain People row
+  }
+}
+
+function renderFacesRow() {
+  const slot = document.getElementById('faces-row-slot');
+  if (!slot || slot.dataset.asset !== faceRowState.assetId) return;
+  const faces = faceRowState.faces;
+  const tiles = faces.map(f => {
+    const named = f.person && f.person.name;
+    const label = named ? escapeFaceText(f.person.name) : '+ Name';
+    const editing = faceRowState.editing === f.id;
+    return `<button class="face-tile${named ? '' : ' unnamed'}${editing ? ' editing' : ''}" data-action="editFace" data-id="${f.id}" title="${named ? 'Change who this is' : 'Name this face'}">
+        <span class="face-crop" style="${faceCropStyle(faceRowState.assetId, f.box, 52)}"></span>
+        <span class="face-label">${label}</span>
+      </button>`;
+  }).join('') + `<button class="face-tile face-add${faceRowState.editing === 'new' ? ' editing' : ''}" data-action="startAddFace" title="Add a face Immich missed: drag a box around it on the photo">
+        <span class="face-crop face-add-icon">+</span>
+        <span class="face-label">Add face</span>
+      </button>`;
+  const open = faces.find(f => f.id === faceRowState.editing);
+  let editor = '';
+  if (faceRowState.editing === 'new') {
+    const people = ((state.filterOptions && state.filterOptions.people) || []).filter(p => p.name);
+    editor = faceRowState.drawn ? `
+      <div class="face-editor" data-face="new">
+        <input type="text" id="face-name-input" list="face-people-list" placeholder="Who is this?" autocomplete="off">
+        <datalist id="face-people-list">${people.map(p => `<option value="${escapeFaceText(p.name)}"></option>`).join('')}</datalist>
+        <div class="face-editor-btns">
+          <button class="btn btn-sm" data-action="saveNewFace">Save</button>
+          <button class="btn btn-ghost btn-sm" data-action="redrawFace">Redraw</button>
+          <button class="btn btn-ghost btn-sm" data-action="cancelFace">Cancel</button>
+          <span class="face-editor-msg" id="face-editor-msg"></span>
+        </div>
+      </div>` : `
+      <div class="face-editor" data-face="new">
+        <div class="face-draw-hint">Drag a box around the face on the photo.</div>
+        <div class="face-editor-btns"><button class="btn btn-ghost btn-sm" data-action="cancelFace">Cancel</button></div>
+      </div>`;
+  } else if (open) {
+    const group = open.person && !open.person.name ? open.person : null;
+    const people = ((state.filterOptions && state.filterOptions.people) || []).filter(p => p.name);
+    editor = `
+      <div class="face-editor" data-face="${open.id}">
+        <input type="text" id="face-name-input" list="face-people-list" placeholder="Who is this?" autocomplete="off" value="${escapeFaceText(open.person && open.person.name || '')}">
+        <datalist id="face-people-list">${people.map(p => `<option value="${escapeFaceText(p.name)}"></option>`).join('')}</datalist>
+        ${group && group.photoCount > 1 ? `<label class="face-group-opt"><input type="checkbox" id="face-whole-group" checked> Name all ${group.photoCount} photos of this face</label>` : ''}
+        <div class="face-editor-btns">
+          <button class="btn btn-sm" data-action="saveFace" data-id="${open.id}">Save</button>
+          ${group ? `<button class="btn btn-ghost btn-sm" data-action="hideFace" data-id="${open.id}" title="Hide this face in Immich (a stranger)">Hide</button>` : ''}
+          <button class="btn btn-ghost btn-sm" data-action="cancelFace">Cancel</button>
+          <span class="face-editor-msg" id="face-editor-msg"></span>
+        </div>
+      </div>`;
+  }
+  slot.innerHTML = `
+            <div class="exif-row-item">
+              <div class="exif-row-icon">👤</div>
+              <div class="exif-row-label">People</div>
+              <div class="exif-row-value">
+                <div class="face-tiles">${tiles}</div>${editor}
+              </div>
+            </div>`;
+  const inp = document.getElementById('face-name-input');
+  if (inp) {
+    // preventScroll: on a phone, focusing would otherwise pan the page sideways.
+    inp.focus({ preventScroll: true });
+    inp.addEventListener('keydown', (e) => {
+      // Keep typing (arrows, Escape) away from the detail view's navigation.
+      e.stopPropagation();
+      if (e.key === 'Enter') { e.preventDefault(); faceRowState.editing === 'new' ? saveNewFace() : saveFaceName(faceRowState.editing); }
+      if (e.key === 'Escape') { cancelFaceEdit(); }
+    });
+  }
+}
+
+// ─── Adding a face Immich missed (v1.5.137) ─────────────────────────────────
+// "+ Add face" lays a drawing layer over the photo; drag a box around the
+// face, name it, and Immich gets the box in the displayed image's pixel space
+// (what Immich's own "+" tool sends). The layer sits over the image content
+// only (object-fit: contain can letterbox it) and swallows clicks, so drawing
+// never opens fullscreen. Esc or Cancel ends it.
+
+function faceImageRect(img) {
+  const r = img.getBoundingClientRect();
+  const nw = img.naturalWidth, nh = img.naturalHeight;
+  if (!nw || !nh || !r.width || !r.height) return null;
+  const k = Math.min(r.width / nw, r.height / nh);
+  const w = nw * k, h = nh * k;
+  return { left: r.left + (r.width - w) / 2, top: r.top + (r.height - h) / 2, width: w, height: h, nw, nh };
+}
+
+let _faceDrawKeyHandler = null;
+function stopFaceDrawing() {
+  document.querySelectorAll('.face-draw-layer').forEach(el => el.remove());
+  if (_faceDrawKeyHandler) { window.removeEventListener('keydown', _faceDrawKeyHandler, true); _faceDrawKeyHandler = null; }
+  window.removeEventListener('resize', stopFaceDrawingAndCancel);
+  faceRowState.drawn = null;
+}
+function stopFaceDrawingAndCancel() { cancelFaceEdit(); }
+
+function cancelFaceEdit() {
+  stopFaceDrawing();
+  faceRowState.editing = null;
+  renderFacesRow();
+}
+
+function startAddFace() {
+  if (faceRowState.editing === 'new' && !faceRowState.drawn) { cancelFaceEdit(); return; }
+  stopFaceDrawing();
+  const img = document.querySelector('#recent-detail-view .detail-image');
+  const fr = img && faceImageRect(img);
+  if (!fr) { faceEditorMsg('The photo is still loading. Try again in a moment.'); return; }
+  faceRowState.editing = 'new';
+  renderFacesRow();
+  const host = img.parentElement;
+  const hr = host.getBoundingClientRect();
+  const layer = document.createElement('div');
+  layer.className = 'face-draw-layer';
+  layer.style.left = (fr.left - hr.left) + 'px';
+  layer.style.top = (fr.top - hr.top) + 'px';
+  layer.style.width = fr.width + 'px';
+  layer.style.height = fr.height + 'px';
+  layer.innerHTML = '<div class="face-draw-tip">Drag a box around the face</div><div class="face-draw-box" style="display:none"></div>';
+  host.appendChild(layer);
+  const boxEl = layer.querySelector('.face-draw-box');
+  let start = null;
+  const pt = (e) => {
+    const r = layer.getBoundingClientRect();
+    return { x: Math.min(Math.max(e.clientX - r.left, 0), r.width), y: Math.min(Math.max(e.clientY - r.top, 0), r.height) };
+  };
+  const paint = (a, b) => {
+    const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y), w = Math.abs(a.x - b.x), h = Math.abs(a.y - b.y);
+    Object.assign(boxEl.style, { display: 'block', left: x + 'px', top: y + 'px', width: w + 'px', height: h + 'px' });
+    return { x, y, w, h };
+  };
+  layer.addEventListener('pointerdown', (e) => {
+    e.preventDefault(); e.stopPropagation();
+    layer.setPointerCapture(e.pointerId);
+    start = pt(e);
+    faceRowState.drawn = null;
+    paint(start, start);
+    const tip = layer.querySelector('.face-draw-tip'); if (tip) tip.remove();
+  });
+  layer.addEventListener('pointermove', (e) => { if (start) { e.preventDefault(); paint(start, pt(e)); } });
+  layer.addEventListener('pointerup', (e) => {
+    if (!start) return;
+    e.preventDefault(); e.stopPropagation();
+    const b = paint(start, pt(e));
+    start = null;
+    if (b.w < 8 || b.h < 8) { boxEl.style.display = 'none'; return; } // a tap, not a box
+    // Image pixel space. A small (phone-first) thumbnail is scaled up so the
+    // integer box stays precise; only the ratio matters to Immich.
+    const lr = layer.getBoundingClientRect();
+    const up = Math.max(1, 1440 / Math.max(fr.nw, fr.nh));
+    const iw = Math.round(fr.nw * up), ih = Math.round(fr.nh * up);
+    const sx = iw / lr.width, sy = ih / lr.height;
+    let x = Math.round(b.x * sx), y = Math.round(b.y * sy);
+    let w = Math.round(b.w * sx), h = Math.round(b.h * sy);
+    w = Math.min(w, iw - x); h = Math.min(h, ih - y);
+    faceRowState.drawn = { x, y, width: w, height: h, imageWidth: iw, imageHeight: ih };
+    renderFacesRow();
+  });
+  layer.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); });
+  // Esc ends drawing before the detail view's own Escape (go back) sees it.
+  _faceDrawKeyHandler = (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cancelFaceEdit(); }
+  };
+  window.addEventListener('keydown', _faceDrawKeyHandler, true);
+  window.addEventListener('resize', stopFaceDrawingAndCancel);
+}
+
+function redrawFace() {
+  faceRowState.drawn = null;
+  const boxEl = document.querySelector('.face-draw-layer .face-draw-box');
+  if (boxEl) boxEl.style.display = 'none';
+  renderFacesRow();
+}
+
+async function saveNewFace() {
+  const box = faceRowState.drawn;
+  const assetId = faceRowState.assetId;
+  const name = (document.getElementById('face-name-input')?.value || '').trim();
+  if (!box) { faceEditorMsg('Drag a box around the face first.'); return; }
+  if (!name) { faceEditorMsg('Type a name first.'); return; }
+  faceEditorMsg('Saving…');
+  try {
+    const r = await fetch(`/api/immich/assets/${encodeURIComponent(assetId)}/faces`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, box })
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || 'Failed');
+    afterFaceChange();
+  } catch (e) {
+    faceEditorMsg('Failed: ' + e.message);
+  }
+}
+
+// fetchFilterOptions() runs once per page load, so re-read the people list
+// directly after naming someone (the server rewrites it in the background).
+async function reloadPeopleOptions() {
+  try {
+    const data = await fetch('/api/immich/filter-options').then(r => r.json());
+    if (data && Array.isArray(data.people)) {
+      state.filterOptions = { ...(state.filterOptions || {}), people: data.people };
+      updateRecentFilterChips();
+    }
+  } catch (e) {}
+}
+
+function editFace(faceId) {
+  stopFaceDrawing();
+  faceRowState.editing = faceRowState.editing === faceId ? null : faceId;
+  if (faceRowState.editing && !(state.filterOptions && state.filterOptions.people)) {
+    reloadPeopleOptions().then(() => { if (faceRowState.editing) renderFacesRow(); });
+  }
+  renderFacesRow();
+}
+
+function faceEditorMsg(text) {
+  const m = document.getElementById('face-editor-msg');
+  if (m) m.textContent = text;
+}
+
+async function saveFaceName(faceId) {
+  const face = faceRowState.faces.find(f => f.id === faceId);
+  const name = (document.getElementById('face-name-input')?.value || '').trim();
+  if (!face || !name) { faceEditorMsg('Type a name first.'); return; }
+  if (face.person && face.person.name === name) { faceRowState.editing = null; renderFacesRow(); return; }
+  const group = face.person && !face.person.name ? face.person : null;
+  const wholeGroup = !!(group && document.getElementById('face-whole-group')?.checked);
+  faceEditorMsg('Saving…');
+  try {
+    const r = await fetch(`/api/immich/faces/${encodeURIComponent(faceId)}/name`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, wholeGroup, currentPersonId: group ? group.id : null })
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || 'Failed');
+    afterFaceChange();
+  } catch (e) {
+    faceEditorMsg('Failed: ' + e.message);
+  }
+}
+
+async function hideFace(faceId) {
+  const face = faceRowState.faces.find(f => f.id === faceId);
+  if (!face || !face.person || face.person.name) return;
+  faceEditorMsg('Hiding…');
+  try {
+    const r = await fetch(`/api/immich/people/${encodeURIComponent(face.person.id)}/hide`, { method: 'POST' });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || 'Failed');
+    afterFaceChange();
+  } catch (e) {
+    faceEditorMsg('Failed: ' + e.message);
+  }
+}
+
+// Reload this photo's faces and, shortly after (the server refreshes its
+// people list in the background), the People panel. The "Not yet named" grid
+// is refreshed when you go back to it, so the open photo doesn't jump away.
+function afterFaceChange() {
+  state.unnamedDirty = true;
+  resetNamedCheck();
+  const assetId = faceRowState.assetId;
+  faceRowState.editing = null;
+  stopFaceDrawing();
+  if (assetId) loadFacesRow(assetId);
+  setTimeout(reloadPeopleOptions, 1500);
+}
+
 async function searchByPerson(personId, name) {
+  if (state.recentUnnamedOnly) setUnnamedOnly(false, { rerun: false });
+  if (state.recentHideNamed) { state.recentHideNamed = false; syncHideNamedButton(); }
   state.recentActivePerson = state.recentActivePerson === personId ? null : personId;
   updateRecentFilterChips();
   updateActiveChipLabel();
@@ -1007,6 +1418,7 @@ function setFilterDropdown(category, val) {
   if (val) state.recentActiveChips.add(val);
   updateActiveChipLabel();
   updateRecentFilterChips();
+  if (state.recentUnnamedOnly) { applyRecentFilters(); return; }
   const chips = [...state.recentActiveChips];
   const q = (document.getElementById('recent-search')?.value || '').trim();
   if (q) {
@@ -1031,6 +1443,8 @@ function updateActiveChipLabel() {
     const p = people.find(x => x.id === state.recentActivePerson);
     if (p) parts.push('👤 ' + (p.name || 'Unnamed'));
   }
+  if (state.recentUnnamedOnly) parts.push('👤 Not yet named');
+  if (state.recentHideNamed) parts.push('Hiding named');
   parts.push(...[...state.recentActiveChips]);
   label.textContent = parts.join(' · ');
   updateRecentClearButton();
@@ -1042,7 +1456,7 @@ function updateRecentClearButton() {
   const btn = document.getElementById('btn-clear-recent-search');
   if (!btn) return;
   const typed = (document.getElementById('recent-search')?.value || '').trim();
-  btn.style.display = typed || state.recentActiveChips.size || state.recentActivePerson ? 'block' : 'none';
+  btn.style.display = typed || state.recentActiveChips.size || state.recentActivePerson || state.recentUnnamedOnly || state.recentHideNamed ? 'block' : 'none';
 }
 
 // The panel's Clear and the ✕ in the search box both reset the search
@@ -1058,6 +1472,10 @@ function resetRecentSearch() {
   state.recentActiveChips = new Set();
   state.recentSmartResults = [];
   state.recentActiveImmichTag = null;
+  state.recentUnnamedOnly = false;
+  syncUnnamedButton();
+  state.recentHideNamed = false;
+  syncHideNamedButton();
   state.searchQuery = '';
   // The People name filter ("zach") too, or the grid keeps showing just the
   // matching faces and looks as if that person is still selected. The album
@@ -1138,7 +1556,65 @@ async function refreshThumbnails(btn) {
   }
 }
 
+// "Hide named photos" (v1.5.138) drops photos where someone is already named
+// from whatever the Analog grid is about to show — feed, Text/Smart search,
+// filters, any sort — so every render goes through here. Unchecked photos are
+// held back until one batched server check says whether they're named.
+const namedCheck = { named: new Set(), checked: new Set(), recheck: false };
+// After naming someone, re-ask about every photo on screen in the background
+// but keep showing the grid meanwhile: clearing the answers instead swapped
+// the grid for a "Leaving out…" message, which collapsed it and threw the
+// scroll back to the top (1.5.138).
+function resetNamedCheck() { namedCheck.recheck = true; }
+
+async function checkNamed(ids, { fresh = false } = {}) {
+  for (let i = 0; i < ids.length; i += 1000) {
+    const batch = ids.slice(i, i + 1000);
+    const r = await fetch('/api/immich/named-check', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: batch })
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || 'Failed');
+    for (const id of batch) { namedCheck.checked.add(id); if (fresh) namedCheck.named.delete(id); }
+    for (const id of data.named || []) namedCheck.named.add(id);
+  }
+}
+
+let _lastGridItems = [];
 function renderRecentGrid(items) {
+  _lastGridItems = items || [];
+  if (!state.recentHideNamed) return renderRecentGridRaw(_lastGridItems);
+  if (namedCheck.recheck) {
+    namedCheck.recheck = false;
+    const forItems = _lastGridItems;
+    const known = forItems.filter(a => namedCheck.checked.has(a.id)).map(a => a.id);
+    if (known.length) {
+      checkNamed(known, { fresh: true }).then(() => {
+        if (_lastGridItems === forItems && state.recentHideNamed) renderRecentGrid(forItems);
+      }).catch(() => {});
+    }
+  }
+  const unchecked = _lastGridItems.filter(a => !namedCheck.checked.has(a.id)).map(a => a.id);
+  const shown = _lastGridItems.filter(a => namedCheck.checked.has(a.id) && !namedCheck.named.has(a.id));
+  const grid = document.getElementById('recent-grid');
+  if (unchecked.length) {
+    const forItems = _lastGridItems;
+    checkNamed(unchecked).then(() => {
+      if (_lastGridItems === forItems && state.recentHideNamed) renderRecentGrid(forItems);
+    }).catch(e => {
+      if (_lastGridItems === forItems && grid) grid.innerHTML = `<div class="loading">${escapeFaceText(e.message || 'Could not check names.')}</div>`;
+    });
+    if (!shown.length) { if (grid) grid.innerHTML = '<div class="loading">Leaving out photos where someone is named…</div>'; state.displayedItems = []; return; }
+  }
+  if (!shown.length) {
+    state.displayedItems = [];
+    if (grid) grid.innerHTML = `<div class="loading">${_lastGridItems.length ? 'Everyone in these photos is named.' : 'No photos.'}</div>`;
+    return;
+  }
+  renderRecentGridRaw(shown);
+}
+
+function renderRecentGridRaw(items) {
   state.displayedItems = items; // track what's currently shown for navigation
   const grid = document.getElementById('recent-grid');
   if (!items.length) { grid.innerHTML = '<div class="loading">No recent uploads.</div>'; return; }
@@ -1197,6 +1673,13 @@ function goBackFromDetail() {
   }
   disablePinchZoom();
   state.previousView = 'recent-view';
+  if (state.unnamedDirty && state.recentUnnamedOnly && prev === 'recent-view') {
+    state.unnamedDirty = false;
+    loadUnnamedFaces({ quiet: true });
+  } else if (state.unnamedDirty && state.recentHideNamed && prev === 'recent-view') {
+    state.unnamedDirty = false;
+    renderRecentGrid(_lastGridItems);
+  }
 }
 
 async function showRecentDetail(assetId) {
@@ -1304,20 +1787,16 @@ async function renderRecentDetail(assetId, navGen) {
     return;
   }
 
-  // Lazy-load Darkroom albums so the "In albums" row works even when the
-  // user opened Recent first and never visited the Albums tab.
-  if (!Array.isArray(state.albums)) {
-    try {
-      const ac = new AbortController();
-      const tid = setTimeout(() => ac.abort(), 15000);
-      const r = await fetch('/api/albums', { signal: ac.signal });
-      clearTimeout(tid);
-      const data = await r.json();
-      if (Array.isArray(data)) state.albums = data;
-    } catch (e) { /* leave for other loaders */ }
+  // Load the Darkroom albums before deciding which chips to show. Testing
+  // Array.isArray(state.albums) wasn't enough: it starts as [], so a failed or
+  // skipped load showed every photo as in no albums (fixed 1.5.141). If the
+  // list really can't be read, the row says so instead of disappearing.
+  let albumsUnknown = false;
+  if (!state.albumsLoaded) {
+    albumsUnknown = !(await ensureAlbumsLoaded());
     if (myGen !== _navGen) return; // stale-result guard
   }
-  const assetAlbums = (state.albums || []).filter(a => (a.assets || []).includes(assetId));
+  const assetAlbums = (Array.isArray(state.albums) ? state.albums : []).filter(a => (a.assets || []).includes(assetId));
 
   // Format date
   // timeZone:'UTC' is deliberate, not a bug: Immich's `localDateTime` is the
@@ -1412,8 +1891,13 @@ async function renderRecentDetail(assetId, navGen) {
                   ${assetAlbums.map(a => `<button class="album-chip" data-action="openAlbum" data-id="${a.id}" title="Open album">${a.title}</button>`).join('')}
                 </div>
               </div>
+            </div>` : albumsUnknown ? `
+            <div class="exif-row-item">
+              <div class="exif-row-icon">📁</div>
+              <div class="exif-row-label">Albums</div>
+              <div class="exif-row-value"><span class="exif-row-sub" style="margin-top:0">Couldn't check albums. Reopen the photo to retry.</span></div>
             </div>` : ''}
-            ${peopleRowHtml(meta.people)}
+            <div id="faces-row-slot" data-asset="${assetId}">${peopleRowHtml(meta.people)}</div>
             <div class="exif-row-item">
               <div class="exif-row-icon">🏷</div>
               <div class="exif-row-label">Tags</div>
@@ -1433,6 +1917,7 @@ async function renderRecentDetail(assetId, navGen) {
       </div>
   `;
   loadGeneratedTagsPanel({ assetId, title: meta.title || '', tags: Array.isArray(meta.tags) ? meta.tags : [], allowAddTag: true, kind: 'library', panelId: 'generated-tags-panel-library', btnId: 'generate-tags-btn-library' });
+  loadFacesRow(assetId);
 }
 
 // Downscale a JPEG/PNG blob via canvas, returning a JPEG blob with longest edge ≤ maxPx.
@@ -1928,9 +2413,24 @@ document.addEventListener('touchend', e => {
 }, {passive: true});
 // ── ALBUMS ───────────────────────────────────────────────────────────────────
 
+// Read the Darkroom album list from the server (unless already read and not
+// forced). Returns false if it couldn't be loaded, so callers can say so
+// instead of showing a photo as being in no albums.
+async function ensureAlbumsLoaded({ force = false } = {}) {
+  if (state.albumsLoaded && !force) return true;
+  try {
+    const ac = new AbortController();
+    const tid = setTimeout(() => ac.abort(), 15000);
+    const r = await fetch('/api/albums', { signal: ac.signal });
+    clearTimeout(tid);
+    const data = await r.json();
+    if (r.ok && Array.isArray(data)) { state.albums = data; state.albumsLoaded = true; return true; }
+  } catch (e) {}
+  return false;
+}
+
 async function loadAlbumsTab() {
-  const r = await fetch('/api/albums');
-  state.albums = await r.json();
+  await ensureAlbumsLoaded({ force: true });
   renderAlbumsGrid();
 }
 
@@ -2261,21 +2761,26 @@ function switchAlbumModalTab(tab) {
 
 async function renderDarkroomAlbumPickList() {
   const list = document.getElementById('album-pick-list');
-  // Lazy-load on demand — the boot-time fetch is fire-and-forget, so a fast
-  // "+ Album" tap can hit this before state.albums is populated and falsely
-  // render "No albums yet".
-  if (!Array.isArray(state.albums)) {
-    list.innerHTML = '<div style="color:var(--text-dim);font-family:IBM Plex Mono,monospace;font-size:11px;margin-bottom:0.5rem">Loading albums…</div>';
-    try {
-      const r = await fetch('/api/albums');
-      const data = await r.json();
-      if (Array.isArray(data)) state.albums = data;
-    } catch (e) { /* fall through to empty render */ }
-  }
-  if (!Array.isArray(state.albums) || !state.albums.length) {
-    list.innerHTML = '<div style="color:var(--text-dim);font-family:IBM Plex Mono,monospace;font-size:11px;margin-bottom:0.5rem">No albums yet</div>';
-    return;
-  }
+  const msg = (t) => `<div style="color:var(--text-dim);font-family:IBM Plex Mono,monospace;font-size:11px;margin-bottom:0.5rem">${t}</div>`;
+  // Always re-read the list when the picker opens. state.albums starts as []
+  // and the boot-time fetch is fire-and-forget (and never runs after a fresh
+  // login), so "empty" can just mean "not loaded" — that showed "No albums
+  // yet" until a page refresh (fixed 1.5.139). Show what we have meanwhile.
+  const have = Array.isArray(state.albums) && state.albums.length;
+  if (have) renderDarkroomAlbumButtons(list);
+  else list.innerHTML = msg('Loading albums…');
+  let failed = false;
+  try {
+    const r = await fetch('/api/albums');
+    const data = await r.json();
+    if (r.ok && Array.isArray(data)) { state.albums = data; state.albumsLoaded = true; }
+    else failed = true;
+  } catch (e) { failed = true; }
+  if (Array.isArray(state.albums) && state.albums.length) { renderDarkroomAlbumButtons(list); return; }
+  list.innerHTML = msg(failed ? 'Could not load albums. Close and try again.' : 'No albums yet');
+}
+
+function renderDarkroomAlbumButtons(list) {
   // Most-recently-used first — albums.updatedAt bumps on add/remove/reorder,
   // so this surfaces whatever album Jacob was just filing photos into.
   list.innerHTML = sortAlbums(state.albums, 'updated').map(a => `
@@ -2507,7 +3012,7 @@ async function quickCreateAndAdd() {
     // client list (e.g. one created on another device) can't slip a dupe through.
     try {
       const fresh = await fetch('/api/albums').then(r => r.json());
-      if (Array.isArray(fresh)) state.albums = fresh;
+      if (Array.isArray(fresh)) { state.albums = fresh; state.albumsLoaded = true; }
     } catch (e) { /* fall back to in-memory list */ }
     const existing = (state.albums || []).find(a => (a.title || '').trim().toLowerCase() === title.toLowerCase());
     if (existing) { await addToAlbum(existing.id); return; }
@@ -3845,7 +4350,7 @@ syncSearchModeButtons();
     document.getElementById('login-screen').style.display = 'none';
     document.getElementById('app').style.display = 'block';
     loadInitialTab();
-    fetch('/api/albums').then(r => r.json()).then(a => state.albums = a);
+    ensureAlbumsLoaded();
   }
 })();
 
@@ -4008,17 +4513,10 @@ async function showDetail(printId, navGen) {
   }
 
   const sessions = (print.sessions || []).slice().sort((a, b) => Number(b.id) - Number(a.id));
-  // Lazy-load Darkroom albums if the user opened a print detail before ever
-  // visiting the Albums tab. Same NO-empty-array-on-failure rule as elsewhere.
-  if (!Array.isArray(state.albums)) {
-    try {
-      const ac = new AbortController();
-      const tid = setTimeout(() => ac.abort(), 15000);
-      const r = await fetch('/api/albums', { signal: ac.signal });
-      clearTimeout(tid);
-      const data = await r.json();
-      if (Array.isArray(data)) state.albums = data;
-    } catch (e) { /* leave state.albums to other loaders */ }
+  // Load the Darkroom albums before showing this print's album chips (same
+  // "[] isn't loaded" fix as the photo page, 1.5.141).
+  if (!state.albumsLoaded) {
+    await ensureAlbumsLoaded();
     if (myGen !== _navGen) return; // stale-result guard
   }
   // Albums this print belongs to — looked up by Immich asset ID against the
@@ -5529,6 +6027,8 @@ function wireListeners() {
   w('sort-chip-btn', 'click', () => toggleSortPopup());
   w('sort-backdrop', 'click', () => closeSortPopup());
   w('people-filter-input', 'input', () => filterPeopleChips());
+  w('btn-unnamed-faces', 'click', () => setUnnamedOnly(!state.recentUnnamedOnly));
+  w('btn-hide-named', 'click', () => setHideNamed(!state.recentHideNamed));
   w('filter-camera', 'change', (e) => setFilterDropdown('cameras', e.target.value));
   w('filter-lens', 'change', (e) => setFilterDropdown('lenses', e.target.value));
   w('filter-state', 'change', (e) => setFilterDropdown('states', e.target.value));
@@ -5764,6 +6264,13 @@ document.addEventListener('click', (e) => {
     case 'searchByPerson': searchByPerson(id, el.dataset.name); break;
     case 'searchByImmichTag': searchByImmichTag(el.dataset.tag); break;
     case 'clearRecentSearch': clearRecentSearch(); break;
+    case 'editFace': editFace(id); break;
+    case 'saveFace': saveFaceName(id); break;
+    case 'hideFace': hideFace(id); break;
+    case 'cancelFace': cancelFaceEdit(); break;
+    case 'startAddFace': startAddFace(); break;
+    case 'saveNewFace': saveNewFace(); break;
+    case 'redrawFace': redrawFace(); break;
 
     // Library
     case 'startEditLibraryTitle': startEditLibraryTitle(); break;
