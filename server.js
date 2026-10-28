@@ -111,7 +111,12 @@ if (!process.env.PASSWORD_HASH && !process.env.APP_PASSWORD) {
 }
 const PASSWORD_HASH = process.env.PASSWORD_HASH || bcrypt.hashSync(process.env.APP_PASSWORD, 10);
 const IMMICH_URL = process.env.IMMICH_URL || 'http://192.168.0.199:2283/api';
-const IMMICH_KEY = process.env.IMMICH_KEY || '';
+// No default API key: refuse to boot without one rather than fall back to an
+// empty credential that would be sent as-is to the Immich API.
+if (!process.env.IMMICH_KEY) {
+  throw new Error('IMMICH_KEY environment variable must be set — no default API key is provided.');
+}
+const IMMICH_KEY = process.env.IMMICH_KEY;
 // Tag generator (Lomography/Flickr/Instagram) — client is undefined (not
 // missing-key-errored) when ANTHROPIC_API_KEY isn't set, so the endpoint can
 // fail with a clear message instead of crashing the whole server at boot.
