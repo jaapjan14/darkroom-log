@@ -159,16 +159,6 @@ Album management and a fix for stale thumbnails after uploads, on top of a round
 - **Faster everywhere** — gzip/brotli compression on all responses (app shell, thumbnail JSON, and assets ship far smaller) and a server-side LRU cache for slideshow display variants, so repeat slideshow plays are smooth from the first viewing.
 - **Slideshow pace readout** — an optional in-app badge shows live elapsed/target timing while a slideshow plays.
 
-## What's new in v1.5.60–61
-
-A focused pass on **mobile / cellular performance** — browsing the library and public album galleries on a phone (5G) is now fast and smooth, with no dead taps or skipped photos. (v1.5.61 adds post-release hardening: a type-agnostic fallback so the fullscreen viewer never breaks on video/RAW originals, library queries filtered to images, and a few nav-feedback refinements.)
-
-- **Instant photo viewing on slow connections** — the library detail view, Prints detail, and public album viewers now paint a lightweight, screen-sized image immediately and stream the full-resolution original in behind it, instead of blocking on a multi-megabyte download. Opening or paging through photos no longer feels dead on cellular, and a slow metadata fetch can no longer blank or "fail" the photo.
-- **Fullscreen prev/next, no jump** — on mobile the fullscreen viewer leads with a connection-adaptive display variant (fills the screen right away, then sharpens) and prefetches the neighbouring photos, so prev/next is instant. A 350 ms nav guard means one tap advances exactly one photo (no more ghost-click skipping). Desktop keeps the plain high-res path.
-- **Public album grids ~20–30× lighter** — gallery thumbnails now load Immich's small thumbnail (~16 KB) instead of the ~600 KB preview, so a shared album opens fast on mobile data.
-- **Filtered-library sorting fixed** — applying a tile filter (e.g. a lens model) and then switching Upload date / Date taken no longer empties the grid; the filtered results sort client-side instead of falling back to a broken re-filter.
-- **Slideshow display variant** — slideshow images are server-resized via sharp at a connection-adaptive width (960 / 1280 / 1920 px), fixing black frames on poor wifi where the full original used to fail to decode. Originals still power the lightbox + pinch-zoom.
-
 ## What's new in v1.5
 
 - **In-Albums chips on every print and Recent photo** — see at a glance which Darkroom albums each image is in; click to jump straight to the album.
