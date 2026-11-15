@@ -4557,13 +4557,6 @@ async function showDetail(printId, navGen) {
           ${printAlbums.map(a => `<button class="album-chip" data-action="openAlbum" data-id="${a.id}" title="Open album">${a.title}</button>`).join('')}
         </div>
       ` : ''}
-      <div style="margin-top:0.75rem;padding-top:0.75rem;border-top:1px solid var(--border)">
-        <div style="display:flex;align-items:center;justify-content:space-between">
-          <div class="sessions-label">Tags &amp; Captions</div>
-          <button id="generate-tags-btn-print" class="btn btn-ghost btn-sm" data-action="generateTags" data-id="${print.immichId}">Generate</button>
-        </div>
-        <div id="generated-tags-panel-print"></div>
-      </div>
     </div>
     <div class="sessions-header">
       <div class="sessions-label">Print Sessions (${sessions.length})</div>
@@ -4576,6 +4569,7 @@ async function showDetail(printId, navGen) {
     ${sessions.map(s => {
       const fstop = s.fStop ? (s.fStop.startsWith('f/') ? s.fStop : 'f/' + s.fStop) : '';
       const isSplit = s.technique === 'Split Grade';
+      const isColor = s.technique === 'Color Head';
       const lowLabel = s.gradeLow || '#00';
       const highLabel = s.gradeHigh || '#5';
       const lowTime = s.gradeOO ? (s.gradeOO.toString().endsWith('s') ? s.gradeOO : s.gradeOO + 's') : '';
@@ -4585,6 +4579,8 @@ async function showDetail(printId, navGen) {
       let exposureLine = '';
       if (isSplit) {
         exposureLine = [fstop, lowLabel + ' → ' + lowTime, highLabel + ' → ' + highTime].filter(Boolean).join('  ·  ');
+      } else if (isColor) {
+        exposureLine = [fstop, formatFiltration(s), grade, singleTime].filter(Boolean).join('  ·  ');
       } else {
         exposureLine = [fstop, grade, singleTime].filter(Boolean).join('  ·  ');
       }
@@ -4596,9 +4592,11 @@ async function showDetail(printId, navGen) {
         </div>
         <div class="session-exposure">${exposureLine}</div>
         <div class="session-details">
-          ${s.enlarger ? `<span class="session-tag">Enlarger #${s.enlarger}</span>` : ''}
+          ${s.enlarger ? `<span class="session-tag">${/^\d+$/.test(String(s.enlarger).trim()) ? 'Enlarger #' + s.enlarger : 'Enlarger: ' + s.enlarger}</span>` : ''}
           ${s.lens ? `<span class="session-tag">Lens ${s.lens}</span>` : ''}
+          ${s.diaphragm ? `<span class="session-tag">Diaphragm ${s.diaphragm}</span>` : ''}
           ${s.paper ? `<span class="session-tag">${s.paper}</span>` : ''}
+          ${s.paperSize ? `<span class="session-tag">${s.paperSize} paper</span>` : ''}
         </div>
         ${s.dodgeBurn ? `<div class="session-notes">${s.dodgeBurn}</div>` : ''}
         ${s.notes ? `<div class="session-notes" style="margin-top:0.5rem;border-color:var(--border);color:var(--text-dim)">${s.notes}</div>` : ''}
@@ -4608,6 +4606,13 @@ async function showDetail(printId, navGen) {
         </div>
       </div>
     `}).join('')}
+    <div style="padding:1rem">
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <div class="sessions-label">Tags &amp; Captions</div>
+        <button id="generate-tags-btn-print" class="btn btn-ghost btn-sm" data-action="generateTags" data-id="${print.immichId}">Generate</button>
+      </div>
+      <div id="generated-tags-panel-print"></div>
+    </div>
       </div>
   `;
   loadGeneratedTagsPanel({ assetId: print.immichId, title: print.title, tags: print.tags || [], allowAddTag: true, kind: 'prints', panelId: 'generated-tags-panel-print', btnId: 'generate-tags-btn-print' });
@@ -4836,6 +4841,19 @@ function openAddSessionModal() {
   document.getElementById('session-modal-title').textContent = 'Log Print Session';
   clearSessionForm();
   const now = new Date(); const localDate = now.getFullYear() + '-' + String(now.getMonth()+1).padStart(2,'0') + '-' + String(now.getDate()).padStart(2,'0'); document.getElementById('s-date').value = localDate;
+  // Carry the setup (size, enlarger, lens, paper, paper size, technique) over from this
+  // print's most recent session — the exposure itself starts blank.
+  const print = state.prints.find(p => p.id === state.sessionPrintId);
+  const last = (print?.sessions || []).slice().sort((a, b) => Number(b.id) - Number(a.id))[0];
+  if (last) {
+    document.getElementById('s-size').value = last.printSize || '';
+    document.getElementById('s-enlarger').value = last.enlarger || '';
+    document.getElementById('s-lens').value = last.lens || '';
+    setPaperValue(last.paper);
+    document.getElementById('s-paper-size').value = last.paperSize || '';
+    setTechnique(techniqueKey(last.technique));
+    document.getElementById('s-diaphragm').value = last.diaphragm || '';
+  }
   document.getElementById('add-session-modal').classList.add('active');
 }
 
@@ -4851,7 +4869,8 @@ function editSession(sessionId) {
   document.getElementById('s-size').value = s.printSize || '';
   document.getElementById('s-enlarger').value = s.enlarger || '';
   document.getElementById('s-lens').value = s.lens || '';
-  const paperSelect = document.getElementById('s-paper'); const knownPapers = ['Fomabrom Variant 111 Glossy','Ilford Multigrade FB Classic Glossy','Ilford Multigrade FB Warmtone Glossy','Ilford Multigrade RC Deluxe']; if (s.paper && knownPapers.includes(s.paper)) { paperSelect.value = s.paper; document.getElementById('s-paper-other').style.display = 'none'; } else if (s.paper) { paperSelect.value = '__other__'; document.getElementById('s-paper-other').value = s.paper; document.getElementById('s-paper-other').style.display = 'block'; } else { paperSelect.value = ''; }
+  setPaperValue(s.paper);
+  document.getElementById('s-paper-size').value = s.paperSize || '';
   document.getElementById('s-dodgeburn').value = s.dodgeBurn || '';
   document.getElementById('s-notes').value = s.notes || '';
   if (s.technique === 'Split Grade') {
@@ -4861,6 +4880,15 @@ function editSession(sessionId) {
     document.getElementById('s-grade-high').value = s.gradeHigh || '#5';
     document.getElementById('s-g00').value = s.gradeOO || '';
     document.getElementById('s-g5').value = s.grade5 || '';
+  } else if (s.technique === 'Color Head') {
+    setTechnique('color');
+    document.getElementById('s-fstop-color').value = s.fStop || '';
+    document.getElementById('s-filter-y').value = s.filterY ?? '';
+    document.getElementById('s-filter-m').value = s.filterM ?? '';
+    document.getElementById('s-grade-color').value = s.grade || '';
+    document.getElementById('s-time-color').value = s.time || '';
+    document.getElementById('s-diaphragm').value = s.diaphragm || '';
+    syncColorPreset();
   } else {
     setTechnique('single');
     document.getElementById('s-fstop').value = s.fStop || '';
@@ -4871,8 +4899,98 @@ function editSession(sessionId) {
 }
 
 function clearSessionForm() {
-  ['s-date','s-size','s-enlarger','s-lens','s-paper','s-fstop','s-grade','s-time','s-fstop-split','s-grade-low','s-grade-high','s-g00','s-g5','s-dodgeburn','s-notes'].forEach(id => { document.getElementById(id).value = ''; });
+  ['s-date','s-size','s-enlarger','s-lens','s-paper','s-paper-other','s-paper-size','s-fstop','s-grade','s-time','s-fstop-split','s-grade-low','s-grade-high','s-g00','s-g5','s-fstop-color','s-color-preset','s-filter-y','s-filter-m','s-grade-color','s-time-color','s-diaphragm','s-dodgeburn','s-notes'].forEach(id => { document.getElementById(id).value = ''; });
+  document.getElementById('s-paper-other').style.display = 'none';
   setTechnique('single');
+  populateSessionSuggestions();
+}
+
+const KNOWN_PAPERS = ['Fomabrom Variant 111 Glossy','Ilford Multigrade FB Classic Glossy','Ilford Multigrade FB Warmtone Glossy','Ilford Multigrade RC Deluxe','Ilford Multigrade RC Deluxe Pearl'];
+
+function setPaperValue(paper) {
+  const sel = document.getElementById('s-paper');
+  const other = document.getElementById('s-paper-other');
+  if (paper && KNOWN_PAPERS.includes(paper)) { sel.value = paper; other.value = ''; other.style.display = 'none'; }
+  else if (paper) { sel.value = '__other__'; other.value = paper; other.style.display = 'block'; }
+  else { sel.value = ''; other.value = ''; other.style.display = 'none'; }
+}
+
+function techniqueKey(label) {
+  return label === 'Split Grade' ? 'split' : label === 'Color Head' ? 'color' : 'single';
+}
+
+// All sessions across all prints, newest first (session ids are timestamps).
+function allSessionsNewestFirst() {
+  return state.prints.flatMap(p => p.sessions || []).sort((a, b) => Number(b.id) - Number(a.id));
+}
+
+// Fill the Enlarger / Lens autocomplete lists from what's been used before,
+// most recent first, de-duplicated case-insensitively (keeps the newest spelling).
+function populateSessionSuggestions() {
+  const sessions = allSessionsNewestFirst();
+  const fill = (listId, field) => {
+    const seen = new Set(); const vals = [];
+    for (const s of sessions) {
+      const v = (s[field] || '').toString().trim();
+      if (!v || seen.has(v.toLowerCase())) continue;
+      seen.add(v.toLowerCase()); vals.push(v);
+    }
+    const esc = t => t.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+    document.getElementById(listId).innerHTML = vals.map(v => `<option value="${esc(v)}"></option>`).join('');
+  };
+  fill('enlarger-options', 'enlarger');
+  fill('lens-options', 'lens');
+  fill('diaphragm-options', 'diaphragm');
+}
+
+// Picking an enlarger: switch to the technique last used on it (Color Head
+// for the Durst) and fill an empty Lens box with the lens last used on it.
+function onEnlargerChosen() {
+  const v = document.getElementById('s-enlarger').value.trim().toLowerCase();
+  if (!v) return;
+  const last = allSessionsNewestFirst().find(s => (s.enlarger || '').toString().trim().toLowerCase() === v);
+  if (!last) return;
+  const key = techniqueKey(last.technique);
+  if (key === 'color' || state.technique === 'color') setTechnique(key);
+  const lens = document.getElementById('s-lens');
+  if (!lens.value.trim() && last.lens) lens.value = last.lens;
+  const dia = document.getElementById('s-diaphragm');
+  if (key === 'color' && !dia.value.trim() && last.diaphragm) dia.value = last.diaphragm;
+}
+
+function formatFiltration(s) {
+  const y = s.filterY, m = s.filterM;
+  if ((y === null || y === undefined || y === '') && (m === null || m === undefined || m === '')) return '';
+  return `${Number(y) || 0}Y / ${Number(m) || 0}M`;
+}
+
+function parseFilter(id) {
+  const v = document.getElementById(id).value.trim();
+  if (v === '') return null;
+  const n = Math.round(Number(v));
+  return Number.isFinite(n) ? Math.max(0, Math.min(170, n)) : null;
+}
+
+// Preset chosen → fill Y, M and grade.
+function applyColorPreset() {
+  const v = document.getElementById('s-color-preset').value;
+  if (!v) return;
+  const [, y, m, grade] = v.split('|');
+  document.getElementById('s-filter-y').value = y;
+  document.getElementById('s-filter-m').value = m;
+  document.getElementById('s-grade-color').value = '#' + grade;
+}
+
+// Y/M typed by hand → select the matching preset, or Custom.
+function syncColorPreset() {
+  const sel = document.getElementById('s-color-preset');
+  if (parseFilter('s-filter-y') === null && parseFilter('s-filter-m') === null) { sel.value = ''; return; }
+  const y = parseFilter('s-filter-y') ?? 0, m = parseFilter('s-filter-m') ?? 0;
+  const grade = document.getElementById('s-grade-color').value.replace(/^#/, '');
+  const opts = [...sel.options].filter(o => o.value);
+  const matches = opts.filter(o => { const [, oy, om] = o.value.split('|'); return Number(oy) === y && Number(om) === m; });
+  const exact = matches.find(o => o.value.split('|')[3] === grade);
+  sel.value = (exact || matches[0])?.value || '';
 }
 
 function closeModal(id) { document.getElementById(id).classList.remove('active'); }
@@ -4881,8 +4999,10 @@ function setTechnique(t) {
   state.technique = t;
   document.getElementById('t-single').classList.toggle('active', t === 'single');
   document.getElementById('t-split').classList.toggle('active', t === 'split');
+  document.getElementById('t-color').classList.toggle('active', t === 'color');
   document.getElementById('single-fields').classList.toggle('visible', t === 'single');
   document.getElementById('split-fields').classList.toggle('visible', t === 'split');
+  document.getElementById('color-fields').classList.toggle('visible', t === 'color');
 }
 
 function searchImmich(q) {
@@ -5253,16 +5373,21 @@ async function regenerateSuggestedTitle() {
 
 async function saveSession() {
   const isSplit = state.technique === 'split';
+  const isColor = state.technique === 'color';
   const session = {
     date: document.getElementById('s-date').value,
     printSize: document.getElementById('s-size').value,
     enlarger: document.getElementById('s-enlarger').value,
     lens: document.getElementById('s-lens').value,
     paper: getPaperValue(),
-    technique: isSplit ? 'Split Grade' : 'Single Grade',
-    fStop: isSplit ? document.getElementById('s-fstop-split').value : document.getElementById('s-fstop').value,
-    grade: isSplit ? null : document.getElementById('s-grade').value,
-    time: isSplit ? null : document.getElementById('s-time').value,
+    paperSize: document.getElementById('s-paper-size').value.trim(),
+    technique: isSplit ? 'Split Grade' : isColor ? 'Color Head' : 'Single Grade',
+    fStop: document.getElementById(isSplit ? 's-fstop-split' : isColor ? 's-fstop-color' : 's-fstop').value,
+    grade: isSplit ? null : document.getElementById(isColor ? 's-grade-color' : 's-grade').value,
+    time: isSplit ? null : document.getElementById(isColor ? 's-time-color' : 's-time').value,
+    filterY: isColor ? parseFilter('s-filter-y') : null,
+    filterM: isColor ? parseFilter('s-filter-m') : null,
+    diaphragm: isColor ? document.getElementById('s-diaphragm').value.trim() : null,
     gradeLow: isSplit ? document.getElementById('s-grade-low').value : null,
     gradeHigh: isSplit ? document.getElementById('s-grade-high').value : null,
     gradeOO: isSplit ? document.getElementById('s-g00').value : null,
@@ -6231,9 +6356,14 @@ function wireListeners() {
   w('immich-search', 'input', (e) => searchImmich(e.target.value));
   w('btn-create-print', 'click', () => createPrint());
   w('btn-close-add-session', 'click', () => closeModal('add-session-modal'));
-  w('select-paper', 'change', (e) => handlePaperChange(e.target));
+  w('s-paper', 'change', (e) => handlePaperChange(e.target));
   w('t-single', 'click', () => setTechnique('single'));
   w('t-split', 'click', () => setTechnique('split'));
+  w('t-color', 'click', () => setTechnique('color'));
+  w('s-enlarger', 'change', () => onEnlargerChosen());
+  w('s-color-preset', 'change', () => applyColorPreset());
+  w('s-filter-y', 'input', () => syncColorPreset());
+  w('s-filter-m', 'input', () => syncColorPreset());
   w('btn-save-session', 'click', () => saveSession());
 
   // Delegated handlers for dynamic form inputs

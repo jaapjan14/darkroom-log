@@ -1,5 +1,65 @@
 # Changelog
 
+## v1.5.146 (2026-11-14)
+
+### Added: Paper size on print sessions
+
+- The session form has a **Paper Size** box under Paper, with suggestions 5x7, 8x10, 11x14 and 16x20 (any value can be typed). Stored as the new session field `paperSize`.
+- A session card shows it as a chip next to the paper name, e.g. `11x14 paper`. The size in the card's top-right corner is still the **image** size (`printSize`).
+- New sessions copy the paper size from the print's latest session, like size, enlarger, lens and paper.
+- `POST /api/prints/:id/sessions` now keeps `paperSize` (server.js; needs a container restart). Editing (PUT) already passed it through.
+- `app.js?v=310` → `311`; service worker `darkroom-v181` → `darkroom-v182`.
+
+### Data
+
+- `printSize` means the image size, not the paper. Ten Nov 7–9 sessions had `10x8` (the paper): the six Mamiya 7 sessions (Two Sentinels, Grain Terminal, Gull Watch ×2, Into the City, Load Limit) are now `9.5x7.5`; the four Leica sessions (Chin in Hands, The Wink, Snow Dusted Ridge ×2) are now `9x6`. The five Nov 1 sessions with `7x5` (Chin In Hand ×4, Islands of Diablo Lake: 35mm on 5x7) are now `6x4`.
+- Added the 2026-11-14 Two Sentinels 11x14 session (13.3x10.5, f/8, 34Y/45M, #3, 32s with a 12s burn on the sky).
+- `paperSize` filled in on 58 sessions from their image size: 9x6, 9.5x7.5, 6x6, 7x7 → 8x10; 6x4 → 5x7; 10x10, 12x8, 12x9, 13x8⅔, 13x9, 13.3x10.5 → 11x14; 19x13 → 16x20. Buddha Statues and Water Tower 1 have no size and were left blank.
+- Backups: `/data/prints.json.bak-2026-11-14` … `bak-2026-11-14f`.
+
+## v1.5.145 (2026-11-01)
+
+### Changed: Tags & Captions moved below the print sessions
+
+- On a print's page, the **Tags & Captions** panel (Generate button and output) now sits at the bottom, after all the session cards, instead of between the print details and the sessions. The session log comes first. Same panel, same ids, nothing else changed.
+- `app.js?v=309` → `310`; service worker `darkroom-v180` → `darkroom-v181`.
+- Client-only: just reload.
+
+## v1.5.144 (2026-11-01)
+
+### Added: Color Head sessions for the home Durst
+
+- **Color Head** is a third technique next to Single Grade and Split Grade, for the Durst Modular 70's dichroic head. It has Yellow and Magenta boxes (0–170), a **Grade preset** list from Ilford's Multigrade table for Durst 170M heads (single filter: 2 = 0/0, 1½ = 30Y, 2½ = 20M, 3 = 45M; dual filter: 1½ = 65Y/15M, 2 = 52Y/20M, 2½ = 42Y/28M, 3 = 34Y/45M), a Grade box, a Time box and a **Diaphragm (density)** box. Picking a preset fills Y, M and grade. Typing Y/M by hand selects the matching preset, or Custom.
+- Stored as new session fields `filterY`, `filterM` (numbers) and `diaphragm` (text), with technique `"Color Head"`. A session shows as `f/8 · 52Y / 20M · #2 · 14s`, with a "Diaphragm …" tag.
+- **Enlarger, Lens and Diaphragm autocomplete:** the boxes suggest values used before, most recent first, without case duplicates (e.g. "a4"/"A4").
+- **Choosing an enlarger** switches to the technique last used on it, which means Color Head for the Durst. Choosing a community enlarger switches away from Color Head. An empty Lens box (and an empty Diaphragm box, for Color Head) gets filled with the value last used on that enlarger.
+- **New sessions copy the setup from the print's latest session:** size, enlarger, lens, paper, technique and diaphragm. Exposure, filtration, dodge/burn and notes start blank.
+- Paper list: added **Ilford Multigrade RC Deluxe Pearl**.
+
+### Fixed
+
+- **"Other..." paper box never appeared.** The paper `<select>` had two `id` attributes (`s-paper` and `select-paper`). The browser keeps only the first, so the change handler wired to `select-paper` never attached. Editing a session that had an unlisted paper still worked, because that code shows the box directly.
+- **Split-grade labels lost on new sessions.** `POST /api/prints/:id/sessions` copies fields from a fixed list that didn't include `gradeLow`/`gradeHigh`, so a new split-grade session's low/high grade labels were dropped. The display then fell back to #00/#5. Editing (PUT) was unaffected. The list now includes `gradeLow`, `gradeHigh`, `filterY`, `filterM` and `diaphragm`.
+- The enlarger tag shows "Enlarger #7" only for numbered enlargers. Named ones show "Enlarger: Durst M70 (home)" instead of "Enlarger #Durst M70 (home)".
+
+### Data
+
+- The 5 sessions logged 2026-11-01 (Islands of Diablo Lake, Chin In Hand) were changed to technique Color Head with a plain grade and diaphragm "dimmest". Filtration had already been stored in `filterY`/`filterM`. Backup: `/data/prints.json.bak-20261101-before-home-session` (before the prints were added).
+
+### Versions
+
+- `app.js?v=308` → `309`; service worker `darkroom-v179` → `darkroom-v180`; package.json `1.5.142` → `1.5.144` (it had missed the 1.5.143 bump).
+- Server change (`server.js`), so it needs a container restart.
+
+## v1.5.143 (2026-10-27)
+
+### Fix: slideshow title card unreadable on phones
+
+- The slideshow title was a fixed 64px, uppercase, with wide letter spacing, so on a phone long album names broke one word per line and ran off both edges of the screen ("MAMIYA 7 NORTH CASCADE PERSPECTIVE" showed as "AMIYA 7 / NORTH / CASCADE / RSPECTI"). On screens 600px or narrower the title now scales with the width (about 31px on an iPhone, 22–40px range) with letter spacing 0.15em, and the byline/location/dates/count lines drop to 11px. Desktop is unchanged.
+- Same rule added in both places the title card is styled: `album.html` (public album slideshow) and `index.html` (in-app slideshow).
+- Service worker cache bumped `darkroom-v178` → `darkroom-v179`.
+- Client-only: just reload.
+
 ## v1.5.142 (2026-10-20)
 
 ### Fix: no divider line under the People row

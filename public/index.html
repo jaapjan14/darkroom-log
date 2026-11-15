@@ -110,8 +110,8 @@
   .technique-toggle { display: flex; gap: 1px; margin-bottom: 1rem; }
   .technique-btn { flex: 1; padding: 0.6rem; background: var(--surface2); border: 1px solid var(--border); color: var(--text-dim); font-family: 'IBM Plex Mono', monospace; font-size: 11px; cursor: pointer; text-align: center; transition: all 0.15s; }
   .technique-btn.active { background: var(--safe-glow); border-color: var(--safe); color: var(--safe); }
-  .split-grade-fields, .single-grade-fields { display: none; }
-  .split-grade-fields.visible, .single-grade-fields.visible { display: block; }
+  .split-grade-fields, .single-grade-fields, .color-head-fields { display: none; }
+  .split-grade-fields.visible, .single-grade-fields.visible, .color-head-fields.visible { display: block; }
   /* SORT & TAGS */
   .sort-label { font-family: 'IBM Plex Mono', monospace; font-size: 9px; letter-spacing: 0.15em; text-transform: uppercase; color: var(--text-dim); margin-right: 0.25rem; }
   .sort-btn { font-family: 'IBM Plex Mono', monospace; font-size: 10px; padding: 0.3rem 0.6rem; background: transparent; border: 1px solid var(--border); color: var(--text-dim); cursor: pointer; transition: all 0.15s; }
@@ -252,6 +252,7 @@
   .slideshow-counter.ss-hidden { opacity: 0; }
   .ss-title-main { font-family: 'IBM Plex Mono', monospace; font-size: 64px; letter-spacing: 0.25em; text-transform: uppercase; color: #c8611a; font-weight: 300; line-height: 1.2; }
   .ss-title-sub { font-family: 'IBM Plex Mono', monospace; font-size: 14px; letter-spacing: 0.2em; text-transform: uppercase; color: #6b6560; margin-bottom: 0.25rem; }
+  @media (max-width:600px){ .ss-title-main{font-size:clamp(22px,8vw,40px);letter-spacing:0.15em} .ss-title-sub{font-size:11px;letter-spacing:0.15em} }
   /* PUBLIC SHARE */
   .share-link-box { background: var(--surface2); border: 1px solid var(--border); padding: 0.75rem 1rem; font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--safe); word-break: break-all; cursor: pointer; }
   /* FULLSCREEN */
@@ -807,24 +808,37 @@
       <div class="form-row">
         <div class="form-group">
           <label class="form-label">Enlarger</label>
-          <input type="text" id="s-enlarger" placeholder="e.g. 7">
+          <input type="text" id="s-enlarger" placeholder="e.g. 7" list="enlarger-options" autocomplete="off">
+          <datalist id="enlarger-options"></datalist>
         </div>
         <div class="form-group">
           <label class="form-label">Lens</label>
-          <input type="text" id="s-lens" placeholder="e.g. A4">
+          <input type="text" id="s-lens" placeholder="e.g. A4" list="lens-options" autocomplete="off">
+          <datalist id="lens-options"></datalist>
         </div>
       </div>
       <div class="form-group">
         <label class="form-label">Paper</label>
-        <select id="s-paper" id="select-paper">
+        <select id="s-paper">
           <option value="">Select paper...</option>
           <option value="Fomabrom Variant 111 Glossy">Fomabrom Variant 111 Glossy</option>
           <option value="Ilford Multigrade FB Classic Glossy">Ilford Multigrade FB Classic Glossy</option>
           <option value="Ilford Multigrade FB Warmtone Glossy">Ilford Multigrade FB Warmtone Glossy</option>
           <option value="Ilford Multigrade RC Deluxe">Ilford Multigrade RC Deluxe</option>
+          <option value="Ilford Multigrade RC Deluxe Pearl">Ilford Multigrade RC Deluxe Pearl</option>
           <option value="__other__">Other...</option>
         </select>
         <input type="text" id="s-paper-other" placeholder="Enter paper name" style="display:none;margin-top:0.5rem">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Paper Size</label>
+        <input type="text" id="s-paper-size" placeholder="e.g. 8x10" list="paper-size-options" autocomplete="off">
+        <datalist id="paper-size-options">
+          <option value="5x7"></option>
+          <option value="8x10"></option>
+          <option value="11x14"></option>
+          <option value="16x20"></option>
+        </datalist>
       </div>
       <div class="section-divider">Exposure</div>
       <div class="form-group">
@@ -832,6 +846,7 @@
         <div class="technique-toggle">
           <div class="technique-btn active" id="t-single">Single Grade</div>
           <div class="technique-btn" id="t-split">Split Grade</div>
+          <div class="technique-btn" id="t-color">Color Head</div>
         </div>
       </div>
       <div class="single-grade-fields visible" id="single-fields">
@@ -849,6 +864,58 @@
           <label class="form-label">Time</label>
           <input type="text" id="s-time" placeholder="e.g. 35s">
         </div>
+      </div>
+      <div class="color-head-fields" id="color-fields">
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">f/Stop</label>
+            <input type="text" id="s-fstop-color" placeholder="8" class="input-aperture">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Grade preset</label>
+            <select id="s-color-preset">
+              <option value="">Custom</option>
+              <optgroup label="Single filter">
+                <option value="s|0|0|2">2 · 0Y / 0M</option>
+                <option value="s|30|0|1.5">1½ · 30Y</option>
+                <option value="s|0|20|2.5">2½ · 20M</option>
+                <option value="s|0|45|3">3 · 45M</option>
+              </optgroup>
+              <optgroup label="Dual filter">
+                <option value="d|65|15|1.5">1½ · 65Y / 15M</option>
+                <option value="d|52|20|2">2 · 52Y / 20M</option>
+                <option value="d|42|28|2.5">2½ · 42Y / 28M</option>
+                <option value="d|34|45|3">3 · 34Y / 45M</option>
+              </optgroup>
+            </select>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Yellow (0–170)</label>
+            <input type="number" id="s-filter-y" min="0" max="170" step="1" inputmode="numeric" placeholder="0">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Magenta (0–170)</label>
+            <input type="number" id="s-filter-m" min="0" max="170" step="1" inputmode="numeric" placeholder="0">
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Diaphragm (density)</label>
+          <input type="text" id="s-diaphragm" placeholder="e.g. dimmest, open, 0.30" list="diaphragm-options" autocomplete="off">
+          <datalist id="diaphragm-options"></datalist>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Grade</label>
+            <input type="text" id="s-grade-color" placeholder="2" class="input-hash">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Time</label>
+            <input type="text" id="s-time-color" placeholder="e.g. 14s">
+          </div>
+        </div>
+        <div class="form-hint" style="font-size:11px;color:var(--text-dim);margin:-0.25rem 0 1rem">Ilford Multigrade table for Durst 170M heads.</div>
       </div>
       <div class="split-grade-fields" id="split-fields">
         <div class="form-group">
@@ -891,7 +958,7 @@
 
 <script src="/zoom.js?v=2" defer></script>
 <script src="/audio-engine.js?v=10" defer></script>
-<script src="/app.js?v=308" defer></script>
+<script src="/app.js?v=311" defer></script>
 <script>
 // Service worker - registers sw.js for thumb stale-while-revalidate + shell
 // cache. Was actively unregistered v1.3.0 -> v1.5.61; re-enabled v1.5.62.

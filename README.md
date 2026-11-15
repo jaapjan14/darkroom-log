@@ -15,6 +15,16 @@ header, optional slideshow, and pinch-zoom on every photo. No login required for
 
 ![Public album with branded header](screenshots/03-public-album.png)
 
+## What's new in v1.5.143–146
+
+Print sessions for a color-head enlarger, plus paper size.
+
+- **Paper size on print sessions.** The session form has a Paper Size box (5x7, 8x10, 11x14 and 16x20 suggested, or type your own), shown as a chip like `11x14 paper` next to the paper name. The size in the card's corner stays the image size. New sessions copy it from the print's latest session. Needs a container restart, not a recreate.
+- **Color Head sessions.** A third technique next to Single Grade and Split Grade, for dichroic heads like the Durst Modular 70: Yellow and Magenta boxes (0–170), a grade preset list from Ilford's Multigrade table for 170M heads, and a Diaphragm (density) box. Shows as `f/8 · 52Y / 20M · #2 · 14s`.
+- **Enlarger, Lens and Diaphragm suggest values you've used before.** Picking an enlarger switches to the technique last used on it and fills in its lens. New sessions copy the setup (size, enlarger, lens, paper, technique) from the print's latest session.
+- **Tags & Captions moved below the print sessions** on a print's page.
+- **Fixed:** the slideshow title card was unreadable on phones (long album names broke one word per line); the "Other..." paper box never appeared; new split-grade sessions lost their low/high grade labels.
+
 ## What's new in v1.5.135–142
 
 Name the people in your photos without leaving Darkroom, and a few fixes.
