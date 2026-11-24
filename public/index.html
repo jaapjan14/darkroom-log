@@ -840,6 +840,13 @@
           <option value="16x20"></option>
         </datalist>
       </div>
+      <div class="form-group">
+        <label class="form-label">Developer</label>
+        <input type="text" id="s-developer" placeholder="e.g. Ilford Multigrade 1+9" list="developer-options" autocomplete="off">
+        <datalist id="developer-options">
+          <option value="Ilford Multigrade 1+9"></option>
+        </datalist>
+      </div>
       <div class="section-divider">Exposure</div>
       <div class="form-group">
         <label class="form-label">Technique</label>
@@ -958,7 +965,7 @@
 
 <script src="/zoom.js?v=2" defer></script>
 <script src="/audio-engine.js?v=10" defer></script>
-<script src="/app.js?v=311" defer></script>
+<script src="/app.js?v=312" defer></script>
 <script>
 // Service worker - registers sw.js for thumb stale-while-revalidate + shell
 // cache. Was actively unregistered v1.3.0 -> v1.5.61; re-enabled v1.5.62.

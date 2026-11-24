@@ -1,5 +1,31 @@
 # Changelog
 
+## v1.5.148 (2026-11-23)
+
+### Fixed: Olympus lens spelling (Zuiko)
+
+- `lib/gear-catalog.js`: the Olympus lenses were spelled "Zukio". They are now `Olympus Zuiko 28mm f/2.8` → `#zuiko28`, `35mm f/2.8` → `#zuiko35`, `50mm f/1.8` → `#zuiko50` and the new `200mm f/4` → `#zuiko200` (28mm and 200mm were missing before and fell back to the generic slug).
+- The old "Olympus Zukio …" names stay as aliases that map to the new slugs, so assets not yet republished from Lightroom also get the right hashtag.
+- The image files themselves were corrected outside Darkroom (277 files); Immich picks the new lens names up when they're republished. Server-side change: needs a container restart.
+- Backups: `lib/gear-catalog.js.bak-zuiko-20261123`, `CHANGELOG.md.bak-zuiko-20261123`, `package.json.bak-zuiko-20261123`.
+
+## v1.5.147 (2026-11-18)
+
+### Added: Developer on print sessions
+
+- The session form has a **Developer** box under Paper Size, with the suggestion `Ilford Multigrade 1+9` (any value can be typed). Stored as the new session field `developer`.
+- A session card shows it as a chip next to the paper chips, e.g. `Developer: Ilford Multigrade 1+9`.
+- New sessions copy the developer from the print's latest session, like paper and paper size.
+- `POST /api/prints/:id/sessions` now keeps `developer` (server.js; needs a container restart). Editing (PUT) already passed it through.
+- `app.js?v=311` → `312`; service worker `darkroom-v182` → `darkroom-v183`.
+
+### Data
+
+- `developer` = `Ilford Multigrade 1+9` filled in on all 18 home Durst sessions (2026-11-01 → 2026-11-16). Non-Durst sessions left blank. "· Multigrade liquid 1+9" removed from those 18 sessions' notes, since the chip now shows it.
+- Roaster's burn now records its filtration: `Burn #0 (100Y/5M) f/11 +12s`.
+- Added two 2026-11-16 prints: **Roaster** (2026-11-10_030_leicam4, FB Classic 8x10, 9x6, 52Y/20M #2, f/11, 23s, dodge bottom tray 5s, #0 burn +12s handle/pipe elbow, fixer 1+4 two bath 30s each) and **Slipping Away** (2026-09-05_009_leicam4-Edit, FB Classic 8x10, 9x6, 52Y/20M #2, f/11, 20s).
+- Backups: `/data/prints.json.bak-2026-11-18` … `bak-2026-11-18f`; code backups `*.bak-developer-20261118`.
+
 ## v1.5.146 (2026-11-14)
 
 ### Added: Paper size on print sessions

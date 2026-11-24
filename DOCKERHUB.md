@@ -19,6 +19,11 @@ header, optional slideshow, and pinch-zoom on every photo. No login required for
 
 **Immich compatibility:** actively run in production against **Immich v3.4.1** (upgraded 2026-11-12, audited clean against this image). Talks to Immich entirely through its REST API (asset/search/album/tag endpoints), so it isn't tied to Immich's internal ML/vector-search backend — the v3 migration (pgvecto.rs → VectorChord) needed no changes on Darkroom's side. Not tested against Immich versions older than v3. Note: Immich v3.2.0 formally deprecated the "flat" search endpoints this app's Immich integration is built on, with removal planned for a future Immich v4 — no impact today, but a v4 upgrade will require a search-layer rewrite here.
 
+## What's new in v1.5.147–148
+
+- **Developer on print sessions.** A Developer box under Paper Size (e.g. `Ilford Multigrade 1+9`), shown as a chip on the session card and copied to new sessions from the print's latest one. Needs a container restart.
+- **Olympus Zuiko lens hashtags.** Zuiko 28mm, 35mm, 50mm and 200mm now get proper tags (`#zuiko28` … `#zuiko200`); the old misspelled "Zukio" names map to the same tags.
+
 ## What's new in v1.5.143–146
 
 Print sessions for a color-head enlarger, plus paper size.

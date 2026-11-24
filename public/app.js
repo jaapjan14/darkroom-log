@@ -4597,6 +4597,7 @@ async function showDetail(printId, navGen) {
           ${s.diaphragm ? `<span class="session-tag">Diaphragm ${s.diaphragm}</span>` : ''}
           ${s.paper ? `<span class="session-tag">${s.paper}</span>` : ''}
           ${s.paperSize ? `<span class="session-tag">${s.paperSize} paper</span>` : ''}
+          ${s.developer ? `<span class="session-tag">Developer: ${s.developer}</span>` : ''}
         </div>
         ${s.dodgeBurn ? `<div class="session-notes">${s.dodgeBurn}</div>` : ''}
         ${s.notes ? `<div class="session-notes" style="margin-top:0.5rem;border-color:var(--border);color:var(--text-dim)">${s.notes}</div>` : ''}
@@ -4841,7 +4842,7 @@ function openAddSessionModal() {
   document.getElementById('session-modal-title').textContent = 'Log Print Session';
   clearSessionForm();
   const now = new Date(); const localDate = now.getFullYear() + '-' + String(now.getMonth()+1).padStart(2,'0') + '-' + String(now.getDate()).padStart(2,'0'); document.getElementById('s-date').value = localDate;
-  // Carry the setup (size, enlarger, lens, paper, paper size, technique) over from this
+  // Carry the setup (size, enlarger, lens, paper, paper size, developer, technique) over from this
   // print's most recent session — the exposure itself starts blank.
   const print = state.prints.find(p => p.id === state.sessionPrintId);
   const last = (print?.sessions || []).slice().sort((a, b) => Number(b.id) - Number(a.id))[0];
@@ -4851,6 +4852,7 @@ function openAddSessionModal() {
     document.getElementById('s-lens').value = last.lens || '';
     setPaperValue(last.paper);
     document.getElementById('s-paper-size').value = last.paperSize || '';
+    document.getElementById('s-developer').value = last.developer || '';
     setTechnique(techniqueKey(last.technique));
     document.getElementById('s-diaphragm').value = last.diaphragm || '';
   }
@@ -4871,6 +4873,7 @@ function editSession(sessionId) {
   document.getElementById('s-lens').value = s.lens || '';
   setPaperValue(s.paper);
   document.getElementById('s-paper-size').value = s.paperSize || '';
+  document.getElementById('s-developer').value = s.developer || '';
   document.getElementById('s-dodgeburn').value = s.dodgeBurn || '';
   document.getElementById('s-notes').value = s.notes || '';
   if (s.technique === 'Split Grade') {
@@ -4899,7 +4902,7 @@ function editSession(sessionId) {
 }
 
 function clearSessionForm() {
-  ['s-date','s-size','s-enlarger','s-lens','s-paper','s-paper-other','s-paper-size','s-fstop','s-grade','s-time','s-fstop-split','s-grade-low','s-grade-high','s-g00','s-g5','s-fstop-color','s-color-preset','s-filter-y','s-filter-m','s-grade-color','s-time-color','s-diaphragm','s-dodgeburn','s-notes'].forEach(id => { document.getElementById(id).value = ''; });
+  ['s-date','s-size','s-enlarger','s-lens','s-paper','s-paper-other','s-paper-size','s-developer','s-fstop','s-grade','s-time','s-fstop-split','s-grade-low','s-grade-high','s-g00','s-g5','s-fstop-color','s-color-preset','s-filter-y','s-filter-m','s-grade-color','s-time-color','s-diaphragm','s-dodgeburn','s-notes'].forEach(id => { document.getElementById(id).value = ''; });
   document.getElementById('s-paper-other').style.display = 'none';
   setTechnique('single');
   populateSessionSuggestions();
@@ -5381,6 +5384,7 @@ async function saveSession() {
     lens: document.getElementById('s-lens').value,
     paper: getPaperValue(),
     paperSize: document.getElementById('s-paper-size').value.trim(),
+    developer: document.getElementById('s-developer').value.trim(),
     technique: isSplit ? 'Split Grade' : isColor ? 'Color Head' : 'Single Grade',
     fStop: document.getElementById(isSplit ? 's-fstop-split' : isColor ? 's-fstop-color' : 's-fstop').value,
     grade: isSplit ? null : document.getElementById(isColor ? 's-grade-color' : 's-grade').value,

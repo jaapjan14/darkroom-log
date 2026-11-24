@@ -1866,6 +1866,7 @@ app.post('/api/prints/:id/sessions', requireAuth, (req, res) => {
     paper: req.body.paper,
     printSize: req.body.printSize,
     paperSize: req.body.paperSize,
+    developer: req.body.developer,
     technique: req.body.technique,
     grade: req.body.grade,
     gradeOO: req.body.gradeOO,
